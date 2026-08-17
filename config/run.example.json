@@ -1,0 +1,16 @@
+{
+  "platform": "tiktok",
+  "input": "../data/examples/tiktok-urls.txt",
+  "format": "auto",
+  "concurrency": 5,
+  "targetRpm": 300,
+  "outputDir": "../output",
+  "strict": false,
+  "retry": {
+    "maxAttempts": 3,
+    "initialDelayMs": 250,
+    "maxDelayMs": 10000,
+    "backoffFactor": 2,
+    "jitter": true
+  }
+}

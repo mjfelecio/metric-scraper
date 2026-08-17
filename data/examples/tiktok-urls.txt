@@ -1,0 +1,12 @@
+# Placeholder batch file — newline-delimited input.
+# These are NOT real TikTok posts. They exist only to exercise the pipeline:
+# URL normalization, de-duplication, queueing, retries and JSONL output.
+# Replace them with real URLs once platform acquisition is implemented.
+
+https://www.tiktok.com/@example.account/video/0000000000000000001
+https://www.tiktok.com/@example.account/video/0000000000000000002?utm_source=placeholder
+https://vm.tiktok.com/PLACEHOLDER1/
+https://www.tiktok.com/@example.account/video/0000000000000000001
+
+this is not a url
+https://example.com/not-a-supported-platform

@@ -1,0 +1,5 @@
+# Mixed batch: routed per URL by host when no platform is forced.
+https://www.tiktok.com/@example.account/video/0000000000000000010
+https://www.instagram.com/reel/PLACEHOLDER0010/
+https://www.tiktok.com/@example.account/video/0000000000000000011
+https://www.instagram.com/p/PLACEHOLDER0011/
