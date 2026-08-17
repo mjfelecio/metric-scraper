@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Foundation for a TikTok + Instagram public engagement metrics scraper (platform acquisition intentionally not implemented).",
+  "description": "TikTok and Instagram public engagement metric snapshot pipeline.",
   "engines": {
     "node": ">=20.19"
   },

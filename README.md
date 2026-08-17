@@ -3,19 +3,18 @@
 A batch pipeline for collecting **public engagement metrics** from TikTok videos and
 Instagram Reels/video posts, as an append-only time series.
 
-> ## Status: foundation only — platform acquisition is NOT implemented
+> ## Status: TikTok canonical acquisition implemented
 >
-> `TikTokScraper` and `InstagramScraper` are deliberate placeholders. They perform no
-> network request and return an explicit `not_implemented` failure. **Every scrape
-> currently produces a row with `status: "error"`.** That is the intended behaviour of
-> this milestone, not a defect.
+> `TikTokScraper` fetches TikTok's first-party public embed pages anonymously and parses
+> their embedded hydration JSON. Canonical video and photo post URLs are accepted. It
+> requires post id, views, likes, comments and shares;
+> saves, author details and posting time remain nullable when TikTok omits them.
+> A second first-party player request replaces rounded embed likes, comments and shares
+> with exact integers. TikTok does not expose exact public view or save counts there, so
+> views remain source-reported (and can be rounded for large posts) while saves are null.
 >
-> How each platform actually exposes public metrics has not been investigated, and this
-> repository does not guess: there are no invented endpoints, no speculative HTML
-> parsing, and no fabricated metric values anywhere in it. Everything _around_ the
-> acquisition step — input handling, normalization, scheduling, concurrency, retries,
-> proxy/session rotation, output, metrics and run summaries — is complete and is
-> exercised end to end by a real run.
+> `InstagramScraper` remains an explicit `not_implemented` placeholder. TikTok short
+> links are detected but are not resolved in this milestone.
 
 ---
 
@@ -43,7 +42,7 @@ Out of scope for v1 (explicitly): scheduling, database design, and bot-detection
                               │
               ┌───────────────▼──────────────┐
               │  Platform implementations    │   TikTok · Instagram
-              │  src/platforms               │   (placeholders today)
+              │  src/platforms               │   (TikTok live; Instagram placeholder)
               └───────────────┬──────────────┘
                               │
               ┌───────────────▼──────────────┐
@@ -222,15 +221,15 @@ pnpm test
 pnpm test:watch
 ```
 
-116 tests covering the snapshot schema, config schema, text/JSON input parsing and its
+The Vitest suite covers the snapshot schema, config schema, text/JSON input parsing and its
 failure modes, URL normalization, retry policy, metrics and percentiles, JSONL
 serialization and append semantics, run-summary calculation, and the runner itself
 (failures become rows, retries are counted separately from requests, permanent failures
-are not retried, concurrency is respected, output failures are fatal).
+are not retried, concurrency is respected, output failures are fatal). TikTok-specific
+tests cover hydration parsing, anonymous HTTP behavior and platform error mapping.
 
-Nothing tests against real TikTok or Instagram. When acquisition lands, platform
-implementations are tested by passing a stub `HttpClient` through `ScrapeContext` — the
-contract is designed so no network is required.
+Automated tests do not call TikTok or Instagram. Platform implementations receive a stub
+`HttpClient` through `ScrapeContext`, so the suite stays deterministic and offline.
 
 ## 9. Building
 
@@ -250,39 +249,30 @@ pnpm format
 | TikTok    | [`src/platforms/tiktok/tiktok-scraper.ts`](src/platforms/tiktok/tiktok-scraper.ts)             | [`src/platforms/tiktok/tiktok-url-normalizer.ts`](src/platforms/tiktok/tiktok-url-normalizer.ts)             |
 | Instagram | [`src/platforms/instagram/instagram-scraper.ts`](src/platforms/instagram/instagram-scraper.ts) | [`src/platforms/instagram/instagram-url-normalizer.ts`](src/platforms/instagram/instagram-url-normalizer.ts) |
 
-Each placeholder carries step-by-step implementation notes. In short:
-
-1. Implement `scrape(url, context): Promise<ScrapeResult>`.
-2. Use `context.http` for every request — never construct a client. Pass
-   `context.proxy?.target` and `context.session?.session.cookie` through, and honour
-   `context.signal`.
-3. Return `scrapeSuccess({...})` with whatever was found, `null` for anything the
-   platform does not expose. **Never substitute `0` for "unknown".**
-4. Return `scrapeFailure(status, error)` otherwise, mapping observations onto
-   `not_found` / `private` / `rate_limited` / `error`. Permanent statuses are never
-   retried.
-5. Register nothing new — [`src/platforms/index.ts`](src/platforms/index.ts) already
-   wires both platforms in.
-
-Nothing in `src/core`, `src/app`, `src/cli` or `src/web` should need to change.
+TikTok anonymously fetches its first-party public embed page and player items response.
+The embed parser reads `__FRONTITY_CONNECT_STATE__`; the player response supplies exact
+likes, comments and shares to replace rounded embed values. The older
+`__UNIVERSAL_DATA_FOR_REHYDRATION__` shape remains supported as a parser fallback. The
+volatile payload parser is isolated from HTTP and orchestration. Instagram still carries
+its step-by-step placeholder notes.
 
 ## 11. Output contract
 
 One JSON object per line, appended, UTF-8, keys in a fixed order:
 
-| Field                                       | Type                                                  | Notes                                            |
-| ------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------ |
-| `platform`                                  | `"tiktok" \| "instagram"`                             |                                                  |
-| `video_id`                                  | `string \| null`                                      | **Not a key.** Currently always `null` (see §12) |
-| `url`                                       | `string`                                              | The normalized URL that was requested            |
-| `scraped_at`                                | ISO-8601 `string`                                     |                                                  |
-| `views` `likes` `comments` `shares` `saves` | `number \| null`                                      | `null` = not available, never `0`                |
-| `author_handle`                             | `string \| null`                                      |                                                  |
-| `author_follower_count`                     | `number \| null`                                      |                                                  |
-| `posted_at`                                 | ISO-8601 `string \| null`                             |                                                  |
-| `status`                                    | `ok \| not_found \| private \| rate_limited \| error` |                                                  |
-| `error`                                     | `string \| null`                                      | `"<error_code>: <message>"` on failure           |
-| `latency_ms`                                | `number`                                              | Whole attempt chain, including retries           |
+| Field                                       | Type                                                  | Notes                                    |
+| ------------------------------------------- | ----------------------------------------------------- | ---------------------------------------- |
+| `platform`                                  | `"tiktok" \| "instagram"`                             |                                          |
+| `video_id`                                  | `string \| null`                                      | Platform-native id; not a unique row key |
+| `url`                                       | `string`                                              | The normalized URL that was requested    |
+| `scraped_at`                                | ISO-8601 `string`                                     |                                          |
+| `views` `likes` `comments` `shares` `saves` | `number \| null`                                      | `null` = not available, never `0`        |
+| `author_handle`                             | `string \| null`                                      |                                          |
+| `author_follower_count`                     | `number \| null`                                      |                                          |
+| `posted_at`                                 | ISO-8601 `string \| null`                             |                                          |
+| `status`                                    | `ok \| not_found \| private \| rate_limited \| error` |                                          |
+| `error`                                     | `string \| null`                                      | `"<error_code>: <message>"` on failure   |
+| `latency_ms`                                | `number`                                              | Whole attempt chain, including retries   |
 
 Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, actual
 throughput, latency p50/p95/max, status and error breakdowns, retry statistics and proxy
@@ -295,11 +285,12 @@ including the case of the same video appearing twice with different `scraped_at`
 
 ## 12. Current limitations
 
-- **No platform acquisition.** Every run returns `not_implemented`.
-- **`video_id` is always `null`.** Deriving an id from a URL has not been verified for
-  either platform, and a guessed id in an append-only dataset is worse than a null.
+- **Instagram acquisition is not implemented.** Instagram rows return `not_implemented`.
+- **TikTok acquisition depends on undocumented public-page hydration JSON.** A payload
+  shape change produces a visible `parse_error`; it never fabricates or substitutes metrics.
 - **Short links are detected, not resolved.** `vm.tiktok.com` / `vt.tiktok.com` are
-  flagged with `requiresResolution`, but nothing follows the redirect yet.
+  flagged with `requiresResolution`; the TikTok scraper currently accepts canonical
+  `/@handle/video/{numeric-id}` and `/@handle/photo/{numeric-id}` URLs.
 - **Proxies cannot actually be used yet.** `FetchHttpClient` needs a `dispatcherFactory`
   (e.g. undici's `ProxyAgent`) to route through one. Without it, a proxied request fails
   loudly rather than silently going direct and exposing the origin IP — the transport
@@ -314,14 +305,12 @@ including the case of the same video appearing twice with different `scraped_at`
 
 ## 13. What remains to implement
 
-1. **Investigate acquisition for both platforms** — this is the next task, and everything
-   else below depends on its answers.
-2. Implement `TikTokScraper` and `InstagramScraper` against the existing contract.
-3. Complete the URL normalizers: short-link resolution, id extraction, and which query
-   parameters are load-bearing.
-4. Decide whether sessions are needed at all; if so, populate `SessionPool` from an
+1. Verify TikTok anonymously at low volume against representative canonical public URLs.
+2. Resolve TikTok `vm.tiktok.com` / `vt.tiktok.com` short links and feed the final canonical
+   URL back into output and de-duplication.
+3. Implement `InstagramScraper` against the existing contract.
+4. Decide whether Instagram sessions are needed; if so, populate `SessionPool` from an
    operator-supplied store (the rotation, health and graceful-degradation logic is done).
 5. Wire a proxy dispatcher into `FetchHttpClient` once the proxy vendor is known.
 6. Validate the ~500 rpm target against a real workload and tune concurrency, pacing and
    the retry policy from the measured run summaries.
-7. Add platform-level tests using stubbed `HttpClient` responses.
