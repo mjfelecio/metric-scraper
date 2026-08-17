@@ -345,8 +345,9 @@ including the case of the same video appearing twice with different `scraped_at`
 
 ## 13. What remains to implement
 
-1. Rerun the full 100-URL Instagram set post-pagination with a 30-second timeout and tune
-   direct-IP concurrency from the measured latency.
+1. Tune Instagram direct-IP/proxy concurrency from the 100-URL result: exact coverage
+   passed after retrying two transient HTTP 572 responses, but actual throughput was only
+   7.02 logical URLs/minute against a 15 RPM target.
 2. Validate the authenticated Instagram fallback for Reels beyond the anonymous page and
    coauthor bounds using a dedicated local test session.
 3. Resolve TikTok `vm.tiktok.com` / `vt.tiktok.com` short links and feed the final canonical
