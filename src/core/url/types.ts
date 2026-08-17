@@ -10,9 +10,8 @@ export interface UrlNormalizationSuccess {
   /**
    * Platform-native id, when it can be derived from the URL alone.
    *
-   * Currently always `null`: the URL→id mapping for both platforms has not been
-   * verified yet, and guessing it would put fabricated ids in the dataset.
-   * See `docs` notes in each platform normalizer.
+   * TikTok canonical video/photo URLs expose this id directly. Platforms or URL forms
+   * whose native id cannot be verified keep it `null`.
    */
   videoId: string | null;
   /**

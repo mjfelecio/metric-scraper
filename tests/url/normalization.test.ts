@@ -70,9 +70,28 @@ describe('TikTokUrlNormalizer', () => {
     expect(canonical.ok && canonical.requiresResolution).toBe(false);
   });
 
-  it('does not invent a video id', () => {
+  it('extracts the native video id from a canonical path', () => {
     const result = normalizer.normalize('https://www.tiktok.com/@a/video/1234567890');
-    expect(result.ok && result.videoId).toBeNull();
+    expect(result.ok && result.videoId).toBe('1234567890');
+  });
+
+  it('accepts and canonicalizes photo post URLs', () => {
+    const result = normalizer.normalize('https://www.tiktok.com/@creator/photo/1234567890?lang=en');
+    expect(result.ok && result.url).toBe('https://www.tiktok.com/@creator/photo/1234567890');
+    expect(result.ok && result.videoId).toBe('1234567890');
+  });
+
+  it('canonicalizes the host, trailing slash and query parameters', () => {
+    const result = normalizer.normalize(
+      'http://m.tiktok.com/@creator/video/1234567890/?lang=en&utm_source=share',
+    );
+    expect(result.ok && result.url).toBe('https://www.tiktok.com/@creator/video/1234567890');
+    expect(result.ok && result.changed).toBe(true);
+  });
+
+  it('rejects non-post paths and nonnumeric post ids', () => {
+    expect(normalizer.normalize('https://www.tiktok.com/@creator').ok).toBe(false);
+    expect(normalizer.normalize('https://www.tiktok.com/@creator/video/not-an-id').ok).toBe(false);
   });
 
   it('rejects a URL from another host', () => {
