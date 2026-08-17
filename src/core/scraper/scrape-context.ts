@@ -23,6 +23,8 @@ export interface ScrapeContext {
   /** `null` when the run is not using sessions (the default). */
   readonly session: SessionLease | null;
   readonly logger: Logger;
+  /** Shared only within one runner invocation; a new batch receives an empty map. */
+  readonly runCache: Map<string, unknown>;
   /** Injected so tests can control time. */
   readonly now: () => Date;
 }

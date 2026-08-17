@@ -94,6 +94,7 @@ export class ScrapeRunner {
     const { config, logger, metrics, sink } = this.deps;
     const runId = options.runId ?? randomUUID();
     const runLogger = logger.child({ run_id: runId });
+    const runCache = new Map<string, unknown>();
 
     const controller = new AbortController();
     const signal =
@@ -146,7 +147,7 @@ export class ScrapeRunner {
       queue
         .add(async () => {
           if (signal.aborted) return;
-          const event = await this.processRecord(record, signal, runLogger);
+          const event = await this.processRecord(record, signal, runLogger, runCache);
 
           try {
             await sink.write(event.snapshot);
@@ -250,6 +251,7 @@ export class ScrapeRunner {
     record: InputRecord,
     signal: AbortSignal,
     logger: Logger,
+    runCache: Map<string, unknown>,
   ): Promise<JobCompletedEvent> {
     const { metrics, retryPolicy, config } = this.deps;
     const jobLogger = logger.child({ url: record.url, platform: record.platform });
@@ -319,6 +321,7 @@ export class ScrapeRunner {
           proxy: proxyLease,
           session: sessionLease,
           logger: jobLogger,
+          runCache,
           now: this.now,
         });
       } catch (error) {

@@ -98,7 +98,11 @@ function mediaInfoBody(): string {
   });
 }
 
-function context(http: HttpClient, session: PlatformSession | null = null): ScrapeContext {
+function context(
+  http: HttpClient,
+  session: PlatformSession | null = null,
+  runCache = new Map<string, unknown>(),
+): ScrapeContext {
   return {
     attempt: 1,
     maxAttempts: 3,
@@ -107,6 +111,7 @@ function context(http: HttpClient, session: PlatformSession | null = null): Scra
     proxy: null,
     session: session === null ? null : { id: session.id, session },
     logger: nullLogger,
+    runCache,
     now: () => new Date('2026-08-17T00:00:00.000Z'),
   };
 }
@@ -172,6 +177,35 @@ describe('InstagramScraper', () => {
     expect(postRequest?.cookie).toContain('csrftoken=csrf-test');
     expect(postRequest?.body).toContain('doc_id=27128499623469141');
     expect(request.mock.calls[2]?.[0].body).toContain('doc_id=27234427476213202');
+  });
+
+  it('coalesces clips pages within one run and isolates a later run', async () => {
+    const request = vi.fn<HttpClient['request']>((input) => {
+      if (input.url === 'https://www.instagram.com/') return Promise.resolve(rootResponse());
+      if (input.body?.includes('doc_id=27128499623469141') === true) {
+        return Promise.resolve(response(200, postBody()));
+      }
+      return Promise.resolve(response(200, clipsBody(96047130)));
+    });
+    const scraper = new InstagramScraper();
+    const sharedRunCache = new Map<string, unknown>();
+
+    const [first, second] = await Promise.all([
+      scraper.scrape(URL, context({ request }, null, sharedRunCache)),
+      scraper.scrape(URL, context({ request }, null, sharedRunCache)),
+    ]);
+
+    expect(first.outcome).toBe('ok');
+    expect(second.outcome).toBe('ok');
+    expect(request).toHaveBeenCalledTimes(4); // one bootstrap, two posts, one shared clips page
+
+    const laterRun = await scraper.scrape(
+      URL,
+      context({ request }, null, new Map<string, unknown>()),
+    );
+
+    expect(laterRun.outcome).toBe('ok');
+    expect(request).toHaveBeenCalledTimes(6); // the later run fetches post + clips again
   });
 
   it('uses max_id to find exact views on a bounded second anonymous clips page', async () => {

@@ -65,6 +65,7 @@ function context(http: HttpClient): ScrapeContext {
     proxy: null,
     session: null,
     logger: nullLogger,
+    runCache: new Map<string, unknown>(),
     now: () => new Date('2026-08-17T00:00:00.000Z'),
   };
 }

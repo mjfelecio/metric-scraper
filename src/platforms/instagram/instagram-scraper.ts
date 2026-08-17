@@ -51,7 +51,6 @@ export class InstagramScraper implements Scraper {
   private readonly clipsMaxPages: number;
   private readonly clipsMaxAuthors: number;
   private readonly anonymousStates = new Map<string, Promise<AnonymousState>>();
-  private readonly inFlightClips = new Map<string, Promise<HttpResponse>>();
 
   constructor(options: InstagramScraperOptions = {}) {
     this.postDocId = options.postDocId ?? '27128499623469141';
@@ -292,8 +291,8 @@ export class InstagramScraper implements Scraper {
     context: ScrapeContext,
     state: AttemptState,
   ): Promise<HttpResponse> {
-    const key = `${context.proxy?.id ?? 'direct'}:${authorId}:${cursor ?? 'first'}`;
-    const existing = this.inFlightClips.get(key);
+    const key = `instagram:clips:${context.proxy?.id ?? 'direct'}:${authorId}:${cursor ?? 'first'}`;
+    const existing = context.runCache.get(key) as Promise<HttpResponse> | undefined;
     if (existing !== undefined) return await existing;
     const data: Record<string, string | number | boolean> = {
       include_feed_video: true,
@@ -308,12 +307,21 @@ export class InstagramScraper implements Scraper {
       anonymous,
       context,
       state,
-    );
-    this.inFlightClips.set(key, request);
+    )
+      .then((response) => {
+        if (response.status < 200 || response.status >= 300) context.runCache.delete(key);
+        return response;
+      })
+      .catch((error: unknown) => {
+        context.runCache.delete(key);
+        throw error;
+      });
+    context.runCache.set(key, request);
     try {
       return await request;
-    } finally {
-      this.inFlightClips.delete(key);
+    } catch (error) {
+      context.runCache.delete(key);
+      throw error;
     }
   }
 
