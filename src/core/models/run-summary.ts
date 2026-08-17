@@ -61,6 +61,8 @@ export const RunSummarySchema = z.object({
   totals: z.object({
     /** One per URL processed. Retries are NOT counted here. */
     requests: z.number().int().nonnegative(),
+    /** Underlying first-party HTTP calls, including multi-call jobs and retries. */
+    platform_http_requests: z.number().int().nonnegative(),
     successes: z.number().int().nonnegative(),
     failures: z.number().int().nonnegative(),
     /** 0..1 */
@@ -81,6 +83,22 @@ export const RunSummarySchema = z.object({
 
   retries: RetrySummarySchema,
   proxies: ProxySummarySchema,
+
+  sessions: z.object({
+    configured: z.number().int().nonnegative(),
+    used: z.number().int().nonnegative(),
+    blocked: z.number().int().nonnegative(),
+    total_failures: z.number().int().nonnegative(),
+    per_session: z.array(
+      z.object({
+        session_id: z.string(),
+        proxy_id: z.string().nullable(),
+        requests: z.number().int().nonnegative(),
+        failures: z.number().int().nonnegative(),
+        blocked: z.boolean(),
+      }),
+    ),
+  }),
 
   output: z.object({
     snapshots_path: z.string().nullable(),

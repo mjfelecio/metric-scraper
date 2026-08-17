@@ -33,6 +33,8 @@ export interface ProxyLease {
 export interface PlatformSession {
   readonly id: string;
   readonly platform: Platform;
+  /** Credential-free proxy id this account is pinned to; `null` means direct-only. */
+  readonly proxyId: string | null;
   /** Raw `Cookie` header value. Supplied by operators; never generated here. */
   readonly cookie: string;
   readonly userAgent: string | null;

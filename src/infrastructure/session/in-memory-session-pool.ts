@@ -64,17 +64,24 @@ export class InMemorySessionPool implements SessionPool {
     return this.entries.length;
   }
 
-  acquire(platform: Platform): Promise<SessionLease | null> {
+  acquire(
+    platform: Platform,
+    _signal?: AbortSignal,
+    proxyId: string | null = null,
+  ): Promise<SessionLease | null> {
     const now = this.now();
     const usable = this.entries.filter(
-      (entry) => entry.session.platform === platform && this.isUsable(entry, now),
+      (entry) =>
+        entry.session.platform === platform &&
+        entry.session.proxyId === proxyId &&
+        this.isUsable(entry, now),
     );
 
     if (usable.length === 0) {
       if (this.entries.some((entry) => entry.session.platform === platform)) {
         this.logger.warn(
-          { platform },
-          'every session for this platform is blocked or cooling down; continuing anonymously',
+          { platform, proxy_id: proxyId },
+          'no healthy session is bound to the leased proxy; continuing anonymously',
         );
       }
       return Promise.resolve(null);
@@ -136,6 +143,7 @@ export class InMemorySessionPool implements SessionPool {
     const perSession: SessionHealth[] = this.entries.map((entry) => ({
       id: entry.session.id,
       platform: entry.session.platform,
+      proxyId: entry.session.proxyId,
       requests: entry.requests,
       failures: entry.failures,
       consecutiveFailures: entry.consecutiveFailures,

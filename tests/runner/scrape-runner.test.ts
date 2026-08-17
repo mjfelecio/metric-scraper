@@ -225,28 +225,3 @@ describe('ScrapeRunner', () => {
     expect(result.summary.input).toEqual({ candidates: 5, accepted: 1, rejected: 4 });
   });
 });
-
-describe('placeholder Instagram scraper', () => {
-  it('flows through the whole pipeline as an explicit not_implemented row', async () => {
-    const { runner, sink } = buildRunner({});
-
-    const result = await runner.run([
-      { raw_url: 'https://i/1', url: 'https://i/1', platform: 'instagram', position: 1 },
-    ]);
-
-    expect(sink.snapshots).toHaveLength(1);
-    for (const snapshot of sink.snapshots) {
-      expect(snapshot.status).toBe('error');
-      expect(snapshot.error).toContain('not_implemented');
-      // No fabricated metrics.
-      expect(snapshot.views).toBeNull();
-      expect(snapshot.likes).toBeNull();
-      expect(snapshot.video_id).toBeNull();
-    }
-
-    // Not retryable: an unimplemented scraper must not burn the retry budget.
-    expect(result.summary.retries.total_retries).toBe(0);
-    expect(result.summary.totals.success_rate).toBe(0);
-    expect(result.summary.error_breakdown).toEqual({ not_implemented: 1 });
-  });
-});

@@ -172,6 +172,7 @@ export class ScrapeRunner {
               event.snapshot.status !== 'ok' &&
               event.attempts >= this.deps.retryPolicy.options.maxAttempts,
             errorCode: extractErrorCode(event.snapshot.error),
+            platformHttpRequests: event.platformHttpRequests,
           });
 
           options.onResult?.(event);
@@ -220,6 +221,7 @@ export class ScrapeRunner {
       counts,
       metrics: metrics.view(),
       proxyStats: this.deps.proxyPool.getStats(),
+      sessionStats: this.deps.sessionPool.getStats(),
       concurrency: config.concurrency,
       targetRpm: config.targetRpm,
       snapshotsPath: sink.location,
@@ -270,6 +272,7 @@ export class ScrapeRunner {
         attempts: 0,
         retries: 0,
         proxyId: null,
+        platformHttpRequests: 0,
       };
     }
 
@@ -277,6 +280,7 @@ export class ScrapeRunner {
     let retries = 0;
     let lastProxyId: string | null = null;
     let lastResult: ScrapeResult | null = null;
+    let platformHttpRequests = 0;
 
     while (attempt < retryPolicy.options.maxAttempts) {
       attempt += 1;
@@ -284,10 +288,15 @@ export class ScrapeRunner {
       let proxyLease: ProxyLease | null = null;
       let sessionLease: SessionLease | null = null;
       let result: ScrapeResult;
+      let attemptHttpRequests = 0;
 
       try {
         proxyLease = await this.deps.proxyPool.acquire(signal);
-        sessionLease = await this.deps.sessionPool.acquire(record.platform, signal);
+        sessionLease = await this.deps.sessionPool.acquire(
+          record.platform,
+          signal,
+          proxyLease?.id ?? null,
+        );
         lastProxyId = proxyLease?.id ?? null;
 
         // The attempt is bounded by both the run's lifetime and the per-request
@@ -301,7 +310,12 @@ export class ScrapeRunner {
           attempt,
           maxAttempts: retryPolicy.options.maxAttempts,
           signal: attemptSignal,
-          http: this.deps.http,
+          http: {
+            request: (request) => {
+              attemptHttpRequests += 1;
+              return this.deps.http.request(request);
+            },
+          },
           proxy: proxyLease,
           session: sessionLease,
           logger: jobLogger,
@@ -314,12 +328,17 @@ export class ScrapeRunner {
       }
 
       lastResult = result;
+      platformHttpRequests += attemptHttpRequests;
       if (proxyLease !== null) {
         this.reportProxyOutcome(proxyLease, result);
         metrics.recordProxyOutcome(proxyLease.id, proxyOutcomeOf(result));
       }
       if (sessionLease !== null) {
-        this.reportSessionOutcome(sessionLease, result);
+        if (result.acquisition?.sessionUsed === true) {
+          this.reportSessionOutcome(sessionLease, result);
+        } else {
+          this.deps.sessionPool.release(sessionLease);
+        }
       }
 
       if (result.outcome === 'ok') break;
@@ -364,7 +383,7 @@ export class ScrapeRunner {
             lastResult?.outcome === 'failure' ? (lastResult.partial ?? {}) : {},
           );
 
-    return { snapshot, attempts: attempt, retries, proxyId: lastProxyId };
+    return { snapshot, attempts: attempt, retries, proxyId: lastProxyId, platformHttpRequests };
   }
 
   private reportProxyOutcome(lease: ProxyLease, result: ScrapeResult): void {

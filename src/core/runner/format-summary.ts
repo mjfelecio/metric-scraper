@@ -36,6 +36,7 @@ export function formatRunSummary(summary: RunSummary): string {
   lines.push(`${pad('Duration')}${ms(summary.duration_ms)}`);
   lines.push('');
   lines.push(`${pad('Total requests')}${num(summary.totals.requests)}`);
+  lines.push(`${pad('Platform HTTP calls')}${num(summary.totals.platform_http_requests)}`);
   lines.push(`${pad('Successes')}${num(summary.totals.successes)}`);
   lines.push(`${pad('Failures')}${num(summary.totals.failures)}`);
   lines.push(`${pad('Success rate')}${pct(summary.totals.success_rate)}`);
@@ -57,6 +58,17 @@ export function formatRunSummary(summary: RunSummary): string {
     for (const [status, count] of statuses) {
       lines.push(`  ${status.padEnd(20, ' ')}${num(count)}`);
     }
+  }
+
+  lines.push('');
+  lines.push('Sessions');
+  if (summary.sessions.configured === 0) {
+    lines.push('  none configured');
+  } else {
+    lines.push(`  ${pad('configured')}${num(summary.sessions.configured)}`);
+    lines.push(`  ${pad('used')}${num(summary.sessions.used)}`);
+    lines.push(`  ${pad('blocked')}${num(summary.sessions.blocked)}`);
+    lines.push(`  ${pad('failures')}${num(summary.sessions.total_failures)}`);
   }
 
   const errors = Object.entries(summary.error_breakdown).filter(([, count]) => count > 0);

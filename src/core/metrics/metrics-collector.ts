@@ -23,6 +23,7 @@ export interface MetricsView {
   startedAt: Date | null;
   elapsedMs: number;
   totalRequests: number;
+  platformHttpRequests: number;
   successfulRequests: number;
   failedRequests: number;
   /** 0..1; 0 when nothing has completed yet. */
@@ -48,6 +49,8 @@ export interface RecordResultInput {
   exhausted: boolean;
   /** `ScrapeErrorCode` for failures, `null` on success. */
   errorCode: string | null;
+  /** Raw first-party HTTP calls made across all attempts for this URL. */
+  platformHttpRequests?: number | undefined;
 }
 
 function emptyStatusCounts(): Record<ScrapeStatus, number> {
@@ -72,6 +75,7 @@ export class MetricsCollector {
   private finishedAtMs: number | null = null;
 
   private totalRequests = 0;
+  private platformHttpRequests = 0;
   private successfulRequests = 0;
   private failedRequests = 0;
   private totalRetries = 0;
@@ -99,6 +103,7 @@ export class MetricsCollector {
   /** One completed request (one URL), after all retries have been exhausted. */
   recordResult(input: RecordResultInput): void {
     this.totalRequests += 1;
+    this.platformHttpRequests += input.platformHttpRequests ?? 0;
     if (input.status === 'ok') {
       this.successfulRequests += 1;
     } else {
@@ -164,6 +169,7 @@ export class MetricsCollector {
       startedAt: this.startedAtMs === null ? null : new Date(this.startedAtMs),
       elapsedMs,
       totalRequests: this.totalRequests,
+      platformHttpRequests: this.platformHttpRequests,
       successfulRequests: this.successfulRequests,
       failedRequests: this.failedRequests,
       successRate: this.totalRequests === 0 ? 0 : this.successfulRequests / this.totalRequests,
