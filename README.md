@@ -287,9 +287,10 @@ volatile payload parser is isolated from HTTP and orchestration.
 Instagram bootstraps an anonymous CSRF context once per proxy, calls the current Polaris
 post operation, and queries creator clips only when views are missing. Clips lookup is
 bounded by configurable page and author limits, uses Instagram's `max_id` cursor, and
-checks public coauthors. Reels outside those bounds require a compatible session and use
-authenticated media-info. GraphQL document IDs are configurable because they are
-undocumented and volatile.
+checks public coauthors. Successful clips pages are coalesced and reused within one run,
+then discarded so a later time-series run fetches fresh counters. Reels outside those
+bounds require a compatible session and use authenticated media-info. GraphQL document
+IDs are configurable because they are undocumented and volatile.
 
 ## 11. Output contract
 
@@ -345,9 +346,9 @@ including the case of the same video appearing twice with different `scraped_at`
 
 ## 13. What remains to implement
 
-1. Tune Instagram direct-IP/proxy concurrency from the 100-URL result: exact coverage
-   passed after retrying two transient HTTP 572 responses, but actual throughput was only
-   7.02 logical URLs/minute against a 15 RPM target.
+1. Run the staged Instagram proxy benchmark at strict 50, 100, 250, and 500 logical RPM.
+   Run-scoped caching reduced the direct 100-URL test from 223 to 133 raw calls, and a
+   strict 15 RPM confirmation held at 14.18 RPM, but no proxy pool is configured yet.
 2. Validate the authenticated Instagram fallback for Reels beyond the anonymous page and
    coauthor bounds using a dedicated local test session.
 3. Resolve TikTok `vm.tiktok.com` / `vt.tiktok.com` short links and feed the final canonical
