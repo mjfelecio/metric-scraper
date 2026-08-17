@@ -1,4 +1,5 @@
 import { type AppConfig } from '../config/env.js';
+import { ProxyAgent } from 'undici';
 import { type Logger } from '../core/logging/logger.js';
 import { MetricsCollector } from '../core/metrics/metrics-collector.js';
 import { type SnapshotSink } from '../core/output/snapshot-sink.js';
@@ -55,16 +56,27 @@ export async function buildRunner(options: {
   const proxyPool = createProxyPool(config, logger);
   const sessionPool = await createSessionPool(config, logger);
   const metrics = new MetricsCollector();
+  const proxyAgents = new Map<string, ProxyAgent>();
 
   const http = new FetchHttpClient({
     defaultTimeoutMs: config.requestTimeoutMs,
-    // No dispatcherFactory: proxy transport is wired up when the proxy vendor
-    // is known. Until then a proxied request fails loudly rather than leaking
-    // the origin IP by silently going direct.
+    dispatcherFactory: (target) => {
+      if (target.protocol !== 'http' && target.protocol !== 'https') {
+        throw new Error(
+          `proxy protocol ${target.protocol} is not supported by the fetch transport; use http or https`,
+        );
+      }
+      let agent = proxyAgents.get(target.url);
+      if (agent === undefined) {
+        agent = new ProxyAgent(target.url);
+        proxyAgents.set(target.url, agent);
+      }
+      return agent;
+    },
   });
 
   const runner = new ScrapeRunner({
-    scrapers: createDefaultScraperRegistry(),
+    scrapers: createDefaultScraperRegistry({ instagram: config.instagram }),
     http,
     proxyPool,
     sessionPool,

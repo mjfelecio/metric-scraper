@@ -63,7 +63,7 @@ export class RunService {
       proxiesConfigured,
       sessionsConfigured: this.config.session.storePath !== null,
       platforms: ['tiktok', 'instagram'],
-      scrapersImplemented: ['tiktok'],
+      scrapersImplemented: ['tiktok', 'instagram'],
     };
   }
 

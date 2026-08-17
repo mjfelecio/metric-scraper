@@ -38,6 +38,11 @@ export const AppConfigSchema = z.object({
     maxConsecutiveFailures: z.number().int().min(1),
     cooldownMs: z.number().int().min(0),
   }),
+
+  instagram: z.object({
+    postDocId: z.string().regex(/^\d+$/),
+    clipsDocId: z.string().regex(/^\d+$/),
+  }),
 });
 
 export type AppConfig = z.infer<typeof AppConfigSchema>;
@@ -93,6 +98,11 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
       maxConsecutiveFailures: int(env, 'SESSION_MAX_FAILURES', 3),
       cooldownMs: int(env, 'SESSION_COOLDOWN_MS', 300_000),
     },
+
+    instagram: {
+      postDocId: str(env.INSTAGRAM_POST_DOC_ID) ?? '27128499623469141',
+      clipsDocId: str(env.INSTAGRAM_CLIPS_DOC_ID) ?? '27234427476213202',
+    },
   };
 
   const parsed = AppConfigSchema.safeParse(candidate);
@@ -130,6 +140,7 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
     outputDir: config.outputDir,
     proxy: { configured: proxyCount },
     session: { configured: config.session.storePath !== null },
+    instagram: { ...config.instagram },
   };
 }
 

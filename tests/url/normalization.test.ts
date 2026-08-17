@@ -104,17 +104,27 @@ describe('TikTokUrlNormalizer', () => {
 describe('InstagramUrlNormalizer', () => {
   const normalizer = new InstagramUrlNormalizer();
 
-  it('handles both /reel/ and /p/ forms without rewriting the path', () => {
+  it('canonicalizes supported Instagram video URL forms', () => {
     const reel = normalizer.normalize('https://www.instagram.com/reel/ABC123/?utm_source=share');
     const post = normalizer.normalize('https://www.instagram.com/p/ABC123/');
+    const plural = normalizer.normalize('https://instagram.com/reels/ABC123?igsh=tracking');
+    const tv = normalizer.normalize('https://m.instagram.com/tv/ABC123/');
 
     expect(reel.ok && reel.url).toBe('https://www.instagram.com/reel/ABC123/');
     expect(post.ok && post.url).toBe('https://www.instagram.com/p/ABC123/');
+    expect(plural.ok && plural.url).toBe('https://www.instagram.com/reel/ABC123/');
+    expect(tv.ok && tv.url).toBe('https://www.instagram.com/tv/ABC123/');
   });
 
-  it('does not treat the shortcode as a video id', () => {
+  it('derives the stable numeric media id from the shortcode', () => {
     const result = normalizer.normalize('https://www.instagram.com/reel/ABC123/');
-    expect(result.ok && result.videoId).toBeNull();
+    expect(result.ok && result.videoId).toMatch(/^\d+$/);
+  });
+
+  it('rejects profiles, explore pages and malformed post paths', () => {
+    expect(normalizer.normalize('https://www.instagram.com/creator/').ok).toBe(false);
+    expect(normalizer.normalize('https://www.instagram.com/explore/').ok).toBe(false);
+    expect(normalizer.normalize('https://www.instagram.com/reel/').ok).toBe(false);
   });
 });
 

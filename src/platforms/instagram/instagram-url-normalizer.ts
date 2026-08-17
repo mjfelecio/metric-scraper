@@ -2,23 +2,13 @@ import { type Platform } from '../../core/models/platform.js';
 import { hostMatches, normalizeUrlGeneric } from '../../core/url/generic.js';
 import { type UrlNormalizationResult, type UrlNormalizer } from '../../core/url/types.js';
 
+import { shortcodeToMediaId } from './instagram-shortcode.js';
+
 const INSTAGRAM_DOMAIN = 'instagram.com';
 
-/**
- * Instagram URL canonicalization.
- *
- * Currently generic-only. The platform-specific work that belongs here once
- * acquisition is investigated:
- *
- * - the relationship between the `/reel/<code>` and `/p/<code>` forms (the two
- *   post shapes this project targets) and whether they are interchangeable
- * - deriving a stable native id from the URL shortcode
- * - which query parameters are load-bearing versus share tracking
- *
- * The shortcode in the path is deliberately NOT treated as `video_id`: whether
- * it is the platform's own identifier has not been verified, and putting a
- * guess into an append-only dataset is worse than leaving the field null.
- */
+const POST_PATH = /^\/(reel|reels|p|tv)\/([A-Za-z0-9_-]+)\/?$/;
+
+/** Canonicalizes supported Instagram Reel and video-post URLs. */
 export class InstagramUrlNormalizer implements UrlNormalizer {
   readonly platform: Platform = 'instagram';
 
@@ -28,9 +18,7 @@ export class InstagramUrlNormalizer implements UrlNormalizer {
 
   normalize(raw: string): UrlNormalizationResult {
     const generic = normalizeUrlGeneric(raw, {
-      // TODO(acquisition): add Instagram's own share/tracking parameters here
-      // once it is verified which ones are safe to drop.
-      extraTrackingParams: [],
+      extraTrackingParams: ['igsh', 'igshid'],
     });
 
     if (!generic.ok) {
@@ -44,15 +32,52 @@ export class InstagramUrlNormalizer implements UrlNormalizer {
       };
     }
 
+    const path = POST_PATH.exec(generic.url.pathname);
+    if (path === null) {
+      return {
+        ok: false,
+        code: 'invalid_url',
+        message:
+          'Instagram scraper supports /reel/{shortcode}, /reels/{shortcode}, /p/{shortcode}, and /tv/{shortcode} URLs',
+      };
+    }
+
+    const rawKind = path[1];
+    const shortcode = path[2];
+    if (rawKind === undefined || shortcode === undefined) {
+      return { ok: false, code: 'invalid_url', message: 'Instagram URL is missing a shortcode' };
+    }
+    const kind = rawKind === 'reels' ? 'reel' : rawKind;
+    const canonical = `https://www.instagram.com/${kind}/${shortcode}/`;
+
     return {
       ok: true,
-      url: generic.url.toString(),
+      url: canonical,
       platform: this.platform,
-      videoId: null,
-      // No Instagram short-link form is treated as verified, so nothing here
-      // claims to need resolution yet.
+      videoId: shortcodeToMediaId(shortcode),
       requiresResolution: false,
-      changed: generic.changed,
+      changed: generic.changed || canonical !== generic.url.toString(),
     };
   }
+}
+
+export interface ParsedInstagramUrl {
+  shortcode: string;
+  mediaId: string;
+  kind: 'reel' | 'p' | 'tv';
+}
+
+export function parseCanonicalInstagramUrl(raw: string): ParsedInstagramUrl | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (!hostMatches(url, INSTAGRAM_DOMAIN)) return null;
+  const match = /^\/(reel|p|tv)\/([A-Za-z0-9_-]+)\/$/.exec(url.pathname);
+  const kind = match?.[1];
+  const shortcode = match?.[2];
+  if ((kind !== 'reel' && kind !== 'p' && kind !== 'tv') || shortcode === undefined) return null;
+  return { shortcode, mediaId: shortcodeToMediaId(shortcode), kind };
 }
