@@ -63,9 +63,7 @@ export class RunService {
       proxiesConfigured,
       sessionsConfigured: this.config.session.storePath !== null,
       platforms: ['tiktok', 'instagram'],
-      // Nothing is implemented yet; the dashboard says so rather than implying
-      // a run that returns only failures is a bug.
-      scrapersImplemented: [],
+      scrapersImplemented: ['tiktok'],
     };
   }
 
