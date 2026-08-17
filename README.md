@@ -3,7 +3,7 @@
 A batch pipeline for collecting **public engagement metrics** from TikTok videos and
 Instagram Reels/video posts, as an append-only time series.
 
-> ## Status: TikTok canonical acquisition implemented
+> ## Status: TikTok and Instagram canonical acquisition implemented
 >
 > `TikTokScraper` fetches TikTok's first-party public embed pages anonymously and parses
 > their embedded hydration JSON. Canonical video and photo post URLs are accepted. It
@@ -13,7 +13,10 @@ Instagram Reels/video posts, as an append-only time series.
 > with exact integers. TikTok does not expose exact public view or save counts there, so
 > views remain source-reported (and can be rounded for large posts) while saves are null.
 >
-> `InstagramScraper` remains an explicit `not_implemented` placeholder. TikTok short
+> `InstagramScraper` uses anonymous first-party post and clips operations for exact
+> likes, comments and recent-Reel play counts. When an old Reel is absent from the
+> recent clips page, it can use a dedicated proxy-bound session against media-info.
+> It fails visibly instead of returning `ok` without an exact view count. TikTok short
 > links are detected but are not resolved in this milestone.
 
 ---
@@ -42,7 +45,7 @@ Out of scope for v1 (explicitly): scheduling, database design, and bot-detection
                               │
               ┌───────────────▼──────────────┐
               │  Platform implementations    │   TikTok · Instagram
-              │  src/platforms               │   (TikTok live; Instagram placeholder)
+              │  src/platforms               │   (TikTok and Instagram live)
               └───────────────┬──────────────┘
                               │
               ┌───────────────▼──────────────┐
@@ -140,10 +143,34 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | `SESSION_STORE_PATH`         | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous               |
 | `SESSION_MAX_FAILURES`       | `3`        | Consecutive failures before cooldown                                       |
 | `SESSION_COOLDOWN_MS`        | `300000`   | How long a blocked session is benched                                      |
+| `INSTAGRAM_POST_DOC_ID`      | current ID | Anonymous post metadata operation                                          |
+| `INSTAGRAM_CLIPS_DOC_ID`     | current ID | Recent creator-Reels operation                                             |
 
 **Credentials never live in source.** Proxy credentials are read from `PROXY_POOL` and
 kept inside the in-memory `ProxyTarget`; everything user-facing (logs, metrics, run
 summaries) uses a credential-free proxy id like `http://proxy-a.example.net:8000`.
+
+Instagram sessions are supplied as a gitignored JSON file. `proxyId` must equal the
+credential-free id of the sticky HTTP/HTTPS proxy in `PROXY_POOL`; use `null` only for
+direct local testing. A session is never sent through an unmatched IP.
+
+```json
+{
+  "sessions": [
+    {
+      "id": "instagram-test-1",
+      "platform": "instagram",
+      "proxyId": "http://proxy-a.example.net:8000",
+      "cookie": "sessionid=...; csrftoken=...",
+      "userAgent": null,
+      "headers": {}
+    }
+  ]
+}
+```
+
+Use a dedicated test account and browser-created cookies. Do not store Instagram
+passwords or use a personal account.
 
 ## 6. Running the CLI
 
@@ -253,8 +280,12 @@ TikTok anonymously fetches its first-party public embed page and player items re
 The embed parser reads `__FRONTITY_CONNECT_STATE__`; the player response supplies exact
 likes, comments and shares to replace rounded embed values. The older
 `__UNIVERSAL_DATA_FOR_REHYDRATION__` shape remains supported as a parser fallback. The
-volatile payload parser is isolated from HTTP and orchestration. Instagram still carries
-its step-by-step placeholder notes.
+volatile payload parser is isolated from HTTP and orchestration.
+
+Instagram bootstraps an anonymous CSRF context once per proxy, calls the current Polaris
+post operation, and queries the creator's first 12 clips only when views are missing.
+Older Reels require a compatible session and use authenticated media-info. GraphQL
+document IDs are configurable because they are undocumented and volatile.
 
 ## 11. Output contract
 
@@ -275,8 +306,9 @@ One JSON object per line, appended, UTF-8, keys in a fixed order:
 | `latency_ms`                                | `number`                                              | Whole attempt chain, including retries   |
 
 Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, actual
-throughput, latency p50/p95/max, status and error breakdowns, retry statistics and proxy
-statistics. Latency percentiles use the **nearest-rank** method, so a reported p95 is
+throughput, raw platform HTTP calls, latency p50/p95/max, status and error breakdowns,
+retry statistics, proxy statistics and session burn/health statistics. Latency
+percentiles use the **nearest-rank** method, so a reported p95 is
 always an observed sample. Throughput counts completed work items only — retries are
 reported separately and can never inflate it.
 
@@ -285,16 +317,20 @@ including the case of the same video appearing twice with different `scraped_at`
 
 ## 12. Current limitations
 
-- **Instagram acquisition is not implemented.** Instagram rows return `not_implemented`.
+- **Instagram uses undocumented first-party operations.** Document IDs and response
+  shapes can change. A malformed response becomes a visible `parse_error`.
+- **Old Instagram Reels need a dedicated session.** Without one, recovered likes and
+  comments are preserved in a failure row and missing exact views are never considered
+  a successful scrape.
+- **Instagram shares and saves are usually unavailable to non-owners.** They remain
+  `null` unless a tested response supplies an integer.
 - **TikTok acquisition depends on undocumented public-page hydration JSON.** A payload
   shape change produces a visible `parse_error`; it never fabricates or substitutes metrics.
 - **Short links are detected, not resolved.** `vm.tiktok.com` / `vt.tiktok.com` are
   flagged with `requiresResolution`; the TikTok scraper currently accepts canonical
   `/@handle/video/{numeric-id}` and `/@handle/photo/{numeric-id}` URLs.
-- **Proxies cannot actually be used yet.** `FetchHttpClient` needs a `dispatcherFactory`
-  (e.g. undici's `ProxyAgent`) to route through one. Without it, a proxied request fails
-  loudly rather than silently going direct and exposing the origin IP — the transport
-  choice waits on knowing the proxy vendor.
+- **Proxy transport supports HTTP and HTTPS only.** SOCKS entries fail loudly rather
+  than silently going direct and exposing the origin IP.
 - **Run state is in-process.** The dashboard's run list is memory-only; the JSONL on disk
   is the durable artifact. No database, by design.
 - **The web API is dev-only** (see §7).
@@ -305,12 +341,9 @@ including the case of the same video appearing twice with different `scraped_at`
 
 ## 13. What remains to implement
 
-1. Verify TikTok anonymously at low volume against representative canonical public URLs.
-2. Resolve TikTok `vm.tiktok.com` / `vt.tiktok.com` short links and feed the final canonical
+1. Build the first varied 20-URL Instagram dataset, then expand it to 100 URLs.
+2. Validate the authenticated Instagram fallback with a dedicated local test session.
+3. Resolve TikTok `vm.tiktok.com` / `vt.tiktok.com` short links and feed the final canonical
    URL back into output and de-duplication.
-3. Implement `InstagramScraper` against the existing contract.
-4. Decide whether Instagram sessions are needed; if so, populate `SessionPool` from an
-   operator-supplied store (the rotation, health and graceful-degradation logic is done).
-5. Wire a proxy dispatcher into `FetchHttpClient` once the proxy vendor is known.
-6. Validate the ~500 rpm target against a real workload and tune concurrency, pacing and
+4. Validate the ~500 rpm target against a real proxy workload and tune concurrency, pacing and
    the retry policy from the measured run summaries.
