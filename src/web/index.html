@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Metric Scraper — dev dashboard</title>
+  </head>
+  <body class="h-full bg-slate-950 text-slate-200 antialiased">
+    <div class="mx-auto max-w-7xl px-6 py-8">
+      <header class="mb-8 flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 class="text-2xl font-semibold tracking-tight text-white">Metric Scraper</h1>
+          <p class="mt-1 text-sm text-slate-400">
+            Development dashboard for the TikTok / Instagram snapshot pipeline.
+          </p>
+        </div>
+        <div
+          id="placeholder-banner"
+          class="max-w-md rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+        >
+          <strong class="font-semibold">Acquisition not implemented.</strong>
+          Platform scrapers are placeholders, so every URL is expected to finish as
+          <code class="rounded bg-slate-900/60 px-1">error / not_implemented</code>. Everything
+          around them — queueing, retries, output, metrics — is real.
+        </div>
+      </header>
+
+      <main class="grid gap-6 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
+        <!-- Configuration ------------------------------------------------->
+        <section class="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+          <h2 class="mb-4 text-sm font-semibold uppercase tracking-wider text-slate-400">
+            Configuration
+          </h2>
+
+          <form id="run-form" class="space-y-4">
+            <div>
+              <label class="mb-1.5 block text-sm font-medium text-slate-300" for="platform">
+                Platform
+              </label>
+              <select
+                id="platform"
+                name="platform"
+                class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none disabled:opacity-50"
+              >
+                <option value="auto">Auto-detect from URL</option>
+                <option value="tiktok">TikTok</option>
+                <option value="instagram">Instagram</option>
+              </select>
+            </div>
+
+            <div>
+              <span class="mb-1.5 block text-sm font-medium text-slate-300">Input method</span>
+              <div class="flex gap-2" id="input-method">
+                <button
+                  type="button"
+                  data-method="paste"
+                  class="input-method-btn flex-1 rounded-lg border border-slate-700 px-3 py-2 text-sm"
+                >
+                  Paste URLs
+                </button>
+                <button
+                  type="button"
+                  data-method="file"
+                  class="input-method-btn flex-1 rounded-lg border border-slate-700 px-3 py-2 text-sm"
+                >
+                  Upload file
+                </button>
+              </div>
+            </div>
+
+            <div id="paste-panel">
+              <label class="mb-1.5 block text-sm font-medium text-slate-300" for="input-text">
+                URLs
+                <span class="font-normal text-slate-500">— newline-delimited or a JSON array</span>
+              </label>
+              <textarea
+                id="input-text"
+                rows="8"
+                spellcheck="false"
+                placeholder="https://www.tiktok.com/@example/video/0000000000000000000&#10;https://www.instagram.com/reel/EXAMPLE0000/"
+                class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 focus:border-sky-500 focus:outline-none disabled:opacity-50"
+              ></textarea>
+            </div>
+
+            <div id="file-panel" class="hidden">
+              <label class="mb-1.5 block text-sm font-medium text-slate-300" for="input-file">
+                Batch file (.txt or .json)
+              </label>
+              <input
+                id="input-file"
+                type="file"
+                accept=".txt,.json,text/plain,application/json"
+                class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-800 file:px-3 file:py-1.5 file:text-sm file:text-slate-200"
+              />
+              <p id="file-name" class="mt-2 text-xs text-slate-500"></p>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="mb-1.5 block text-sm font-medium text-slate-300" for="concurrency">
+                  Concurrency
+                </label>
+                <input
+                  id="concurrency"
+                  type="number"
+                  min="1"
+                  max="1000"
+                  class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none disabled:opacity-50"
+                />
+              </div>
+              <div>
+                <label class="mb-1.5 block text-sm font-medium text-slate-300" for="target-rpm">
+                  Target req/min
+                </label>
+                <input
+                  id="target-rpm"
+                  type="number"
+                  min="0"
+                  max="100000"
+                  class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none disabled:opacity-50"
+                />
+              </div>
+            </div>
+
+            <div class="flex gap-2 pt-1">
+              <button
+                id="start-button"
+                type="submit"
+                class="flex-1 rounded-lg bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              >
+                Start run
+              </button>
+              <button
+                id="cancel-button"
+                type="button"
+                class="hidden rounded-lg border border-slate-700 px-4 py-2.5 text-sm font-medium text-slate-300 transition hover:border-slate-500 hover:text-white"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+
+          <dl id="defaults" class="mt-5 space-y-1.5 border-t border-slate-800 pt-4 text-xs"></dl>
+        </section>
+
+        <!-- Live status --------------------------------------------------->
+        <section class="space-y-6">
+          <div class="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+            <div class="mb-4 flex items-center justify-between gap-4">
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">
+                Run state
+              </h2>
+              <span
+                id="state-badge"
+                class="rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide"
+                >Idle</span
+              >
+            </div>
+
+            <div id="error-panel" class="hidden"></div>
+
+            <div id="progress-bar-wrap" class="mb-4 hidden">
+              <div class="h-2 w-full overflow-hidden rounded-full bg-slate-800">
+                <div
+                  id="progress-bar"
+                  class="h-full w-0 rounded-full bg-sky-500 transition-all"
+                ></div>
+              </div>
+            </div>
+
+            <div id="progress-stats" class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+              <!-- filled by render.ts -->
+            </div>
+          </div>
+
+          <div class="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+            <div class="mb-3 flex items-center justify-between gap-4">
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">
+                Recent results
+              </h2>
+              <button
+                id="download-button"
+                type="button"
+                class="hidden rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-slate-500 hover:text-white"
+              >
+                Download JSONL
+              </button>
+            </div>
+            <div id="results" class="max-h-80 overflow-auto"></div>
+          </div>
+
+          <div
+            id="input-report"
+            class="hidden rounded-xl border border-slate-800 bg-slate-900/50 p-5"
+          ></div>
+
+          <div
+            id="summary"
+            class="hidden rounded-xl border border-slate-800 bg-slate-900/50 p-5"
+          ></div>
+        </section>
+      </main>
+
+      <footer class="mt-10 border-t border-slate-800 pt-4 text-xs text-slate-500">
+        Snapshots are appended to the configured output directory as JSONL — one row per scrape,
+        including failures. Repeated scrapes of the same video intentionally produce multiple rows.
+      </footer>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

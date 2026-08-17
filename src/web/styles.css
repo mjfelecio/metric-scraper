@@ -1,0 +1,39 @@
+@import 'tailwindcss';
+
+/*
+ * Only the handful of rules that are awkward as utilities live here. The rest
+ * of the dashboard is styled with Tailwind classes directly in index.html and
+ * in the render functions.
+ */
+
+@layer components {
+  .input-method-btn {
+    @apply text-slate-400 transition hover:border-slate-500 hover:text-slate-200;
+  }
+
+  .input-method-btn[data-active='true'] {
+    @apply border-sky-500 bg-sky-500/10 text-sky-300;
+  }
+
+  .stat-card {
+    @apply rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2.5;
+  }
+
+  .stat-label {
+    @apply text-[11px] font-medium uppercase tracking-wider text-slate-500;
+  }
+
+  .stat-value {
+    @apply mt-0.5 font-mono text-lg text-slate-100;
+  }
+}
+
+/* Keep the results list readable while it streams in. */
+#results::-webkit-scrollbar {
+  width: 8px;
+}
+
+#results::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background-color: var(--color-slate-700);
+}
