@@ -1,17 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { PQueueTaskQueue } from '../../src/core/concurrency/task-queue.js';
 import { rpmToQueuePacing, TokenBucketRateLimiter } from '../../src/core/rate-limit/rate-limit.js';
 
 describe('rpmToQueuePacing', () => {
-  it('spreads a target over one-second windows instead of bursting', () => {
-    expect(rpmToQueuePacing(500)).toEqual({ intervalMs: 1_000, intervalCap: 9 });
+  it('uniformly spaces jobs without rounding above the target', () => {
+    expect(rpmToQueuePacing(500)).toEqual({ intervalMs: 120, intervalCap: 1 });
     expect(rpmToQueuePacing(60)).toEqual({ intervalMs: 1_000, intervalCap: 1 });
-    expect(rpmToQueuePacing(6_000)).toEqual({ intervalMs: 1_000, intervalCap: 100 });
+    expect(rpmToQueuePacing(6_000)).toEqual({ intervalMs: 10, intervalCap: 1 });
+    expect(rpmToQueuePacing(15)).toEqual({ intervalMs: 4_000, intervalCap: 1 });
   });
 
-  it('never paces below one job per window', () => {
-    expect(rpmToQueuePacing(1).intervalCap).toBe(1);
+  it('supports targets below one job per second', () => {
+    expect(rpmToQueuePacing(1)).toEqual({ intervalMs: 60_000, intervalCap: 1 });
   });
 
   it('treats 0 and negatives as unpaced', () => {
@@ -93,6 +94,32 @@ describe('PQueueTaskQueue', () => {
     );
 
     expect(peak).toBe(2);
+  });
+
+  it('starts paced jobs at the configured uniform interval', async () => {
+    vi.useFakeTimers();
+    try {
+      const queue = new PQueueTaskQueue({ concurrency: 3, targetRpm: 120 });
+      const starts: number[] = [];
+      const jobs = Array.from({ length: 3 }, () =>
+        queue.add(() => {
+          starts.push(Date.now());
+          return Promise.resolve();
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(starts).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(499);
+      expect(starts).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(starts).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(starts).toHaveLength(3);
+      await Promise.all(jobs);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects when the queue is full', async () => {
