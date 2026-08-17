@@ -14,8 +14,8 @@ Instagram Reels/video posts, as an append-only time series.
 > views remain source-reported (and can be rounded for large posts) while saves are null.
 >
 > `InstagramScraper` uses anonymous first-party post and clips operations for exact
-> likes, comments and recent-Reel play counts. When an old Reel is absent from the
-> recent clips page, it can use a dedicated proxy-bound session against media-info.
+> likes, comments and Reel play counts. It checks a bounded two clips pages across the
+> primary author and public coauthors before using proxy-bound media-info fallback.
 > It fails visibly instead of returning `ok` without an exact view count. TikTok short
 > links are detected but are not resolved in this milestone.
 
@@ -124,27 +124,29 @@ cp .env.example .env
 
 All are optional. See [`.env.example`](.env.example) for the annotated list.
 
-| Variable                     | Default    | Meaning                                                                    |
-| ---------------------------- | ---------- | -------------------------------------------------------------------------- |
-| `LOG_LEVEL`                  | `info`     | `trace`…`fatal`, or `silent`. Logs go to stderr.                           |
-| `SCRAPER_CONCURRENCY`        | `10`       | Jobs in flight at once                                                     |
-| `SCRAPER_TARGET_RPM`         | `500`      | Requests-per-minute ceiling; `0` disables pacing                           |
-| `SCRAPER_MAX_QUEUE_SIZE`     | `0`        | Max waiting jobs; `0` = unbounded                                          |
-| `SCRAPER_REQUEST_TIMEOUT_MS` | `15000`    | Per-attempt timeout                                                        |
-| `RETRY_MAX_ATTEMPTS`         | `3`        | Attempts per URL including the first; `1` disables retries                 |
-| `RETRY_INITIAL_DELAY_MS`     | `250`      | First backoff delay                                                        |
-| `RETRY_MAX_DELAY_MS`         | `10000`    | Backoff ceiling                                                            |
-| `RETRY_BACKOFF_FACTOR`       | `2`        | Growth multiplier                                                          |
-| `RETRY_JITTER`               | `true`     | Full jitter, so a batch does not re-fire in lockstep                       |
-| `OUTPUT_DIR`                 | `./output` | Where JSONL and run summaries are written                                  |
-| `PROXY_POOL`                 | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct |
-| `PROXY_MAX_FAILURES`         | `3`        | Consecutive failures before cooldown                                       |
-| `PROXY_COOLDOWN_MS`          | `60000`    | How long a failed/blocked proxy is benched                                 |
-| `SESSION_STORE_PATH`         | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous               |
-| `SESSION_MAX_FAILURES`       | `3`        | Consecutive failures before cooldown                                       |
-| `SESSION_COOLDOWN_MS`        | `300000`   | How long a blocked session is benched                                      |
-| `INSTAGRAM_POST_DOC_ID`      | current ID | Anonymous post metadata operation                                          |
-| `INSTAGRAM_CLIPS_DOC_ID`     | current ID | Recent creator-Reels operation                                             |
+| Variable                      | Default    | Meaning                                                                    |
+| ----------------------------- | ---------- | -------------------------------------------------------------------------- |
+| `LOG_LEVEL`                   | `info`     | `trace`…`fatal`, or `silent`. Logs go to stderr.                           |
+| `SCRAPER_CONCURRENCY`         | `10`       | Jobs in flight at once                                                     |
+| `SCRAPER_TARGET_RPM`          | `500`      | Requests-per-minute ceiling; `0` disables pacing                           |
+| `SCRAPER_MAX_QUEUE_SIZE`      | `0`        | Max waiting jobs; `0` = unbounded                                          |
+| `SCRAPER_REQUEST_TIMEOUT_MS`  | `15000`    | Per-attempt timeout                                                        |
+| `RETRY_MAX_ATTEMPTS`          | `3`        | Attempts per URL including the first; `1` disables retries                 |
+| `RETRY_INITIAL_DELAY_MS`      | `250`      | First backoff delay                                                        |
+| `RETRY_MAX_DELAY_MS`          | `10000`    | Backoff ceiling                                                            |
+| `RETRY_BACKOFF_FACTOR`        | `2`        | Growth multiplier                                                          |
+| `RETRY_JITTER`                | `true`     | Full jitter, so a batch does not re-fire in lockstep                       |
+| `OUTPUT_DIR`                  | `./output` | Where JSONL and run summaries are written                                  |
+| `PROXY_POOL`                  | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct |
+| `PROXY_MAX_FAILURES`          | `3`        | Consecutive failures before cooldown                                       |
+| `PROXY_COOLDOWN_MS`           | `60000`    | How long a failed/blocked proxy is benched                                 |
+| `SESSION_STORE_PATH`          | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous               |
+| `SESSION_MAX_FAILURES`        | `3`        | Consecutive failures before cooldown                                       |
+| `SESSION_COOLDOWN_MS`         | `300000`   | How long a blocked session is benched                                      |
+| `INSTAGRAM_POST_DOC_ID`       | current ID | Anonymous post metadata operation                                          |
+| `INSTAGRAM_CLIPS_DOC_ID`      | current ID | Recent creator-Reels operation                                             |
+| `INSTAGRAM_CLIPS_MAX_PAGES`   | `2`        | Maximum anonymous clips pages checked per candidate author                 |
+| `INSTAGRAM_CLIPS_MAX_AUTHORS` | `3`        | Maximum primary/coauthor accounts checked per Reel                         |
 
 **Credentials never live in source.** Proxy credentials are read from `PROXY_POOL` and
 kept inside the in-memory `ProxyTarget`; everything user-facing (logs, metrics, run
@@ -283,9 +285,11 @@ likes, comments and shares to replace rounded embed values. The older
 volatile payload parser is isolated from HTTP and orchestration.
 
 Instagram bootstraps an anonymous CSRF context once per proxy, calls the current Polaris
-post operation, and queries the creator's first 12 clips only when views are missing.
-Older Reels require a compatible session and use authenticated media-info. GraphQL
-document IDs are configurable because they are undocumented and volatile.
+post operation, and queries creator clips only when views are missing. Clips lookup is
+bounded by configurable page and author limits, uses Instagram's `max_id` cursor, and
+checks public coauthors. Reels outside those bounds require a compatible session and use
+authenticated media-info. GraphQL document IDs are configurable because they are
+undocumented and volatile.
 
 ## 11. Output contract
 
@@ -319,9 +323,9 @@ including the case of the same video appearing twice with different `scraped_at`
 
 - **Instagram uses undocumented first-party operations.** Document IDs and response
   shapes can change. A malformed response becomes a visible `parse_error`.
-- **Old Instagram Reels need a dedicated session.** Without one, recovered likes and
-  comments are preserved in a failure row and missing exact views are never considered
-  a successful scrape.
+- **Instagram clips lookup is deliberately bounded.** The anonymous path checks at most
+  two pages across three primary/coauthor accounts by default. Reels outside those bounds
+  need a dedicated session; missing exact views are never considered successful.
 - **Instagram shares and saves are usually unavailable to non-owners.** They remain
   `null` unless a tested response supplies an integer.
 - **TikTok acquisition depends on undocumented public-page hydration JSON.** A payload
@@ -334,15 +338,17 @@ including the case of the same video appearing twice with different `scraped_at`
 - **Run state is in-process.** The dashboard's run list is memory-only; the JSONL on disk
   is the durable artifact. No database, by design.
 - **The web API is dev-only** (see §7).
-- **Single process.** Sufficient for the ~500 rpm target; the `TaskQueue` port is the
-  seam if that ever changes.
+- **Single process and direct-IP scale remain unvalidated.** The `TaskQueue` port is the
+  seam for distributed execution, but the tested direct path did not approach 500 rpm.
 - **Latency samples are kept in full** in the metrics collector — fine for runs of this
   size, would want a histogram for very long runs.
 
 ## 13. What remains to implement
 
-1. Build the first varied 20-URL Instagram dataset, then expand it to 100 URLs.
-2. Validate the authenticated Instagram fallback with a dedicated local test session.
+1. Rerun the full 100-URL Instagram set post-pagination with a 30-second timeout and tune
+   direct-IP concurrency from the measured latency.
+2. Validate the authenticated Instagram fallback for Reels beyond the anonymous page and
+   coauthor bounds using a dedicated local test session.
 3. Resolve TikTok `vm.tiktok.com` / `vt.tiktok.com` short links and feed the final canonical
    URL back into output and de-duplication.
 4. Validate the ~500 rpm target against a real proxy workload and tune concurrency, pacing and
