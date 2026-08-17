@@ -1,0 +1,4 @@
+# pnpm >= 10 reads settings from this file rather than the "pnpm" field in package.json.
+# esbuild (a Vite/Vitest dependency) needs its postinstall script to fetch its native binary.
+allowBuilds:
+  esbuild: true

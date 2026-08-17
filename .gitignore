@@ -1,0 +1,21 @@
+node_modules/
+dist/
+coverage/
+.vite/
+
+# Runtime artifacts: scrape output is append-only and machine generated.
+output/*
+!output/.gitkeep
+
+# Secrets and local configuration. Never commit real proxy or session credentials.
+.env
+.env.local
+.env.*.local
+sessions.json
+sessions.*.json
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.log
