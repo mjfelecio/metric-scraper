@@ -29,6 +29,8 @@ const DEFAULT_USER_AGENT =
 export interface InstagramScraperOptions {
   postDocId?: string | undefined;
   clipsDocId?: string | undefined;
+  clipsMaxPages?: number | undefined;
+  clipsMaxAuthors?: number | undefined;
 }
 
 interface AnonymousState {
@@ -46,12 +48,16 @@ export class InstagramScraper implements Scraper {
   readonly platform: Platform = 'instagram';
   private readonly postDocId: string;
   private readonly clipsDocId: string;
+  private readonly clipsMaxPages: number;
+  private readonly clipsMaxAuthors: number;
   private readonly anonymousStates = new Map<string, Promise<AnonymousState>>();
   private readonly inFlightClips = new Map<string, Promise<HttpResponse>>();
 
   constructor(options: InstagramScraperOptions = {}) {
     this.postDocId = options.postDocId ?? '27128499623469141';
     this.clipsDocId = options.clipsDocId ?? '27234427476213202';
+    this.clipsMaxPages = options.clipsMaxPages ?? 2;
+    this.clipsMaxAuthors = options.clipsMaxAuthors ?? 3;
   }
 
   async scrape(url: string, context: ScrapeContext): Promise<ScrapeResult> {
@@ -98,15 +104,29 @@ export class InstagramScraper implements Scraper {
     }
     if (post.views !== null) return scrapeSuccess(recovered, metadata(state));
 
+    let anonymousFailure: ScrapeResult | null = null;
     try {
       const anonymous = await this.anonymousState(context, state);
-      const response = await this.clipsQuery(post.authorId, anonymous, context, state);
-      const failure = httpFailure(response, recovered, metadata(state), 'clips lookup');
-      if (failure === null) {
-        const views = parseInstagramClipsResponse(response.body, canonical.shortcode);
-        if (views !== null) return scrapeSuccess({ ...recovered, views }, metadata(state));
+      for (const authorId of post.authorIds.slice(0, this.clipsMaxAuthors)) {
+        let cursor: string | null = null;
+        for (let pageNumber = 1; pageNumber <= this.clipsMaxPages; pageNumber += 1) {
+          const response = await this.clipsQuery(authorId, cursor, anonymous, context, state);
+          const failure = httpFailure(response, recovered, metadata(state), 'clips lookup');
+          if (failure !== null) {
+            anonymousFailure = failure;
+            break;
+          }
+          const page = parseInstagramClipsResponse(response.body, canonical.shortcode);
+          if (page.views !== null) {
+            return scrapeSuccess({ ...recovered, views: page.views }, metadata(state));
+          }
+          if (!page.hasNextPage || page.endCursor === null) break;
+          cursor = page.endCursor;
+        }
+        if (anonymousFailure !== null) break;
       }
     } catch (error) {
+      anonymousFailure = parseOrThrownFailure(error, recovered, metadata(state));
       context.logger.debug(
         { message: error instanceof Error ? error.message : String(error) },
         'anonymous Instagram clips lookup failed; trying session fallback',
@@ -116,6 +136,7 @@ export class InstagramScraper implements Scraper {
     if (canUseSession(context)) {
       return await this.authenticatedFallback(canonical, context, state, recovered);
     }
+    if (anonymousFailure !== null) return anonymousFailure;
 
     return scrapeFailure(
       'error',
@@ -266,16 +287,21 @@ export class InstagramScraper implements Scraper {
 
   private async clipsQuery(
     authorId: string,
+    cursor: string | null,
     anonymous: AnonymousState,
     context: ScrapeContext,
     state: AttemptState,
   ): Promise<HttpResponse> {
-    const key = `${context.proxy?.id ?? 'direct'}:${authorId}`;
+    const key = `${context.proxy?.id ?? 'direct'}:${authorId}:${cursor ?? 'first'}`;
     const existing = this.inFlightClips.get(key);
     if (existing !== undefined) return await existing;
-    const variables = JSON.stringify({
-      data: { include_feed_video: true, page_size: 12, target_user_id: authorId },
-    });
+    const data: Record<string, string | number | boolean> = {
+      include_feed_video: true,
+      page_size: 12,
+      target_user_id: authorId,
+    };
+    if (cursor !== null) data.max_id = cursor;
+    const variables = JSON.stringify({ data });
     const request = this.graphqlRequest(
       new URLSearchParams({ variables, doc_id: this.clipsDocId, server_timestamps: 'true' }),
       'https://www.instagram.com/',
@@ -323,7 +349,7 @@ export class InstagramScraper implements Scraper {
 }
 
 function stripInternal(post: InstagramPostData): ScrapedVideoData {
-  const { shortcode: _shortcode, authorId: _authorId, mediaType: _mediaType, ...data } = post;
+  const { shortcode: _shortcode, authorIds: _authorIds, mediaType: _mediaType, ...data } = post;
   return data;
 }
 

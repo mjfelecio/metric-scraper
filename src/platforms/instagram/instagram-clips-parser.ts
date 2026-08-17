@@ -10,6 +10,12 @@ const ClipsResponseSchema = z.object({
           edges: z.array(
             z.object({ node: z.object({ media: z.record(z.string(), z.unknown()) }) }),
           ),
+          page_info: z
+            .object({
+              end_cursor: z.string().nullable().optional(),
+              has_next_page: z.boolean().optional(),
+            })
+            .nullish(),
         })
         .nullish(),
     })
@@ -18,8 +24,14 @@ const ClipsResponseSchema = z.object({
   message: z.string().optional(),
 });
 
-/** Find the exact public Reel play count in a creator's recent clips response. */
-export function parseInstagramClipsResponse(body: string, shortcode: string): number | null {
+export interface InstagramClipsPage {
+  views: number | null;
+  endCursor: string | null;
+  hasNextPage: boolean;
+}
+
+/** Find a Reel's exact play count and the cursor for a bounded next-page lookup. */
+export function parseInstagramClipsResponse(body: string, shortcode: string): InstagramClipsPage {
   const parsed = ClipsResponseSchema.safeParse(parseJson(body, 'Instagram clips'));
   if (!parsed.success)
     throw new InstagramParseError('Instagram clips response has an invalid shape');
@@ -29,11 +41,19 @@ export function parseInstagramClipsResponse(body: string, shortcode: string): nu
     );
   }
 
-  const edges = parsed.data.data?.xdt_api__v1__clips__user__connection_v2?.edges ?? [];
+  const connection = parsed.data.data?.xdt_api__v1__clips__user__connection_v2;
+  const edges = connection?.edges ?? [];
+  let views: number | null = null;
   for (const edge of edges) {
     if (edge.node.media.code === shortcode) {
-      return parseOptionalCount(edge.node.media.play_count, 'play_count');
+      views = parseOptionalCount(edge.node.media.play_count, 'play_count');
+      break;
     }
   }
-  return null;
+  const endCursor = connection?.page_info?.end_cursor ?? null;
+  return {
+    views,
+    endCursor,
+    hasNextPage: connection?.page_info?.has_next_page === true && endCursor !== null,
+  };
 }

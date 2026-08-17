@@ -25,6 +25,10 @@ describe('Instagram response parsers', () => {
                 comment_count: 18567,
                 taken_at: 1_700_000_000,
                 user: { pk: '25025320', username: 'instagram' },
+                coauthor_producers: [
+                  { pk: '528817151', username: 'nasa' },
+                  { pk: '25025320', username: 'instagram' },
+                ],
               },
             ],
           },
@@ -41,14 +45,14 @@ describe('Instagram response parsers', () => {
       likes: 920205,
       comments: 18567,
       author_handle: 'instagram',
-      authorId: '25025320',
+      authorIds: ['25025320', '528817151'],
       mediaType: 2,
       posted_at: '2023-11-14T22:13:20.000Z',
     });
   });
 
   it('finds an exact play count in recent clips', () => {
-    const views = parseInstagramClipsResponse(
+    const page = parseInstagramClipsResponse(
       JSON.stringify({
         data: {
           xdt_api__v1__clips__user__connection_v2: {
@@ -62,22 +66,23 @@ describe('Instagram response parsers', () => {
       }),
       CODE,
     );
-    expect(views).toBe(96047130);
+    expect(page).toEqual({ views: 96047130, endCursor: null, hasNextPage: false });
   });
 
-  it('returns null when a Reel is not in the recent clips page', () => {
-    const views = parseInstagramClipsResponse(
+  it('returns pagination metadata when a Reel is not in the current clips page', () => {
+    const page = parseInstagramClipsResponse(
       JSON.stringify({
         data: {
           xdt_api__v1__clips__user__connection_v2: {
             edges: [{ node: { media: { code: 'other', play_count: 1 } } }],
+            page_info: { end_cursor: 'next-page', has_next_page: true },
           },
         },
         status: 'ok',
       }),
       CODE,
     );
-    expect(views).toBeNull();
+    expect(page).toEqual({ views: null, endCursor: 'next-page', hasNextPage: true });
   });
 
   it('parses authenticated media-info and prefers play_count', () => {

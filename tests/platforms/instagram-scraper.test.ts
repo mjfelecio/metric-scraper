@@ -35,7 +35,9 @@ function rootResponseWithHtmlCsrf(): HttpResponse {
   });
 }
 
-function postBody(options: { views?: number | null; mediaType?: number } = {}): string {
+function postBody(
+  options: { views?: number | null; mediaType?: number; coauthorIds?: string[] } = {},
+): string {
   return JSON.stringify({
     data: {
       xdt_api__v1__media__shortcode__web_info: {
@@ -50,6 +52,7 @@ function postBody(options: { views?: number | null; mediaType?: number } = {}): 
             comment_count: 18567,
             taken_at: 1_700_000_000,
             user: { pk: '25025320', username: 'instagram' },
+            coauthor_producers: options.coauthorIds?.map((pk) => ({ pk })),
           },
         ],
       },
@@ -58,11 +61,21 @@ function postBody(options: { views?: number | null; mediaType?: number } = {}): 
   });
 }
 
-function clipsBody(views: number | null): string {
+function clipsBody(
+  views: number | null,
+  pageInfo: { endCursor: string | null; hasNextPage: boolean } | null = null,
+): string {
   return JSON.stringify({
     data: {
       xdt_api__v1__clips__user__connection_v2: {
         edges: views === null ? [] : [{ node: { media: { code: CODE, play_count: views } } }],
+        page_info:
+          pageInfo === null
+            ? null
+            : {
+                end_cursor: pageInfo.endCursor,
+                has_next_page: pageInfo.hasNextPage,
+              },
       },
     },
     status: 'ok',
@@ -161,6 +174,63 @@ describe('InstagramScraper', () => {
     expect(request.mock.calls[2]?.[0].body).toContain('doc_id=27234427476213202');
   });
 
+  it('uses max_id to find exact views on a bounded second anonymous clips page', async () => {
+    const request = vi
+      .fn<HttpClient['request']>()
+      .mockResolvedValueOnce(rootResponse())
+      .mockResolvedValueOnce(response(200, postBody()))
+      .mockResolvedValueOnce(
+        response(200, clipsBody(null, { endCursor: 'cursor-page-2', hasNextPage: true })),
+      )
+      .mockResolvedValueOnce(response(200, clipsBody(96047130)));
+
+    const result = await new InstagramScraper().scrape(URL, context({ request }));
+
+    expect(result.outcome).toBe('ok');
+    if (result.outcome === 'ok') {
+      expect(result.data.views).toBe(96047130);
+      expect(result.acquisition).toEqual({ httpRequests: 4, sessionUsed: false });
+    }
+    const body = request.mock.calls[3]?.[0].body;
+    const variables = new URLSearchParams(body).get('variables');
+    expect(variables === null ? null : JSON.parse(variables)).toEqual({
+      data: {
+        include_feed_video: true,
+        page_size: 12,
+        target_user_id: '25025320',
+        max_id: 'cursor-page-2',
+      },
+    });
+  });
+
+  it('checks bounded public coauthor clips pages before requiring a session', async () => {
+    const request = vi
+      .fn<HttpClient['request']>()
+      .mockResolvedValueOnce(rootResponse())
+      .mockResolvedValueOnce(response(200, postBody({ coauthorIds: ['528817151'] })))
+      .mockResolvedValueOnce(
+        response(200, clipsBody(null, { endCursor: 'primary-page-2', hasNextPage: true })),
+      )
+      .mockResolvedValueOnce(response(200, clipsBody(null)))
+      .mockResolvedValueOnce(
+        response(200, clipsBody(null, { endCursor: 'coauthor-page-2', hasNextPage: true })),
+      )
+      .mockResolvedValueOnce(response(200, clipsBody(70905)));
+
+    const result = await new InstagramScraper().scrape(URL, context({ request }));
+
+    expect(result.outcome).toBe('ok');
+    if (result.outcome === 'ok') {
+      expect(result.data.views).toBe(70905);
+      expect(result.acquisition).toEqual({ httpRequests: 6, sessionUsed: false });
+    }
+    const coauthorRequest = request.mock.calls[4]?.[0].body;
+    const variables = new URLSearchParams(coauthorRequest).get('variables');
+    const parsedVariables =
+      variables === null ? null : (JSON.parse(variables) as { data: { target_user_id: string } });
+    expect(parsedVariables?.data.target_user_id).toBe('528817151');
+  });
+
   it('uses authenticated media-info when an old Reel is absent from recent clips', async () => {
     const request = vi
       .fn<HttpClient['request']>()
@@ -245,6 +315,23 @@ describe('InstagramScraper', () => {
       expect(result.status).toBe('rate_limited');
       expect(result.error.retryable).toBe(true);
       expect(result.partial?.video_id).toBe(MEDIA_ID);
+    }
+  });
+
+  it('preserves a clips HTTP failure instead of mislabeling it as a session requirement', async () => {
+    const request = vi
+      .fn<HttpClient['request']>()
+      .mockResolvedValueOnce(rootResponse())
+      .mockResolvedValueOnce(response(200, postBody()))
+      .mockResolvedValueOnce(response(429));
+
+    const result = await new InstagramScraper().scrape(URL, context({ request }));
+
+    expect(result.outcome).toBe('failure');
+    if (result.outcome === 'failure') {
+      expect(result.status).toBe('rate_limited');
+      expect(result.error.code).toBe('rate_limited');
+      expect(result.error.retryable).toBe(true);
     }
   });
 

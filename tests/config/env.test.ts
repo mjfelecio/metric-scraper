@@ -15,6 +15,8 @@ describe('loadConfig', () => {
     expect(config.outputDir).toBe('./output');
     expect(config.proxy.pool).toBe('');
     expect(config.session.storePath).toBeNull();
+    expect(config.instagram.clipsMaxPages).toBe(2);
+    expect(config.instagram.clipsMaxAuthors).toBe(3);
   });
 
   it('reads overrides from the environment', () => {
@@ -24,12 +26,16 @@ describe('loadConfig', () => {
       RETRY_MAX_ATTEMPTS: '5',
       RETRY_JITTER: 'false',
       OUTPUT_DIR: '/tmp/snapshots',
+      INSTAGRAM_CLIPS_MAX_PAGES: '3',
+      INSTAGRAM_CLIPS_MAX_AUTHORS: '2',
     });
 
     expect(config.concurrency).toBe(25);
     expect(config.retry.maxAttempts).toBe(5);
     expect(config.retry.jitter).toBe(false);
     expect(config.outputDir).toBe('/tmp/snapshots');
+    expect(config.instagram.clipsMaxPages).toBe(3);
+    expect(config.instagram.clipsMaxAuthors).toBe(2);
   });
 
   it('treats an empty string as unset', () => {
@@ -56,6 +62,8 @@ describe('loadConfig', () => {
   it('rejects out-of-range values', () => {
     expect(() => load({ SCRAPER_CONCURRENCY: '0' })).toThrow(/invalid configuration/);
     expect(() => load({ RETRY_MAX_ATTEMPTS: '0' })).toThrow(/invalid configuration/);
+    expect(() => load({ INSTAGRAM_CLIPS_MAX_PAGES: '0' })).toThrow(/invalid configuration/);
+    expect(() => load({ INSTAGRAM_CLIPS_MAX_AUTHORS: '0' })).toThrow(/invalid configuration/);
   });
 
   it('rejects a max delay below the initial delay', () => {

@@ -42,6 +42,8 @@ export const AppConfigSchema = z.object({
   instagram: z.object({
     postDocId: z.string().regex(/^\d+$/),
     clipsDocId: z.string().regex(/^\d+$/),
+    clipsMaxPages: z.number().int().min(1).max(10),
+    clipsMaxAuthors: z.number().int().min(1).max(10),
   }),
 });
 
@@ -102,6 +104,8 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     instagram: {
       postDocId: str(env.INSTAGRAM_POST_DOC_ID) ?? '27128499623469141',
       clipsDocId: str(env.INSTAGRAM_CLIPS_DOC_ID) ?? '27234427476213202',
+      clipsMaxPages: int(env, 'INSTAGRAM_CLIPS_MAX_PAGES', 2),
+      clipsMaxAuthors: int(env, 'INSTAGRAM_CLIPS_MAX_AUTHORS', 3),
     },
   };
 

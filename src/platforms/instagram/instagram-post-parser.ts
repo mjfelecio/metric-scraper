@@ -24,7 +24,7 @@ const PostResponseSchema = z.object({
 
 export interface InstagramPostData extends ScrapedVideoData {
   shortcode: string;
-  authorId: string;
+  authorIds: string[];
   mediaType: number;
 }
 
@@ -56,10 +56,11 @@ export function parseInstagramPostResponse(
   const mediaType = parseRequiredCount(item.media_type, 'media_type');
   const user = recordField(item.user, 'user');
   const authorId = numericStringField(user.pk, 'user.pk');
+  const authorIds = [authorId, ...coauthorIds(item.coauthor_producers, authorId)];
 
   return {
     shortcode,
-    authorId,
+    authorIds,
     mediaType,
     video_id: expectedMediaId,
     views: firstCount(item.play_count, item.view_count, item.video_view_count),
@@ -71,6 +72,27 @@ export function parseInstagramPostResponse(
     author_follower_count: firstCount(user.follower_count, user.followers_count),
     posted_at: parseTimestamp(item.taken_at, 'taken_at'),
   };
+}
+
+function coauthorIds(value: unknown, primaryAuthorId: string): string[] {
+  const candidates = Array.isArray(value)
+    ? value
+    : value === null || value === undefined
+      ? []
+      : [value];
+  const ids: string[] = [];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) continue;
+    const pk = (candidate as Record<string, unknown>).pk;
+    const id =
+      typeof pk === 'string' && /^\d+$/.test(pk)
+        ? pk
+        : typeof pk === 'number' && Number.isSafeInteger(pk) && pk >= 0
+          ? String(pk)
+          : null;
+    if (id !== null && id !== primaryAuthorId && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
 }
 
 function firstCount(...values: unknown[]): number | null {
