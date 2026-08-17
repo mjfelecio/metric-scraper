@@ -1,0 +1,79 @@
+import { type Platform } from '../models/platform.js';
+
+import { type ProxyLease, type SessionLease } from './lease-ports.js';
+
+export interface ProxyHealth {
+  id: string;
+  requests: number;
+  successes: number;
+  failures: number;
+  /** Consecutive failures since the last success. Drives cooldown. */
+  consecutiveFailures: number;
+  blocked: boolean;
+  /** Epoch ms until which this proxy is out of rotation, if any. */
+  cooldownUntil: number | null;
+  inUse: boolean;
+}
+
+export interface ProxyPoolStats {
+  configured: number;
+  available: number;
+  inUse: number;
+  blocked: number;
+  totalRequests: number;
+  totalFailures: number;
+  perProxy: ProxyHealth[];
+}
+
+/**
+ * Rotation and health tracking for outbound IPs.
+ *
+ * `acquire` returning `null` is a first-class case: it means "no proxies are
+ * configured, go direct". That is the default for local development, and it is
+ * why nothing in this repository needs proxy credentials to run.
+ */
+export interface ProxyPool {
+  acquire(signal?: AbortSignal): Promise<ProxyLease | null>;
+  /** Return a lease to rotation without changing its health. */
+  release(lease: ProxyLease): void;
+  reportSuccess(lease: ProxyLease): void;
+  reportFailure(lease: ProxyLease, reason?: string): void;
+  /** Take a proxy out of rotation (detected block / hard ban). */
+  markBlocked(lease: ProxyLease, reason?: string): void;
+  getStats(): ProxyPoolStats;
+}
+
+export interface SessionHealth {
+  id: string;
+  platform: Platform;
+  requests: number;
+  failures: number;
+  consecutiveFailures: number;
+  blocked: boolean;
+  cooldownUntil: number | null;
+  inUse: boolean;
+}
+
+export interface SessionPoolStats {
+  configured: number;
+  available: number;
+  inUse: number;
+  blocked: number;
+  perSession: SessionHealth[];
+}
+
+/**
+ * Rotation for logged-in platform identities.
+ *
+ * Whether either platform requires a session is an open question — see the
+ * README. `acquire` returning `null` means "run anonymously", which is the
+ * graceful-degradation path the runner already takes.
+ */
+export interface SessionPool {
+  acquire(platform: Platform, signal?: AbortSignal): Promise<SessionLease | null>;
+  release(lease: SessionLease): void;
+  reportSuccess(lease: SessionLease): void;
+  reportFailure(lease: SessionLease, reason?: string): void;
+  markBlocked(lease: SessionLease, reason?: string): void;
+  getStats(): SessionPoolStats;
+}
