@@ -138,7 +138,19 @@ export function createProxyPool(config: AppConfig, logger: Logger): ProxyPool {
     logger.debug('no proxies configured; requests will go out directly');
     return new NullProxyPool();
   }
-  logger.info({ proxies: targets.length }, 'proxy pool configured');
+  logger.info(
+    {
+      proxies: targets.length,
+      max_concurrent_per_proxy: config.proxy.maxConcurrentPerProxy,
+      // The ceiling on simultaneous proxied requests. Below the configured
+      // concurrency, this — not the queue — is what the run is bounded by.
+      capacity:
+        config.proxy.maxConcurrentPerProxy === 0
+          ? null
+          : targets.length * config.proxy.maxConcurrentPerProxy,
+    },
+    'proxy pool configured',
+  );
   return new InMemoryProxyPool({
     targets,
     maxConsecutiveFailures: config.proxy.maxConsecutiveFailures,

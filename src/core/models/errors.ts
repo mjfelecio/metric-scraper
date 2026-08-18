@@ -17,6 +17,7 @@ export const SCRAPE_ERROR_CODES = [
   'http_error',
   'rate_limited',
   'blocked',
+  'geo_blocked',
   'not_found',
   'private',
   'parse_error',
@@ -59,6 +60,7 @@ const DEFAULT_STATUS_BY_CODE: Record<ScrapeErrorCode, FailureStatus> = {
   http_error: 'error',
   rate_limited: 'rate_limited',
   blocked: 'rate_limited',
+  geo_blocked: 'error',
   not_found: 'not_found',
   private: 'private',
   parse_error: 'error',
@@ -79,6 +81,9 @@ const DEFAULT_RETRYABLE_BY_CODE: Record<ScrapeErrorCode, boolean> = {
   http_error: true,
   rate_limited: true,
   blocked: true,
+  // The URL is unavailable *from this exit node*. Another one may not be
+  // blocked, and every retry leases a fresh proxy, so this is worth retrying.
+  geo_blocked: true,
   not_found: false,
   private: false,
   parse_error: false,

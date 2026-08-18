@@ -42,7 +42,7 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     status_breakdown: { ok: 8, not_found: 0, private: 0, rate_limited: 1, error: 1 },
     error_breakdown: { rate_limited: 1, network_error: 1 },
     retries: { total_retries: 4, retried_requests: 3, exhausted_requests: 1 },
-    proxies: { configured: 0, used: 0, blocked: 0, total_failures: 0, per_proxy: [] },
+    proxies: { configured: 0, used: 0, blocked: 0, retired: 0, total_failures: 0, per_proxy: [] },
     sessions: { configured: 0, used: 0, blocked: 0, total_failures: 0, per_session: [] },
     output: { snapshots_path: null, summary_path: null, rows_written: 10 },
     ...overrides,

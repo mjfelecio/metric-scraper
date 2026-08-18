@@ -1,4 +1,4 @@
-import { ScrapeError } from '../../core/models/errors.js';
+import { ScrapeError, type ScrapeErrorInfo } from '../../core/models/errors.js';
 import { type Platform } from '../../core/models/platform.js';
 import {
   scrapeFailure,
@@ -82,6 +82,9 @@ export class TikTokScraper implements Scraper {
         { code: 'blocked', message: 'TikTok blocked the anonymous request', retryable: true },
         partial,
       );
+    }
+    if (response.status === 451) {
+      return scrapeFailure('error', geoBlocked(response.status), partial);
     }
     if (response.status < 200 || response.status >= 300) {
       const retryable = response.status >= 500 || response.status === 408;
@@ -175,6 +178,9 @@ function failureFromHttpResponse(
       partial,
     );
   }
+  if (response.status === 451) {
+    return scrapeFailure('error', geoBlocked(response.status), partial);
+  }
   if (response.status < 200 || response.status >= 300) {
     const retryable = response.status >= 500 || response.status === 408;
     return scrapeFailure(
@@ -188,6 +194,20 @@ function failureFromHttpResponse(
     );
   }
   return null;
+}
+
+/**
+ * HTTP 451 is a statement about where the request came *from*, not about the
+ * video: the exit node sits in a jurisdiction that blocks it. Retrying is
+ * worthwhile because every attempt leases a different proxy, and the pool
+ * needs this reported separately so the offending exit node can be retired.
+ */
+function geoBlocked(status: number): ScrapeErrorInfo {
+  return {
+    code: 'geo_blocked',
+    message: `TikTok returned HTTP ${status} for this exit node's region`,
+    retryable: true,
+  };
 }
 
 function looksLikeChallengePage(body: string): boolean {

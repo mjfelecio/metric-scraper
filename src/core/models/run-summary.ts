@@ -12,12 +12,22 @@ export const LatencySummarySchema = z.object({
 });
 export type LatencySummary = z.infer<typeof LatencySummarySchema>;
 
+/**
+ * Per-proxy tallies, classified exactly as the pool's rotation classified them.
+ *
+ * `successes` means "healthy use of this proxy", so a `not_found` or `private`
+ * answer counts here: the proxy delivered a definitive result and the pool
+ * credits it. Per-URL outcomes live in `status_breakdown` instead. Anything
+ * counted in `failures` is something rotation acted on.
+ */
 export const ProxyUsageSchema = z.object({
   /** Stable identifier. Never contains credentials. */
   proxy_id: z.string(),
   requests: z.number().int().nonnegative(),
   successes: z.number().int().nonnegative(),
   failures: z.number().int().nonnegative(),
+  /** Subset of `failures` blamed on the exit node itself (HTTP 451). */
+  unsuitable: z.number().int().nonnegative(),
   blocked: z.boolean(),
 });
 export type ProxyUsage = z.infer<typeof ProxyUsageSchema>;
@@ -26,6 +36,8 @@ export const ProxySummarySchema = z.object({
   configured: z.number().int().nonnegative(),
   used: z.number().int().nonnegative(),
   blocked: z.number().int().nonnegative(),
+  /** Proxies taken out of rotation for good as unsuitable exit nodes. */
+  retired: z.number().int().nonnegative(),
   total_failures: z.number().int().nonnegative(),
   per_proxy: z.array(ProxyUsageSchema),
 });

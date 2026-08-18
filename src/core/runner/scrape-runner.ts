@@ -23,11 +23,12 @@ import { type SnapshotSink } from '../output/snapshot-sink.js';
 import { realSleep, type Sleep } from '../retry/sleep.js';
 import { type RetryPolicy } from '../retry/retry-policy.js';
 import { type HttpClient } from '../scraper/http-port.js';
-import { type ProxyLease, type SessionLease } from '../scraper/lease-ports.js';
+import { type ProxyLease, type ProxyOutcome, type SessionLease } from '../scraper/lease-ports.js';
 import { type ProxyPool, type SessionPool } from '../scraper/pool-ports.js';
 import { type ScraperRegistry } from '../scraper/scraper.js';
 
 import { buildRunSummary } from './build-summary.js';
+import { classifyProxyOutcome } from './proxy-outcome.js';
 import { type JobCompletedEvent, type RunCounts, type RunProgress } from './types.js';
 
 export interface ScrapeRunnerConfig {
@@ -371,8 +372,12 @@ export class ScrapeRunner {
       lastResult = result;
       platformHttpRequests += attemptHttpRequests;
       if (proxyLease !== null) {
-        this.reportProxyOutcome(proxyLease, result);
-        metrics.recordProxyOutcome(proxyLease.id, proxyOutcomeOf(result));
+        // Classified once, then reported to both the pool and the metrics, so
+        // rotation state and the summary can never disagree about what this
+        // attempt said about the proxy.
+        const proxyOutcome = classifyProxyOutcome(result);
+        this.applyProxyOutcome(proxyLease, proxyOutcome, result);
+        metrics.recordProxyOutcome(proxyLease.id, proxyOutcome);
       }
       if (sessionLease !== null) {
         if (result.acquisition?.sessionUsed === true) {
@@ -432,18 +437,25 @@ export class ScrapeRunner {
     return { snapshot, attempts: attempt, retries, proxyId: lastProxyId, platformHttpRequests };
   }
 
-  private reportProxyOutcome(lease: ProxyLease, result: ScrapeResult): void {
+  private applyProxyOutcome(lease: ProxyLease, outcome: ProxyOutcome, result: ScrapeResult): void {
     const pool = this.deps.proxyPool;
-    if (result.outcome === 'ok') {
-      pool.reportSuccess(lease);
-    } else if (result.status === 'rate_limited' || result.error.code === 'blocked') {
-      pool.markBlocked(lease, result.error.message);
-    } else if (result.error.retryable) {
-      pool.reportFailure(lease, result.error.message);
-    } else {
-      // A permanent per-URL outcome (not_found/private) says nothing bad about
-      // the proxy, so it counts as a healthy use.
-      pool.reportSuccess(lease);
+    const reason = result.outcome === 'ok' ? undefined : result.error.message;
+    switch (outcome) {
+      case 'success':
+        pool.reportSuccess(lease);
+        break;
+      case 'blocked':
+        pool.markBlocked(lease, reason);
+        break;
+      case 'unsuitable':
+        pool.reportUnsuitable(lease, reason);
+        break;
+      case 'failure':
+        pool.reportFailure(lease, reason);
+        break;
+      case 'neutral':
+        // Neither credited nor blamed: the lease just goes back.
+        break;
     }
     pool.release(lease);
   }
@@ -468,12 +480,6 @@ function failureFromThrown(error: unknown): ScrapeResult {
   const scrapeError = ScrapeError.from(error);
   const status: FailureStatus = scrapeError.status === 'ok' ? 'error' : scrapeError.status;
   return { outcome: 'failure', status, error: scrapeError.toInfo() };
-}
-
-function proxyOutcomeOf(result: ScrapeResult): 'success' | 'failure' | 'blocked' {
-  if (result.outcome === 'ok') return 'success';
-  if (result.status === 'rate_limited' || result.error.code === 'blocked') return 'blocked';
-  return 'failure';
 }
 
 function extractErrorCode(error: string | null): string | null {

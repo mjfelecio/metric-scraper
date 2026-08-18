@@ -7,9 +7,13 @@ export interface ProxyHealth {
   requests: number;
   successes: number;
   failures: number;
+  /** Failures attributed to the exit node being wrong for the target (HTTP 451). */
+  unsuitable: number;
   /** Consecutive failures since the last success. Drives cooldown. */
   consecutiveFailures: number;
   blocked: boolean;
+  /** Permanently out of rotation: a jurisdiction block does not expire. */
+  retired: boolean;
   /** Epoch ms until which this proxy is out of rotation, if any. */
   cooldownUntil: number | null;
   inUse: boolean;
@@ -20,6 +24,8 @@ export interface ProxyPoolStats {
   available: number;
   inUse: number;
   blocked: number;
+  /** Proxies retired as unsuitable exit nodes. Never come back. */
+  retired: number;
   totalRequests: number;
   totalFailures: number;
   perProxy: ProxyHealth[];
@@ -38,6 +44,13 @@ export interface ProxyPool {
   release(lease: ProxyLease): void;
   reportSuccess(lease: ProxyLease): void;
   reportFailure(lease: ProxyLease, reason?: string): void;
+  /**
+   * The exit node is wrong for this target rather than failing (HTTP 451).
+   *
+   * Distinct from `reportFailure` because a cooldown cannot fix a jurisdiction:
+   * repeat it and the proxy is retired for good instead of returning in 60 s.
+   */
+  reportUnsuitable(lease: ProxyLease, reason?: string): void;
   /** Take a proxy out of rotation (detected block / hard ban). */
   markBlocked(lease: ProxyLease, reason?: string): void;
   getStats(): ProxyPoolStats;

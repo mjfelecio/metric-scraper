@@ -48,3 +48,18 @@ export interface SessionLease {
 
 /** How a lease was used, reported back so the pool can track health. */
 export type LeaseOutcome = 'success' | 'failure' | 'blocked';
+
+/**
+ * What one attempt said about the proxy it went out through.
+ *
+ * Wider than `LeaseOutcome` because a proxy has two failure modes a session
+ * does not:
+ *
+ * - `unsuitable` — the exit node itself is wrong for this target (HTTP 451
+ *   from a jurisdiction that blocks the platform). A cooldown does not fix
+ *   that, so it is tracked separately from transient failure.
+ * - `neutral`    — the attempt says nothing about the proxy (cancelled before
+ *   it ran, a parse error that any exit node would have produced). Crediting
+ *   these as success is what let a dead proxy keep resetting its own health.
+ */
+export type ProxyOutcome = LeaseOutcome | 'unsuitable' | 'neutral';
