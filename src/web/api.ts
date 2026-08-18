@@ -66,8 +66,10 @@ export function startRun(body: StartRunRequest): Promise<RunStateDto> {
   });
 }
 
-export function fetchRun(runId: string): Promise<RunStateDto> {
-  return request<RunStateDto>(`/runs/${encodeURIComponent(runId)}`);
+/** `since` is a timeline cursor: only samples newer than it come back. */
+export function fetchRun(runId: string, since = 0): Promise<RunStateDto> {
+  const query = since > 0 ? `?since=${String(since)}` : '';
+  return request<RunStateDto>(`/runs/${encodeURIComponent(runId)}${query}`);
 }
 
 export function cancelRun(runId: string): Promise<{ cancelled: boolean }> {
@@ -78,4 +80,8 @@ export function cancelRun(runId: string): Promise<{ cancelled: boolean }> {
 
 export function outputUrl(runId: string): string {
   return `/api/runs/${encodeURIComponent(runId)}/output`;
+}
+
+export function sessionSummaryUrl(runId: string): string {
+  return `/api/runs/${encodeURIComponent(runId)}/session`;
 }

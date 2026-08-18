@@ -28,7 +28,12 @@ scrape. Rows are **observations, not entities**: scraping the same video twice o
 purpose produces two rows, which is what makes the dataset a time series. Failures are
 rows too — a request that fails is recorded with a status and an error, never dropped.
 
-Out of scope for v1 (explicitly): scheduling, database design, and bot-detection logic.
+Out of scope for v1 (explicitly): database design and bot-detection logic.
+
+The batch can also run **continuously** — repeating on a fixed-rate schedule — which is
+what sustains a throughput target over a long window and what a production polling
+cadence looks like. See [§6.1](#61-continuous-runs). Distributed scheduling is still out
+of scope: this is one process with a timer, not a job queue.
 
 ## 2. Architecture
 
@@ -75,7 +80,7 @@ one place, [`src/app/composition.ts`](src/app/composition.ts).
 | `src/core/retry`          | `RetryPolicy` — attempt budget, exponential backoff, retryability                      |
 | `src/core/concurrency`    | `TaskQueue` port + p-queue implementation                                              |
 | `src/core/rate-limit`     | rpm→queue pacing, token-bucket limiter                                                 |
-| `src/core/metrics`        | In-memory `MetricsCollector`, percentiles                                              |
+| `src/core/metrics`        | In-memory `MetricsCollector`, percentiles, throughput timeline                         |
 | `src/core/input`          | Pure input parser (text + JSON), shared by CLI and browser                             |
 | `src/core/url`            | Generic URL normalization + normalizer registry                                        |
 | `src/core/output`         | JSONL serialization and the `SnapshotSink` port                                        |
@@ -131,6 +136,7 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | `SCRAPER_TARGET_RPM`          | `500`      | Requests-per-minute ceiling; `0` disables pacing                           |
 | `SCRAPER_MAX_QUEUE_SIZE`      | `0`        | Max waiting jobs; `0` = unbounded                                          |
 | `SCRAPER_REQUEST_TIMEOUT_MS`  | `15000`    | Per-attempt timeout                                                        |
+| `SCRAPER_POLL_INTERVAL_MS`    | `900000`   | Default gap between cycle starts in `--watch`; `0` = back-to-back          |
 | `RETRY_MAX_ATTEMPTS`          | `3`        | Attempts per URL including the first; `1` disables retries                 |
 | `RETRY_INITIAL_DELAY_MS`      | `250`      | First backoff delay                                                        |
 | `RETRY_MAX_DELAY_MS`          | `10000`    | Backoff ceiling                                                            |
@@ -221,6 +227,50 @@ After `pnpm build`, the CLI also runs from `dist`:
 node dist/cli/index.js tiktok data/examples/tiktok-urls.txt
 ```
 
+### 6.1 Continuous runs
+
+A **cycle** is one pass over the batch; a **session** is a scheduled sequence of cycles.
+`--watch` turns any scrape command into a session.
+
+| Option                  | Meaning                                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------- |
+| `-w, --watch`           | Repeat the batch instead of running it once                                                 |
+| `--interval <duration>` | Time between cycle **starts**. Default `SCRAPER_POLL_INTERVAL_MS` (15m). `0` = back-to-back |
+| `--duration <duration>` | Stop starting new cycles after this much wall clock                                         |
+| `--max-cycles <n>`      | Stop after this many cycles                                                                 |
+
+Any of the last three implies `--watch`. Durations accept `0`, `500ms`, `30s`, `15m`, `2h`;
+a bare number is milliseconds.
+
+```bash
+# Sustain a target for ten minutes — the throughput acceptance run.
+pnpm cli tiktok data/examples/tiktok-urls.txt \
+  --watch --interval 0 --duration 10m --target-rpm 500 --concurrency 25
+```
+
+```bash
+# Production polling cadence.
+pnpm cli run config/run.example.json --watch --interval 15m
+```
+
+```bash
+# Same code path, fast enough to smoke-test.
+pnpm cli tiktok data/examples/tiktok-urls.txt --watch --interval 30s --max-cycles 5
+```
+
+The interval is measured **start to start** and computed from the session origin, so a
+session does not drift: `--interval 15m` begins a cycle every fifteen minutes whatever the
+cycles cost. A cycle that overruns its window does not push the schedule back — the next
+one starts immediately and the summary records the shortfall as `lag_ms`.
+
+**A session finishes and reports.** A cycle that throws is recorded, `cycles.failed` goes
+up, and the session carries on; only an unwritable output is fatal. A watchdog flags a
+cycle that stops making progress while work is still in flight. Ctrl-C stops after the
+cycle in flight, and the summary is still written — a second Ctrl-C exits immediately.
+
+Run configs carry the same settings (`watch`, `interval`, `duration`, `maxCycles`), and
+precedence is unchanged: **CLI > run config > environment**.
+
 ## 7. Running the web UI
 
 ```bash
@@ -231,6 +281,18 @@ Then open <http://localhost:5173>. The dashboard lets you pick a platform, paste
 upload a batch, set concurrency and target RPM, start a run, and watch state
 (`idle → preparing → running → completed | failed`), live progress, recent results,
 rejected input, the run summary, and a JSONL download.
+
+Tick **Continuous** to run a session instead, with the same three knobs as the CLI
+(interval, duration, max cycles). A session adds a `waiting` state for the gap between
+cycles — without it a fifteen-minute interval makes a healthy dashboard look hung — plus a
+**throughput graph** and a session-summary download.
+
+The graph plots the _instantaneous_ rate, derived from the delta between samples rather
+than the cumulative average, because a running average smooths away exactly the dips a
+soak test exists to find. It shows successes and failures shaded, a dashed reference line
+at the configured target, markers at cycle boundaries, and retries as a separate dotted
+line so they can never be misread as throughput. It is hand-rolled inline SVG — no chart
+library was added.
 
 It is a **development/observability tool, not a product UI**, so it runs inside the Vite
 dev server: a small plugin ([`src/web/server/dev-api-plugin.ts`](src/web/server/dev-api-plugin.ts))
@@ -256,6 +318,14 @@ serialization and append semantics, run-summary calculation, and the runner itse
 (failures become rows, retries are counted separately from requests, permanent failures
 are not retried, concurrency is respected, output failures are fatal). TikTok-specific
 tests cover hydration parsing, anonymous HTTP behavior and platform error mapping.
+
+Continuous runs add: duration parsing, the fixed-rate scheduler (no drift, overrun
+absorbed and reported, every stop condition, abort mid-wait), the throughput timeline
+(instantaneous rate from deltas, bounded buffer, cursor paging, sustained-window
+measurement), the session engine (**a throwing cycle does not stop the session**, all
+cycles append to one file, retries stay out of throughput, cancellation still reports),
+and the dashboard chart. The scheduler and timeline tests inject a fake clock, so nothing
+waits on real time.
 
 Automated tests do not call TikTok or Instagram. Platform implementations receive a stub
 `HttpClient` through `ScrapeContext`, so the suite stays deterministic and offline.
@@ -312,8 +382,35 @@ One JSON object per line, appended, UTF-8, keys in a fixed order:
 
 Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, actual
 throughput, raw platform HTTP calls, latency p50/p95/max, status and error breakdowns,
-retry statistics, proxy statistics and session burn/health statistics. Latency
-percentiles use the **nearest-rank** method, so a reported p95 is
+retry statistics, proxy statistics and session burn/health statistics.
+
+A continuous session writes one file per session instead, plus a summary per cycle:
+
+```
+output/
+  tiktok-<timestamp>.session.jsonl   # every row, all cycles, append-only
+  tiktok-<timestamp>.session.json    # aggregate session summary
+  cycles/
+    tiktok-<timestamp>.cycle-001.json
+    tiktok-<timestamp>.cycle-002.json
+```
+
+The session summary adds the schedule and its stop reason, per-cycle counts (including
+how many overran their interval), the sampled throughput timeline, and **two** throughput
+figures, because one number cannot serve both modes:
+
+| Field                 | Meaning                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------- |
+| `wall_clock_rpm`      | Requests over the whole session, idle gaps included. Deliberately tiny when polling |
+| `active_rpm`          | Requests over time actually spent scraping, idle gaps excluded                      |
+| `peak_rpm`            | Highest instantaneous rate observed                                                 |
+| `sustained_target_ms` | Longest contiguous stretch at or above `target_rpm`                                 |
+
+`sustained_target_ms` is the throughput requirement as a number: "held 500 rpm for ten
+minutes" stops being an eyeballing exercise. Retries are reported only in their own
+section and are never folded into any rpm figure. Session latency percentiles are
+recomputed from the raw samples rather than averaging the cycles' percentiles, because an
+average of p95s is not a p95. Latency percentiles use the **nearest-rank** method, so a reported p95 is
 always an observed sample. Throughput counts completed work items only — retries are
 reported separately and can never inflate it.
 
@@ -341,8 +438,14 @@ including the case of the same video appearing twice with different `scraped_at`
 - **The web API is dev-only** (see §7).
 - **Single process and direct-IP scale remain unvalidated.** The `TaskQueue` port is the
   seam for distributed execution, but the tested direct path did not approach 500 rpm.
-- **Latency samples are kept in full** in the metrics collector — fine for runs of this
-  size, would want a histogram for very long runs.
+  Continuous runs (§6.1) are a timer in that same process — there is no distributed
+  scheduler, and a session does not survive a restart.
+- **Latency samples are kept in full** in the metrics collector, and a session keeps its
+  own copy so percentiles stay exact — fine for runs of this size, would want a histogram
+  for very long ones. The throughput timeline is already bounded (2,000 samples).
+- **A long final cycle can overshoot `--duration`.** The deadline stops new cycles from
+  _starting_; one already in flight always finishes. The summary reports the duration
+  actually observed.
 
 ## 13. What remains to implement
 
@@ -353,5 +456,7 @@ including the case of the same video appearing twice with different `scraped_at`
    coauthor bounds using a dedicated local test session.
 3. Resolve TikTok `vm.tiktok.com` / `vt.tiktok.com` short links and feed the final canonical
    URL back into output and de-duplication.
-4. Validate the ~500 rpm target against a real proxy workload and tune concurrency, pacing and
-   the retry policy from the measured run summaries.
+4. Validate the ~500 rpm target against a real proxy workload and tune concurrency, pacing
+   and the retry policy from the measured run summaries. The continuous-run harness
+   (§6.1) already sustains that rate against the placeholder scrapers; what remains is
+   running it against real acquisition once a proxy pool is configured.

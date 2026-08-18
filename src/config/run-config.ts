@@ -24,6 +24,13 @@ export const RunConfigSchema = z
     format: InputFormatSchema.or(z.literal('auto')).nullish(),
     concurrency: z.number().int().min(1).max(1_000).nullish(),
     targetRpm: z.number().int().min(0).nullish(),
+    /** Repeat the batch continuously instead of running it once. */
+    watch: z.boolean().nullish(),
+    /** Time between cycle starts, e.g. `"15m"`, `"30s"`, or `0` for back-to-back. */
+    interval: z.union([z.string(), z.number().int().min(0)]).nullish(),
+    /** Stop starting new cycles after this much wall clock, e.g. `"10m"`. */
+    duration: z.union([z.string(), z.number().int().min(0)]).nullish(),
+    maxCycles: z.number().int().min(1).nullish(),
     outputDir: z.string().min(1).nullish(),
     /** Append to a specific JSONL file instead of a per-run file. */
     outputFile: z.string().min(1).nullish(),

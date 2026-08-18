@@ -1,5 +1,7 @@
 import { type RecentResultDto, type RunState } from '../app/types.js';
+import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type ScrapeStatus } from '../core/models/status.js';
+import { formatDuration } from '../core/schedule/duration.js';
 
 import { isRunActive, type AppState } from './state.js';
 
@@ -23,6 +25,7 @@ const STATE_STYLES: Record<RunState, string> = {
   idle: 'border-slate-700 bg-slate-800/50 text-slate-400',
   preparing: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
   running: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
+  waiting: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
   completed: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
   failed: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
 };
@@ -40,6 +43,7 @@ export function render(state: AppState): void {
   renderStateBadge(state);
   renderError(state);
   renderProgress(state);
+  renderThroughputChart(state);
   renderResults(state);
   renderInputReport(state);
   renderSummary(state);
@@ -49,7 +53,17 @@ export function render(state: AppState): void {
 function renderControls(state: AppState): void {
   const active = isRunActive(state.status);
 
-  for (const id of ['platform', 'input-text', 'input-file', 'concurrency', 'target-rpm']) {
+  for (const id of [
+    'platform',
+    'input-text',
+    'input-file',
+    'concurrency',
+    'target-rpm',
+    'continuous',
+    'interval',
+    'duration',
+    'max-cycles',
+  ]) {
     const node = document.getElementById(id);
     if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) {
       node.disabled = active;
@@ -60,7 +74,6 @@ function renderControls(state: AppState): void {
 
   const start = el<HTMLButtonElement>('start-button');
   start.disabled = active;
-  start.textContent = active ? 'Running…' : 'Start run';
 
   const cancel = el<HTMLButtonElement>('cancel-button');
   cancel.classList.toggle('hidden', !active);
@@ -77,6 +90,30 @@ function renderControls(state: AppState): void {
 
   const download = el<HTMLButtonElement>('download-button');
   download.classList.toggle('hidden', !state.hasOutput || state.runId === null);
+
+  const sessionDownload = el<HTMLButtonElement>('session-button');
+  sessionDownload.classList.toggle('hidden', state.sessionSummary === null);
+
+  // The schedule fields only mean something in continuous mode, and dimming
+  // them says so more clearly than leaving them live but ignored.
+  const scheduleDisabled = active || !state.continuous;
+  for (const id of ['interval', 'duration', 'max-cycles']) {
+    const node = document.getElementById(id);
+    if (node instanceof HTMLInputElement) node.disabled = scheduleDisabled;
+  }
+  el('schedule-fields').classList.toggle('opacity-40', !state.continuous);
+
+  const continuous = el<HTMLInputElement>('continuous');
+  continuous.checked = state.continuous;
+  continuous.disabled = active;
+
+  start.textContent = active
+    ? state.status === 'waiting'
+      ? 'Waiting…'
+      : 'Running…'
+    : state.continuous
+      ? 'Start session'
+      : 'Start run';
 }
 
 function renderStateBadge(state: AppState): void {
@@ -124,16 +161,67 @@ function renderProgress(state: AppState): void {
   const pct = progress.total === 0 ? 0 : (progress.processed / progress.total) * 100;
   bar.style.width = `${pct.toFixed(1)}%`;
 
-  stats.innerHTML = statCards([
+  const cards: (readonly [string, string])[] = [
     ['Processed', `${progress.processed} / ${progress.total}`],
     ['Successful', String(progress.successful)],
     ['Failed', String(progress.failed)],
+    // Instantaneous during a session, cumulative for a one-shot run — either
+    // way, whatever the backend just measured.
     ['Throughput', `${progress.throughputPerMinute.toFixed(0)}/min`],
-    ['Elapsed', `${(progress.elapsedMs / 1000).toFixed(1)}s`],
+    ['Elapsed', formatDuration(progress.elapsedMs)],
     ['In flight', String(progress.inFlight)],
-    ['Queued', String(progress.queued)],
-    ['Errors', String(progress.failed)],
-  ]);
+  ];
+
+  if (state.continuous) {
+    const peak = state.timeline.reduce((best, s) => Math.max(best, s.requestsPerMinute), 0);
+    const sustained = sustainedMs(state.timeline, state.targetRpm);
+
+    cards.push([
+      'Cycle',
+      state.cycle === null
+        ? '—'
+        : `${state.cycle.current}${state.cycle.planned === null ? '' : ` / ${state.cycle.planned}`}`,
+    ]);
+    cards.push(['Peak', `${peak.toFixed(0)}/min`]);
+    cards.push(['Held >= target', sustained === 0 ? '—' : formatDuration(sustained)]);
+    cards.push([
+      state.sessionSummary === null ? 'Next cycle' : 'Stopped',
+      state.sessionSummary === null
+        ? nextCycleLabel(state)
+        : state.sessionSummary.schedule.stop_reason,
+    ]);
+  } else {
+    cards.push(['Queued', String(progress.queued)]);
+  }
+
+  stats.innerHTML = statCards(cards);
+}
+
+/** Longest contiguous stretch at or above target, mirroring `ThroughputTimeline.sustained`. */
+function sustainedMs(samples: readonly ThroughputSample[], target: number): number {
+  if (target <= 0) return 0;
+  let best = 0;
+  let startMs: number | null = null;
+  let previousMs = 0;
+
+  for (const sample of samples) {
+    if (sample.requestsPerMinute >= target) {
+      startMs ??= previousMs;
+      best = Math.max(best, sample.tMs - startMs);
+    } else {
+      startMs = null;
+    }
+    previousMs = sample.tMs;
+  }
+  return best;
+}
+
+function nextCycleLabel(state: AppState): string {
+  if (state.status !== 'waiting') return state.status === 'running' ? 'running' : '—';
+  const next = state.cycle?.nextStartsAt;
+  if (next === undefined || next === null) return 'soon';
+  const remaining = new Date(next).getTime() - Date.now();
+  return remaining <= 0 ? 'now' : formatDuration(remaining);
 }
 
 function renderResults(state: AppState): void {
@@ -341,4 +429,209 @@ function escapeHtml(value: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// --- throughput chart -------------------------------------------------------
+
+const CHART = {
+  width: 820,
+  height: 260,
+  padLeft: 52,
+  padRight: 16,
+  padTop: 16,
+  padBottom: 30,
+} as const;
+
+/**
+ * Rounds an axis maximum up to something a human would have chosen.
+ *
+ * The steps are deliberately fine-grained and all divide cleanly by four, so
+ * the quarter gridlines land on round numbers and a peak of 540 gets a 600
+ * axis rather than being squashed into the bottom half of a 1000 one.
+ */
+const AXIS_STEPS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10] as const;
+
+function niceCeiling(value: number): number {
+  if (value <= 0) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  const normalized = value / magnitude;
+  const step = AXIS_STEPS.find((candidate) => normalized <= candidate) ?? 10;
+  return step * magnitude;
+}
+
+/**
+ * Caps how many points reach the SVG.
+ *
+ * A long session retains thousands of samples, and a path with one node per
+ * pixel-eighth is both slow to draw and no more informative. Peaks are kept
+ * rather than averaged: this chart exists to show the extremes.
+ */
+const MAX_PLOTTED_POINTS = 400;
+
+function downsample(samples: readonly ThroughputSample[]): readonly ThroughputSample[] {
+  if (samples.length <= MAX_PLOTTED_POINTS) return samples;
+
+  const bucketSize = Math.ceil(samples.length / MAX_PLOTTED_POINTS);
+  const output: ThroughputSample[] = [];
+
+  for (let start = 0; start < samples.length; start += bucketSize) {
+    const bucket = samples.slice(start, start + bucketSize);
+    let peak = bucket[0];
+    for (const sample of bucket) {
+      if (peak === undefined || sample.requestsPerMinute > peak.requestsPerMinute) peak = sample;
+    }
+    if (peak !== undefined) output.push(peak);
+  }
+
+  // Always keep the newest sample so the line reaches the right-hand edge.
+  const newest = samples[samples.length - 1];
+  if (newest !== undefined && output[output.length - 1] !== newest) output.push(newest);
+
+  return output;
+}
+
+function pathFrom(points: readonly (readonly [number, number])[]): string {
+  return points.map(([x, y], index) => `${index === 0 ? 'M' : 'L'}${x} ${y}`).join(' ');
+}
+
+/**
+ * Throughput over time, as inline SVG.
+ *
+ * Hand-rolled rather than pulling in a chart library: the dashboard is a dev
+ * tool with no frontend framework, and one chart does not justify a dependency.
+ *
+ * The series is *instantaneous* rate — derived from the delta between samples,
+ * not the cumulative average — because a soak test exists to reveal dips, and a
+ * running average smooths exactly those away. Retries are drawn as a separate
+ * dotted line so they can never be misread as throughput.
+ */
+function renderThroughputChart(state: AppState): void {
+  const panel = el('throughput-panel');
+  const container = el('throughput-chart');
+
+  // The chart is only meaningful for a continuous session; a one-shot run is
+  // over before it has enough samples to say anything.
+  if (!state.continuous && state.timeline.length === 0) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+
+  const samples = downsample(state.timeline);
+  if (samples.length < 2) {
+    container.innerHTML = `<p class="py-12 text-center text-sm text-slate-500">
+      ${state.status === 'idle' ? 'No session yet.' : 'Collecting samples…'}
+    </p>`;
+    return;
+  }
+
+  const { width, height, padLeft, padRight, padTop, padBottom } = CHART;
+  const plotWidth = width - padLeft - padRight;
+  const plotHeight = height - padTop - padBottom;
+
+  const target = state.targetRpm;
+  // Over the full series, not the downsampled one — the axis must contain
+  // every observed peak even if that sample was dropped from the path.
+  const peak = state.timeline.reduce((best, s) => Math.max(best, s.requestsPerMinute), 0);
+  // Modest headroom; `niceCeiling` supplies the rest of the padding.
+  const yMax = niceCeiling(Math.max(peak, target) * 1.05);
+
+  const firstMs = samples[0]?.tMs ?? 0;
+  const lastMs = samples[samples.length - 1]?.tMs ?? firstMs;
+  const spanMs = Math.max(1, lastMs - firstMs);
+
+  const x = (sample: ThroughputSample): number =>
+    padLeft + ((sample.tMs - firstMs) / spanMs) * plotWidth;
+  const y = (value: number): number => padTop + plotHeight - (value / yMax) * plotHeight;
+
+  // Stacked areas: failures sit on the baseline, successes ride on top, so the
+  // combined height is total throughput and the split stays readable.
+  const baseline = padTop + plotHeight;
+  const failureTop = samples.map((s): readonly [number, number] => [x(s), y(s.failuresPerMinute)]);
+  const successTop = samples.map((s): readonly [number, number] => [
+    x(s),
+    y(s.failuresPerMinute + s.successesPerMinute),
+  ]);
+
+  const area = (top: readonly (readonly [number, number])[], from: number): string => {
+    const firstX = top[0]?.[0] ?? padLeft;
+    const lastX = top[top.length - 1]?.[0] ?? padLeft;
+    return `${pathFrom(top)} L${lastX} ${from} L${firstX} ${from} Z`;
+  };
+
+  const totalLine = pathFrom(samples.map((s) => [x(s), y(s.requestsPerMinute)] as const));
+  const retryLine = pathFrom(samples.map((s) => [x(s), y(s.retriesPerMinute)] as const));
+
+  const gridValues = [0, 0.25, 0.5, 0.75, 1].map((fraction) => fraction * yMax);
+  const gridlines = gridValues
+    .map((value) => {
+      const gy = y(value);
+      return `<line x1="${padLeft}" y1="${gy}" x2="${padLeft + plotWidth}" y2="${gy}"
+                stroke="currentColor" class="text-slate-800" stroke-width="1" />
+              <text x="${padLeft - 8}" y="${gy + 4}" text-anchor="end"
+                class="fill-slate-500" font-size="11">${Math.round(value)}</text>`;
+    })
+    .join('');
+
+  // Faint marker wherever a new cycle began, so bursts line up with cycles.
+  const boundaries = samples
+    .map((sample, index) => {
+      const previous = samples[index - 1];
+      if (previous === undefined || sample.cycle === previous.cycle || sample.cycle === 0) {
+        return '';
+      }
+      return `<line x1="${x(sample)}" y1="${padTop}" x2="${x(sample)}" y2="${baseline}"
+                stroke="currentColor" class="text-slate-700" stroke-width="1"
+                stroke-dasharray="2 4" />`;
+    })
+    .join('');
+
+  const targetLine =
+    target <= 0 || target > yMax
+      ? ''
+      : `<line x1="${padLeft}" y1="${y(target)}" x2="${padLeft + plotWidth}" y2="${y(target)}"
+           stroke="currentColor" class="text-sky-400" stroke-width="1.5" stroke-dasharray="6 4" />
+         <text x="${padLeft + plotWidth - 4}" y="${y(target) - 6}" text-anchor="end"
+           class="fill-sky-400" font-size="11">target ${Math.round(target)}/min</text>`;
+
+  const xTicks = [0, 0.25, 0.5, 0.75, 1]
+    .map((fraction) => {
+      const tickMs = firstMs + fraction * spanMs;
+      const tx = padLeft + fraction * plotWidth;
+      return `<text x="${tx}" y="${height - 10}" text-anchor="middle"
+                class="fill-slate-500" font-size="11">${escapeHtml(formatDuration(tickMs))}</text>`;
+    })
+    .join('');
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}"
+         role="img" aria-label="Achieved throughput over time"
+         style="min-width:${width / 1.6}px">
+      ${gridlines}
+      ${boundaries}
+      <path d="${area(failureTop, baseline)}" class="fill-rose-500/25" />
+      <path d="${area(successTop, baseline)}" class="fill-emerald-500/20" />
+      <path d="${totalLine}" fill="none" stroke="currentColor" class="text-sky-400"
+            stroke-width="1.75" stroke-linejoin="round" />
+      <path d="${retryLine}" fill="none" stroke="currentColor" class="text-amber-400"
+            stroke-width="1.25" stroke-dasharray="2 3" />
+      ${targetLine}
+      <line x1="${padLeft}" y1="${baseline}" x2="${padLeft + plotWidth}" y2="${baseline}"
+            stroke="currentColor" class="text-slate-700" stroke-width="1" />
+      ${xTicks}
+    </svg>
+    <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
+      <span class="flex items-center gap-1.5">
+        <span class="inline-block h-2 w-4 rounded-sm bg-emerald-500/40"></span>successful
+      </span>
+      <span class="flex items-center gap-1.5">
+        <span class="inline-block h-2 w-4 rounded-sm bg-rose-500/40"></span>failed
+      </span>
+      <span class="flex items-center gap-1.5">
+        <span class="inline-block h-0.5 w-4 bg-sky-400"></span>total req/min
+      </span>
+      <span class="flex items-center gap-1.5">
+        <span class="inline-block h-0.5 w-4 bg-amber-400"></span>retries/min (not throughput)
+      </span>
+    </div>`;
 }

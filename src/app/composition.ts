@@ -48,13 +48,23 @@ export async function buildRunner(options: {
   logger: Logger;
   sink: SnapshotSink;
   overrides?: RunnerOverrides | undefined;
+  /**
+   * Reuse pools across calls instead of building fresh ones.
+   *
+   * A continuous session builds a runner per cycle but must keep one set of
+   * pools for its whole life: proxy and session cooldowns are measured in
+   * minutes, so rebuilding them every cycle would silently un-bench every
+   * proxy that had just been benched for failing.
+   */
+  proxyPool?: ProxyPool | undefined;
+  sessionPool?: SessionPool | undefined;
 }): Promise<BuiltRunner> {
   const { config, logger, sink } = options;
   const concurrency = options.overrides?.concurrency ?? config.concurrency;
   const targetRpm = options.overrides?.targetRpm ?? config.targetRpm;
 
-  const proxyPool = createProxyPool(config, logger);
-  const sessionPool = await createSessionPool(config, logger);
+  const proxyPool = options.proxyPool ?? createProxyPool(config, logger);
+  const sessionPool = options.sessionPool ?? (await createSessionPool(config, logger));
   const metrics = new MetricsCollector();
   const proxyAgents = new Map<string, ProxyAgent>();
 

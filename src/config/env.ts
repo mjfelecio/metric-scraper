@@ -13,6 +13,12 @@ export const AppConfigSchema = z.object({
   targetRpm: z.number().int().min(0),
   /** `0` means an unbounded queue. */
   maxQueueSize: z.number().int().min(0),
+  /**
+   * Default gap between cycle starts in a continuous session. Content Rewards
+   * polls every 15 minutes; overridable so tests can exercise the same code
+   * path in seconds. `0` means back-to-back cycles.
+   */
+  pollIntervalMs: z.number().int().min(0),
   requestTimeoutMs: z.number().int().min(1),
 
   retry: z.object({
@@ -77,6 +83,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     concurrency: int(env, 'SCRAPER_CONCURRENCY', 10),
     targetRpm: int(env, 'SCRAPER_TARGET_RPM', 500),
     maxQueueSize: int(env, 'SCRAPER_MAX_QUEUE_SIZE', 0),
+    pollIntervalMs: int(env, 'SCRAPER_POLL_INTERVAL_MS', 900_000),
     requestTimeoutMs: int(env, 'SCRAPER_REQUEST_TIMEOUT_MS', 15_000),
 
     retry: {
@@ -139,6 +146,7 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
     concurrency: config.concurrency,
     targetRpm: config.targetRpm,
     maxQueueSize: config.maxQueueSize,
+    pollIntervalMs: config.pollIntervalMs,
     requestTimeoutMs: config.requestTimeoutMs,
     retry: config.retry,
     outputDir: config.outputDir,

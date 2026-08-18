@@ -97,7 +97,13 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
   return { summary: result.summary, parsed };
 }
 
-async function gatherInput(options: ExecuteBatchOptions): Promise<ParsedInput> {
+/** Shared with `execute-session.ts` so watch mode parses input identically. */
+export async function gatherInput(options: {
+  platform: Platform | null;
+  inputPath?: string | undefined;
+  urls?: readonly string[] | undefined;
+  format?: InputFormat | 'auto' | undefined;
+}): Promise<ParsedInput> {
   const registry = createDefaultUrlNormalizerRegistry();
 
   if (options.urls !== undefined && options.urls.length > 0) {
@@ -127,7 +133,7 @@ async function gatherInput(options: ExecuteBatchOptions): Promise<ParsedInput> {
  * otherwise the run continues with what was usable, and the counts appear in
  * the run summary.
  */
-function reportInputIssues(parsed: ParsedInput, strict: boolean): void {
+export function reportInputIssues(parsed: ParsedInput, strict: boolean): void {
   const fatal = parsed.issues.find(isFatalInputIssue);
   if (fatal !== undefined) {
     throw new ScrapeError({ code: 'config_error', message: `invalid input — ${fatal.message}` });
