@@ -129,34 +129,36 @@ cp .env.example .env
 
 All are optional. See [`.env.example`](.env.example) for the annotated list.
 
-| Variable                      | Default    | Meaning                                                                              |
-| ----------------------------- | ---------- | ------------------------------------------------------------------------------------ |
-| `LOG_LEVEL`                   | `info`     | `trace`…`fatal`, or `silent`. Logs go to stderr.                                     |
-| `SCRAPER_CONCURRENCY`         | `10`       | Ceiling on jobs in flight at once. See [§5.1](#51-concurrency-rate-and-backpressure) |
-| `SCRAPER_TARGET_RPM`          | `500`      | **Logical jobs** admitted per minute; `0` disables pacing                            |
-| `SCRAPER_BURST`               | `0`        | Jobs admissible at once after idle; `0` = one second of target                       |
-| `SCRAPER_HTTP_RPM_PER_HOST`   | `0`        | **Actual HTTP requests** per minute per host, retries included; `0` = off            |
-| `SCRAPER_MAX_QUEUE_SIZE`      | `1000`     | Max waiting jobs before the producer waits; `0` = unbounded                          |
-| `SCRAPER_REQUEST_TIMEOUT_MS`  | `15000`    | Per-attempt timeout                                                                  |
-| `SCRAPER_POLL_INTERVAL_MS`    | `900000`   | Default gap between cycle starts in `--watch`; `0` = back-to-back                    |
-| `RETRY_MAX_ATTEMPTS`          | `3`        | Attempts per URL including the first; `1` disables retries                           |
-| `RETRY_INITIAL_DELAY_MS`      | `250`      | First backoff delay                                                                  |
-| `RETRY_MAX_DELAY_MS`          | `10000`    | Backoff ceiling                                                                      |
-| `RETRY_BACKOFF_FACTOR`        | `2`        | Growth multiplier                                                                    |
-| `RETRY_JITTER`                | `true`     | Full jitter, so a batch does not re-fire in lockstep                                 |
-| `OUTPUT_DIR`                  | `./output` | Where JSONL and run summaries are written                                            |
-| `PROXY_POOL`                  | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct           |
-| `PROXY_MAX_FAILURES`          | `3`        | Consecutive failures before cooldown                                                 |
-| `PROXY_COOLDOWN_MS`           | `60000`    | How long a failed/blocked proxy is benched                                           |
-| `PROXY_MAX_CONCURRENT`        | `8`        | Jobs sharing one proxy at a time; `0` = unlimited                                    |
-| `PROXY_PROBATION_CONCURRENT`  | `1`        | Jobs on a proxy that has not succeeded yet, or whose last outcome failed             |
-| `SESSION_STORE_PATH`          | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous                         |
-| `SESSION_MAX_FAILURES`        | `3`        | Consecutive failures before cooldown                                                 |
-| `SESSION_COOLDOWN_MS`         | `300000`   | How long a blocked session is benched                                                |
-| `INSTAGRAM_POST_DOC_ID`       | current ID | Anonymous post metadata operation                                                    |
-| `INSTAGRAM_CLIPS_DOC_ID`      | current ID | Recent creator-Reels operation                                                       |
-| `INSTAGRAM_CLIPS_MAX_PAGES`   | `2`        | Maximum anonymous clips pages checked per candidate author                           |
-| `INSTAGRAM_CLIPS_MAX_AUTHORS` | `3`        | Maximum primary/coauthor accounts checked per Reel                                   |
+| Variable                       | Default    | Meaning                                                                              |
+| ------------------------------ | ---------- | ------------------------------------------------------------------------------------ |
+| `LOG_LEVEL`                    | `info`     | `trace`…`fatal`, or `silent`. Logs go to stderr.                                     |
+| `SCRAPER_CONCURRENCY`          | `10`       | Ceiling on jobs in flight at once. See [§5.1](#51-concurrency-rate-and-backpressure) |
+| `SCRAPER_TARGET_RPM`           | `500`      | **Logical jobs** admitted per minute; `0` disables pacing                            |
+| `SCRAPER_BURST`                | `0`        | Jobs admissible at once after idle; `0` = one second of target                       |
+| `SCRAPER_HTTP_RPM_PER_HOST`    | `0`        | **Actual HTTP requests** per minute per host, retries included; `0` = off            |
+| `SCRAPER_MAX_QUEUE_SIZE`       | `1000`     | Max waiting jobs before the producer waits; `0` = unbounded                          |
+| `SCRAPER_REQUEST_TIMEOUT_MS`   | `15000`    | Maximum duration of each individual outbound HTTP request                            |
+| `TIKTOK_ATTEMPT_TIMEOUT_MS`    | `15000`    | Maximum duration of one complete TikTok attempt                                      |
+| `INSTAGRAM_ATTEMPT_TIMEOUT_MS` | `60000`    | Maximum duration of one complete Instagram attempt                                   |
+| `SCRAPER_POLL_INTERVAL_MS`     | `900000`   | Default gap between cycle starts in `--watch`; `0` = back-to-back                    |
+| `RETRY_MAX_ATTEMPTS`           | `3`        | Attempts per URL including the first; `1` disables retries                           |
+| `RETRY_INITIAL_DELAY_MS`       | `250`      | First backoff delay                                                                  |
+| `RETRY_MAX_DELAY_MS`           | `10000`    | Backoff ceiling                                                                      |
+| `RETRY_BACKOFF_FACTOR`         | `2`        | Growth multiplier                                                                    |
+| `RETRY_JITTER`                 | `true`     | Full jitter, so a batch does not re-fire in lockstep                                 |
+| `OUTPUT_DIR`                   | `./output` | Where JSONL and run summaries are written                                            |
+| `PROXY_POOL`                   | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct           |
+| `PROXY_MAX_FAILURES`           | `3`        | Consecutive failures before cooldown                                                 |
+| `PROXY_COOLDOWN_MS`            | `60000`    | How long a failed/blocked proxy is benched                                           |
+| `PROXY_MAX_CONCURRENT`         | `8`        | Jobs sharing one proxy at a time; `0` = unlimited                                    |
+| `PROXY_PROBATION_CONCURRENT`   | `1`        | Jobs on a proxy that has not succeeded yet, or whose last outcome failed             |
+| `SESSION_STORE_PATH`           | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous                         |
+| `SESSION_MAX_FAILURES`         | `3`        | Consecutive failures before cooldown                                                 |
+| `SESSION_COOLDOWN_MS`          | `300000`   | How long a blocked session is benched                                                |
+| `INSTAGRAM_POST_DOC_ID`        | current ID | Anonymous post metadata operation                                                    |
+| `INSTAGRAM_CLIPS_DOC_ID`       | current ID | Recent creator-Reels operation                                                       |
+| `INSTAGRAM_CLIPS_MAX_PAGES`    | `2`        | Maximum anonymous clips pages checked per candidate author                           |
+| `INSTAGRAM_CLIPS_MAX_AUTHORS`  | `3`        | Maximum primary/coauthor accounts checked per Reel                                   |
 
 **Credentials never live in source.** Proxy credentials are read from `PROXY_POOL` and
 kept inside the in-memory `ProxyTarget`; everything user-facing (logs, metrics, run
@@ -297,6 +299,24 @@ direct local testing. A session is never sent through an unmatched IP.
 
 Use a dedicated test account and browser-created cookies. Do not store Instagram
 passwords or use a personal account.
+
+### 5.2 Request and attempt timeouts
+
+The request timeout and attempt timeout protect different boundaries. Each HTTP
+call receives a fresh `SCRAPER_REQUEST_TIMEOUT_MS` budget from the transport.
+The runner separately combines operator cancellation with the platform's attempt
+timeout and passes that signal through the whole scrape workflow.
+
+For example, an Instagram attempt may make a bootstrap request, a post request,
+and several sequential clips requests. Those calls do not have to share one
+15-second request timer, but the complete workflow must still finish within
+`INSTAGRAM_ATTEMPT_TIMEOUT_MS` (60 seconds by default). TikTok keeps a shorter
+15-second attempt ceiling because its normal workflow only needs two requests.
+Retries start a new attempt and therefore receive a new attempt budget.
+
+Keep the attempt timeout at least as large as the request timeout. Raising an
+attempt timeout does not allow any single hung request to run longer, because
+`SCRAPER_REQUEST_TIMEOUT_MS` still applies to each call.
 
 ## 6. Running the CLI
 
