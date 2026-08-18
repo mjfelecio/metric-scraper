@@ -1,13 +1,17 @@
 import {
+  type CycleProgressDto,
   type InputReportDto,
   type RecentResultDto,
   type RunDefaultsDto,
   type RunErrorDto,
   type RunState,
+  type SessionScheduleDto,
 } from '../app/types.js';
 import { type InputFormat } from '../core/models/input.js';
 import { type Platform } from '../core/models/platform.js';
 import { type RunSummary } from '../core/models/run-summary.js';
+import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
+import { type CycleSummary, type SessionSummary } from '../core/models/session-summary.js';
 import { type RunProgress } from '../core/runner/types.js';
 
 export type InputMethod = 'paste' | 'file';
@@ -29,6 +33,12 @@ export interface AppState {
   concurrency: number;
   targetRpm: number;
 
+  /** Continuous-mode form fields. Kept as typed text so `15m` survives a round trip. */
+  continuous: boolean;
+  interval: string;
+  duration: string;
+  maxCycles: string;
+
   runId: string | null;
   progress: RunProgress | null;
   input: InputReportDto | null;
@@ -37,6 +47,15 @@ export interface AppState {
   error: RunErrorDto | null;
   hasOutput: boolean;
   defaults: RunDefaultsDto | null;
+
+  schedule: SessionScheduleDto | null;
+  cycle: CycleProgressDto | null;
+  /** Accumulated client-side from the poll cursor, never re-fetched wholesale. */
+  timeline: ThroughputSample[];
+  timelineCursor: number;
+  cycles: CycleSummary[];
+  sessionSummary: SessionSummary | null;
+  stalled: boolean;
 }
 
 export function createInitialState(): AppState {
@@ -50,6 +69,11 @@ export function createInitialState(): AppState {
     concurrency: 10,
     targetRpm: 500,
 
+    continuous: false,
+    interval: '15m',
+    duration: '',
+    maxCycles: '',
+
     runId: null,
     progress: null,
     input: null,
@@ -58,6 +82,14 @@ export function createInitialState(): AppState {
     error: null,
     hasOutput: false,
     defaults: null,
+
+    schedule: null,
+    cycle: null,
+    timeline: [],
+    timelineCursor: 0,
+    cycles: [],
+    sessionSummary: null,
+    stalled: false,
   };
 }
 
@@ -87,5 +119,7 @@ export class Store {
 
 /** Controls are locked while a run owns the process. */
 export function isRunActive(status: RunState): boolean {
-  return status === 'preparing' || status === 'running';
+  // `waiting` is active too: a session between cycles is still running, and
+  // letting the form be edited mid-session would silently do nothing.
+  return status === 'preparing' || status === 'running' || status === 'waiting';
 }

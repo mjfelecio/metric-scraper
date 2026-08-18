@@ -8,10 +8,13 @@ import { ScrapeError } from '../core/models/errors.js';
 import { type RetryPolicyOptions } from '../core/retry/retry-policy.js';
 import { type InputFormat } from '../core/models/input.js';
 import { type Platform } from '../core/models/platform.js';
+import { parseDuration } from '../core/schedule/duration.js';
+import { loadConfig } from '../config/env.js';
 import { loadInputFile } from '../infrastructure/input/file-input-loader.js';
 import { createDefaultUrlNormalizerRegistry } from '../platforms/index.js';
 
 import { executeBatch, type ExecuteBatchOptions } from './execute-batch.js';
+import { executeSession } from './execute-session.js';
 import { type LogLevel } from '../infrastructure/logging/pino-logger.js';
 
 interface CommonOptions {
@@ -25,6 +28,10 @@ interface CommonOptions {
   json?: boolean | undefined;
   progress?: boolean | undefined;
   logLevel?: LogLevel | undefined;
+  watch?: boolean | undefined;
+  interval?: number | undefined;
+  duration?: number | undefined;
+  maxCycles?: number | undefined;
 }
 
 const program = new Command();
@@ -64,6 +71,18 @@ function withCommonOptions(command: Command): Command {
         'json',
       ]),
     )
+    .option('-w, --watch', 'repeat the batch continuously instead of running it once')
+    .option(
+      '--interval <duration>',
+      'time between cycle starts, e.g. 15m, 30s, or 0 for back-to-back (implies --watch)',
+      parseDurationArg,
+    )
+    .option(
+      '--duration <duration>',
+      'stop starting new cycles after this much wall clock, e.g. 10m (implies --watch)',
+      parsePositiveDurationArg,
+    )
+    .option('--max-cycles <n>', 'stop after this many cycles (implies --watch)', parsePositiveInt)
     .option('--strict', 'abort if any input entry is rejected')
     .option('--json', 'print the run summary as JSON on stdout')
     .option('--no-progress', 'suppress the progress line')
@@ -105,7 +124,12 @@ for (const platform of ['tiktok', 'instagram'] as const) {
       .description(`scrape a batch of ${platform} URLs`)
       .argument('<input>', 'path to a newline-delimited .txt or a .json array of URLs'),
   ).action(async (input: string, options: CommonOptions) => {
-    await executeBatch({ ...toExecuteOptions(platform, options), inputPath: input });
+    const base = { ...toExecuteOptions(platform, options), inputPath: input };
+    if (isWatchRequested(options)) {
+      await executeSession({ ...base, schedule: resolveSchedule(options) });
+      return;
+    }
+    await executeBatch(base);
   });
 }
 
@@ -124,7 +148,7 @@ withCommonOptions(
     value == null ? undefined : path.resolve(baseDir, value);
 
   const base = toExecuteOptions(config.platform ?? null, options);
-  await executeBatch({
+  const merged = {
     ...base,
     inputPath: fromConfig(config.input),
     urls: config.urls ?? undefined,
@@ -140,7 +164,21 @@ withCommonOptions(
         ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
       },
     },
-  });
+  };
+
+  if (isWatchRequested(options, config.watch ?? undefined)) {
+    await executeSession({
+      ...merged,
+      schedule: resolveSchedule(options, {
+        interval: toDurationMs(config.interval, 'interval'),
+        duration: toDurationMs(config.duration, 'duration', true),
+        maxCycles: config.maxCycles ?? undefined,
+      }),
+    });
+    return;
+  }
+
+  await executeBatch(merged);
 });
 
 program
@@ -182,6 +220,103 @@ program
       }
     },
   );
+
+/**
+ * Watch mode is on if it was asked for directly or implied by any of the knobs
+ * that only mean something for a repeating session. Typing `--interval 30s` and
+ * getting a single run would be a small betrayal.
+ */
+function isWatchRequested(options: CommonOptions, fromConfig?: boolean): boolean {
+  return (
+    options.watch === true ||
+    options.interval !== undefined ||
+    options.duration !== undefined ||
+    options.maxCycles !== undefined ||
+    fromConfig === true
+  );
+}
+
+interface ResolvedSchedule {
+  intervalMs: number;
+  durationMs: number | null;
+  maxCycles: number | null;
+}
+
+function resolveSchedule(
+  options: CommonOptions,
+  fromConfig: {
+    interval?: number | undefined;
+    duration?: number | undefined;
+    maxCycles?: number | undefined;
+  } = {},
+): ResolvedSchedule {
+  // Precedence matches every other setting: CLI, then run config, then env.
+  const interval = options.interval ?? fromConfig.interval ?? loadConfig().pollIntervalMs;
+  // `loadConfig()` above is only reached when neither the flag nor the run
+  // config named an interval, so the env default stays the last word.
+  const duration = options.duration ?? fromConfig.duration;
+  const maxCycles = options.maxCycles ?? fromConfig.maxCycles;
+
+  return {
+    intervalMs: interval,
+    durationMs: duration ?? null,
+    maxCycles: maxCycles ?? null,
+  };
+}
+
+/** Run-config durations may be a string (`"15m"`) or a raw millisecond number. */
+function toDurationMs(
+  value: string | number | null | undefined,
+  field: string,
+  positiveOnly = false,
+): number | undefined {
+  if (value == null) return undefined;
+
+  let parsed: number;
+  if (typeof value === 'number') {
+    parsed = value;
+  } else {
+    try {
+      parsed = parseDuration(value);
+    } catch (error) {
+      throw new ScrapeError({
+        code: 'config_error',
+        message: `invalid run config — "${field}": ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  if (positiveOnly && parsed <= 0) {
+    throw new ScrapeError({
+      code: 'config_error',
+      message: `invalid run config — "${field}" must be greater than zero`,
+    });
+  }
+  return parsed;
+}
+
+function parseDurationArg(value: string): number {
+  try {
+    return parseDuration(value);
+  } catch (error) {
+    throw new InvalidArgumentError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * As above, but rejects zero.
+ *
+ * `--interval 0` is meaningful (back-to-back cycles); `--duration 0` is not —
+ * it would start no cycles at all and report an empty session, which is never
+ * what someone meant to type.
+ */
+function parsePositiveDurationArg(value: string): number {
+  const parsed = parseDurationArg(value);
+  if (parsed <= 0) {
+    throw new InvalidArgumentError('expected a duration greater than zero, e.g. 10m');
+  }
+  return parsed;
+}
 
 function parsePositiveInt(value: string): number {
   const parsed = Number.parseInt(value, 10);

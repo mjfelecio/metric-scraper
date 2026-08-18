@@ -1,13 +1,29 @@
-import { type StartRunRequest } from '../app/types.js';
+import { type SessionScheduleDto, type StartRunRequest } from '../app/types.js';
 import { type InputFormat } from '../core/models/input.js';
 import { type Platform } from '../core/models/platform.js';
+import { formatDuration, parseDuration } from '../core/schedule/duration.js';
 
-import { ApiError, cancelRun, fetchDefaults, fetchRun, outputUrl, startRun } from './api.js';
+import {
+  ApiError,
+  cancelRun,
+  fetchDefaults,
+  fetchRun,
+  outputUrl,
+  sessionSummaryUrl,
+  startRun,
+} from './api.js';
 import { render } from './render.js';
 import { Store } from './state.js';
 import './styles.css';
 
 const POLL_INTERVAL_MS = 400;
+/**
+ * Polling slows right down between cycles. Hammering the API every 400ms
+ * through a fifteen-minute gap buys nothing.
+ */
+const WAITING_POLL_INTERVAL_MS = 2_000;
+/** Matches the server's retention, so the client cannot outgrow it either. */
+const MAX_TIMELINE_SAMPLES = 2_000;
 
 const store = new Store();
 store.subscribe(render);
@@ -26,19 +42,27 @@ const targetRpmInput = byId<HTMLInputElement>('target-rpm');
 const form = byId<HTMLFormElement>('run-form');
 const cancelButton = byId<HTMLButtonElement>('cancel-button');
 const downloadButton = byId<HTMLButtonElement>('download-button');
+const sessionButton = byId<HTMLButtonElement>('session-button');
+const continuousInput = byId<HTMLInputElement>('continuous');
+const intervalInput = byId<HTMLInputElement>('interval');
+const durationInput = byId<HTMLInputElement>('duration');
+const maxCyclesInput = byId<HTMLInputElement>('max-cycles');
 
 // --- configuration defaults -------------------------------------------------
 
 async function loadDefaults(): Promise<void> {
   try {
     const defaults = await fetchDefaults();
+    const interval = formatDuration(defaults.pollIntervalMs);
     store.update({
       defaults,
       concurrency: defaults.concurrency,
       targetRpm: defaults.targetRpm,
+      interval,
     });
     concurrencyInput.value = String(defaults.concurrency);
     targetRpmInput.value = String(defaults.targetRpm);
+    intervalInput.value = interval;
   } catch (error) {
     store.update({
       status: 'failed',
@@ -107,6 +131,22 @@ targetRpmInput.addEventListener('change', () => {
   store.update({ targetRpm: clampInt(targetRpmInput.value, 0, 100_000, 500) });
 });
 
+continuousInput.addEventListener('change', () => {
+  store.update({ continuous: continuousInput.checked });
+});
+
+intervalInput.addEventListener('change', () => {
+  store.update({ interval: intervalInput.value });
+});
+
+durationInput.addEventListener('change', () => {
+  store.update({ duration: durationInput.value });
+});
+
+maxCyclesInput.addEventListener('change', () => {
+  store.update({ maxCycles: maxCyclesInput.value });
+});
+
 // --- run lifecycle ----------------------------------------------------------
 
 form.addEventListener('submit', (event) => {
@@ -128,6 +168,12 @@ downloadButton.addEventListener('click', () => {
   window.location.href = outputUrl(runId);
 });
 
+sessionButton.addEventListener('click', () => {
+  const runId = store.getState().runId;
+  if (runId === null) return;
+  window.location.href = sessionSummaryUrl(runId);
+});
+
 async function beginRun(): Promise<void> {
   const state = store.getState();
 
@@ -142,6 +188,22 @@ async function beginRun(): Promise<void> {
     return;
   }
 
+  let schedule: SessionScheduleDto | null = null;
+  if (state.continuous) {
+    try {
+      schedule = buildSchedule(state.interval, state.duration, state.maxCycles);
+    } catch (error) {
+      store.update({
+        status: 'failed',
+        error: {
+          code: 'invalid_input',
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return;
+    }
+  }
+
   store.update({
     status: 'preparing',
     error: null,
@@ -151,6 +213,13 @@ async function beginRun(): Promise<void> {
     recentResults: [],
     hasOutput: false,
     runId: null,
+    schedule,
+    cycle: null,
+    timeline: [],
+    timelineCursor: 0,
+    cycles: [],
+    sessionSummary: null,
+    stalled: false,
   });
 
   const request: StartRunRequest = {
@@ -159,6 +228,7 @@ async function beginRun(): Promise<void> {
     format: state.format,
     concurrency: state.concurrency,
     targetRpm: state.targetRpm,
+    ...(schedule === null ? {} : { continuous: true, schedule }),
   };
 
   try {
@@ -185,8 +255,15 @@ async function beginRun(): Promise<void> {
  */
 async function poll(runId: string): Promise<void> {
   for (;;) {
+    let waiting = false;
     try {
-      const state = await fetchRun(runId);
+      // Ask only for samples we have not already seen: over a ten-minute
+      // session the timeline dwarfs everything else in the payload.
+      const cursor = store.getState().timelineCursor;
+      const state = await fetchRun(runId, cursor);
+      waiting = state.state === 'waiting';
+
+      const previous = store.getState();
       store.update({
         status: state.state,
         progress: state.progress,
@@ -195,6 +272,17 @@ async function poll(runId: string): Promise<void> {
         summary: state.summary,
         error: state.error,
         hasOutput: state.hasOutput,
+        continuous: state.continuous,
+        schedule: state.schedule,
+        cycle: state.cycle,
+        cycles: state.cycles,
+        sessionSummary: state.sessionSummary,
+        stalled: state.stalled,
+        timeline:
+          state.timeline.length === 0
+            ? previous.timeline
+            : [...previous.timeline, ...state.timeline].slice(-MAX_TIMELINE_SAMPLES),
+        timelineCursor: state.timelineCursor,
       });
 
       if (state.state === 'completed' || state.state === 'failed') return;
@@ -209,8 +297,28 @@ async function poll(runId: string): Promise<void> {
       return;
     }
 
-    await delay(POLL_INTERVAL_MS);
+    await delay(waiting ? WAITING_POLL_INTERVAL_MS : POLL_INTERVAL_MS);
   }
+}
+
+/**
+ * Turns the three schedule fields into a request, rejecting nonsense before it
+ * reaches the API so the operator sees a useful message rather than a 400.
+ */
+function buildSchedule(interval: string, duration: string, maxCycles: string): SessionScheduleDto {
+  const intervalMs = parseDuration(interval.trim().length === 0 ? '0' : interval);
+
+  const durationMs = duration.trim().length === 0 ? null : parseDuration(duration);
+  if (durationMs !== null && durationMs <= 0) {
+    throw new Error('Duration must be greater than zero, or blank for no limit.');
+  }
+
+  const cycles = maxCycles.trim().length === 0 ? null : Number.parseInt(maxCycles, 10);
+  if (cycles !== null && (!Number.isInteger(cycles) || cycles < 1)) {
+    throw new Error('Max cycles must be a whole number of at least 1, or blank for no limit.');
+  }
+
+  return { intervalMs, durationMs, maxCycles: cycles };
 }
 
 function delay(ms: number): Promise<void> {

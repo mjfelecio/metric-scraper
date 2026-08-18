@@ -2,19 +2,27 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
 import { loadConfig, type AppConfig } from '../config/env.js';
+import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { parseInput } from '../core/input/parse-input.js';
 import { type Logger, nullLogger } from '../core/logging/logger.js';
 import { ScrapeError } from '../core/models/errors.js';
 import { isFatalInputIssue, type ParsedInput } from '../core/models/input.js';
 import { type Platform } from '../core/models/platform.js';
 import { type RunSummary } from '../core/models/run-summary.js';
+import { type CycleSummary } from '../core/models/session-summary.js';
 import { JsonlFileSink } from '../infrastructure/output/jsonl-file-sink.js';
-import { resolveRunPaths, writeRunSummary } from '../infrastructure/output/run-paths.js';
+import {
+  resolveRunPaths,
+  resolveSessionPaths,
+  writeRunSummary,
+} from '../infrastructure/output/run-paths.js';
 import { createDefaultUrlNormalizerRegistry } from '../platforms/index.js';
 
 import { buildRunner } from './composition.js';
+import { runSession, type SessionProgress } from './scrape-session.js';
 import {
   type RecentResultDto,
+  type SessionScheduleDto,
   type RunDefaultsDto,
   type RunStateDto,
   type StartRunRequest,
@@ -22,10 +30,26 @@ import {
 
 const RECENT_RESULTS_LIMIT = 50;
 
+/**
+ * Runs are kept in memory only, so the map needs a ceiling. One-shot runs made
+ * this academic; a continuous session that a user starts and restarts all
+ * afternoon does not.
+ */
+const MAX_RETAINED_RUNS = 20;
+
+/** Samples retained per run for the dashboard graph. */
+const MAX_TIMELINE_SAMPLES = 2_000;
+
 interface RunRecord {
   state: RunStateDto;
   abort: AbortController;
   outputPath: string | null;
+  /**
+   * Full sample history. `state.timeline` is a *window* onto this, filled per
+   * request from the caller's cursor, so a 400ms poll does not re-ship ten
+   * minutes of samples on every tick.
+   */
+  timeline: ThroughputSample[];
 }
 
 /**
@@ -64,6 +88,7 @@ export class RunService {
       sessionsConfigured: this.config.session.storePath !== null,
       platforms: ['tiktok', 'instagram'],
       scrapersImplemented: ['tiktok', 'instagram'],
+      pollIntervalMs: this.config.pollIntervalMs,
     };
   }
 
@@ -71,14 +96,36 @@ export class RunService {
     return [...this.runs.values()].map((record) => record.state);
   }
 
-  get(runId: string): RunStateDto | undefined {
-    return this.runs.get(runId)?.state;
+  /**
+   * Current state of a run.
+   *
+   * `since` is a timeline cursor: pass the `timelineCursor` from the previous
+   * response and only newer samples come back, so a long session stays cheap to
+   * watch. Omit it to receive everything retained.
+   */
+  get(runId: string, since = 0): RunStateDto | undefined {
+    const record = this.runs.get(runId);
+    if (record === undefined) return undefined;
+
+    const total = record.state.timelineCursor;
+    const oldest = total - record.timeline.length;
+    const offset = Math.max(0, Math.min(record.timeline.length, since - oldest));
+
+    return { ...record.state, timeline: record.timeline.slice(offset) };
+  }
+
+  /** Session summary for a continuous run, if it has finished one. */
+  sessionSummary(runId: string): RunStateDto['sessionSummary'] {
+    return this.runs.get(runId)?.state.sessionSummary ?? null;
   }
 
   cancel(runId: string): boolean {
     const record = this.runs.get(runId);
     if (record === undefined) return false;
-    if (record.state.state !== 'running' && record.state.state !== 'preparing') return false;
+    const { state } = record.state;
+    // `waiting` counts: stopping during the gap between cycles is the most
+    // likely moment for an operator to hit the button.
+    if (state !== 'running' && state !== 'preparing' && state !== 'waiting') return false;
     record.abort.abort(
       new ScrapeError({ code: 'cancelled', message: 'run cancelled by operator' }),
     );
@@ -113,9 +160,13 @@ export class RunService {
     const runId = randomUUID();
     const abort = new AbortController();
 
+    const continuous = request.continuous === true;
+    const schedule = continuous ? (request.schedule ?? this.defaultSchedule()) : null;
+
     const record: RunRecord = {
       abort,
       outputPath: null,
+      timeline: [],
       state: {
         runId,
         state: 'preparing',
@@ -129,12 +180,168 @@ export class RunService {
         error: null,
         outputPath: null,
         hasOutput: false,
+        continuous,
+        schedule,
+        cycle: null,
+        timeline: [],
+        timelineCursor: 0,
+        cycles: [],
+        sessionSummary: null,
+        stalled: false,
       },
     };
     this.runs.set(runId, record);
+    this.evictOldRuns();
 
-    void this.execute(record, request);
+    void (continuous
+      ? this.executeSession(record, request, schedule as SessionScheduleDto)
+      : this.execute(record, request));
     return record.state;
+  }
+
+  private defaultSchedule(): SessionScheduleDto {
+    return { intervalMs: this.config.pollIntervalMs, durationMs: null, maxCycles: null };
+  }
+
+  /** Drops the oldest finished runs once the map is over its ceiling. */
+  private evictOldRuns(): void {
+    if (this.runs.size <= MAX_RETAINED_RUNS) return;
+    for (const [id, record] of this.runs) {
+      if (this.runs.size <= MAX_RETAINED_RUNS) break;
+      const { state } = record.state;
+      // Never evict something still moving, however old it is.
+      if (state === 'completed' || state === 'failed') this.runs.delete(id);
+    }
+  }
+
+  /**
+   * Continuous variant of {@link execute}: same parsing, same output
+   * conventions, but the batch repeats on a schedule and the dashboard watches
+   * the session rather than a single run.
+   */
+  private async executeSession(
+    record: RunRecord,
+    request: StartRunRequest,
+    schedule: SessionScheduleDto,
+  ): Promise<void> {
+    const { state } = record;
+
+    try {
+      const parsed = this.parseRequestInput(request);
+      state.input = {
+        candidates: parsed.totalCandidates,
+        accepted: parsed.records.length,
+        rejected: parsed.issues.length,
+        issues: parsed.issues,
+      };
+
+      const fatal = parsed.issues.find(isFatalInputIssue);
+      if (fatal !== undefined) {
+        throw new ScrapeError({ code: 'invalid_url', message: fatal.message });
+      }
+      if (parsed.records.length === 0) {
+        throw new ScrapeError({
+          code: 'invalid_url',
+          message: 'no usable URLs in the supplied input',
+        });
+      }
+
+      const platform: Platform | null =
+        request.platform === 'auto' ? inferPlatform(parsed) : request.platform;
+      const paths = resolveSessionPaths({
+        outputDir: this.config.outputDir,
+        platform,
+        startedAt: new Date(),
+      });
+
+      record.outputPath = paths.snapshots;
+      state.outputPath = paths.snapshots;
+      state.platform = platform;
+      state.state = 'running';
+
+      const summary = await runSession({
+        sessionId: state.runId,
+        records: parsed.records,
+        platform,
+        counts: {
+          candidates: parsed.totalCandidates,
+          accepted: parsed.records.length,
+          rejected: parsed.issues.length,
+        },
+        config: this.config,
+        logger: this.logger,
+        overrides: { concurrency: request.concurrency, targetRpm: request.targetRpm },
+        schedule,
+        paths,
+        signal: record.abort.signal,
+        maxSamples: MAX_TIMELINE_SAMPLES,
+        onSample: (sample) => {
+          record.timeline.push(sample);
+          if (record.timeline.length > MAX_TIMELINE_SAMPLES) {
+            record.timeline.splice(0, record.timeline.length - MAX_TIMELINE_SAMPLES);
+          }
+          state.timelineCursor += 1;
+        },
+        onProgress: (progress: SessionProgress) => {
+          state.state = progress.state === 'waiting' ? 'waiting' : 'running';
+          state.stalled = progress.stalled;
+          state.cycle = {
+            current: progress.cycle,
+            completed: progress.cyclesCompleted,
+            planned: progress.plannedCycles,
+            nextStartsAt:
+              progress.nextCycleAt === null ? null : new Date(progress.nextCycleAt).toISOString(),
+          };
+          // Reuse the one-shot progress shape so the existing stat cards and
+          // progress bar keep working without a second code path.
+          state.progress = {
+            total: progress.total,
+            processed: progress.processed,
+            successful: progress.successes,
+            failed: progress.failures,
+            inFlight: progress.inFlight,
+            queued: 0,
+            elapsedMs: progress.elapsedMs,
+            throughputPerMinute: progress.requestsPerMinute,
+          };
+        },
+        onCycleEnd: (cycle: CycleSummary) => {
+          state.cycles.push(cycle);
+          if (cycle.summary !== null) state.summary = cycle.summary;
+        },
+      });
+
+      state.sessionSummary = summary;
+      state.hasOutput = summary.output.rows_written > 0;
+      state.finishedAt = new Date().toISOString();
+      state.cycle = {
+        current: summary.cycles.started,
+        completed: summary.cycles.completed,
+        planned: schedule.maxCycles,
+        nextStartsAt: null,
+      };
+
+      if (summary.schedule.stop_reason === 'fatal') {
+        state.state = 'failed';
+        state.error = { code: 'output_error', message: 'session stopped: output was unwritable' };
+        return;
+      }
+
+      // Cancelling is a normal way to end a session — the cycle in flight
+      // finished and every row it produced was kept — so it completes rather
+      // than fails, and the reason is surfaced through the summary instead of
+      // the error panel.
+      state.state = 'completed';
+    } catch (error) {
+      const scrapeError = ScrapeError.from(error);
+      state.state = 'failed';
+      state.error = { code: scrapeError.code, message: scrapeError.message };
+      state.finishedAt = new Date().toISOString();
+      this.logger.error(
+        { run_id: state.runId, error_code: scrapeError.code, message: scrapeError.message },
+        'session failed',
+      );
+    }
   }
 
   private async execute(record: RunRecord, request: StartRunRequest): Promise<void> {

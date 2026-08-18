@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { Plugin, ViteDevServer } from 'vite';
 
 import type { RunService } from '../../app/run-service.js';
-import type { StartRunRequest } from '../../app/types.js';
+import type { SessionScheduleDto, StartRunRequest } from '../../app/types.js';
 import type { createLogger } from '../../infrastructure/logging/pino-logger.js';
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -118,18 +118,37 @@ async function handle(
     return;
   }
 
-  const runMatch = /^\/runs\/([^/]+)(\/cancel|\/output)?$/.exec(route);
+  const runMatch = /^\/runs\/([^/]+)(\/cancel|\/output|\/session)?$/.exec(route);
   if (runMatch !== null) {
     const runId = decodeURIComponent(runMatch[1] ?? '');
     const suffix = runMatch[2];
 
     if (method === 'GET' && suffix === undefined) {
-      const state = service.get(runId);
+      // `?since=` is a timeline cursor. Without it a ten-minute session would
+      // re-ship every sample it has on every 400ms poll.
+      const sinceRaw = url.searchParams.get('since');
+      const since = sinceRaw === null ? 0 : Number.parseInt(sinceRaw, 10);
+      const state = service.get(runId, Number.isInteger(since) && since > 0 ? since : 0);
       if (state === undefined) {
         sendJson(res, 404, { error: { code: 'not_found', message: `unknown run "${runId}"` } });
         return;
       }
       sendJson(res, 200, state);
+      return;
+    }
+
+    if (method === 'GET' && suffix === '/session') {
+      const summary = service.sessionSummary(runId);
+      if (summary === null) {
+        sendJson(res, 404, {
+          error: { code: 'not_found', message: `run "${runId}" has no session summary` },
+        });
+        return;
+      }
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      res.setHeader('content-disposition', `attachment; filename="${runId}.session.json"`);
+      res.end(JSON.stringify(summary, null, 2));
       return;
     }
 
@@ -179,7 +198,38 @@ function toStartRunRequest(body: unknown): StartRunRequest | null {
   if (!Number.isInteger(concurrency) || concurrency < 1) return null;
   if (!Number.isInteger(targetRpm) || targetRpm < 0) return null;
 
-  return { platform, input, format, concurrency, targetRpm };
+  const base: StartRunRequest = { platform, input, format, concurrency, targetRpm };
+
+  if (raw['continuous'] !== true) return base;
+
+  const schedule = toSchedule(raw['schedule']);
+  if (schedule === null) return null;
+
+  return { ...base, continuous: true, schedule };
+}
+
+/** Hand-rolled like the rest of this file; the dev API has no schema layer. */
+function toSchedule(value: unknown): SessionScheduleDto | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = value as Record<string, unknown>;
+
+  const intervalMs = Number(raw['intervalMs']);
+  if (!Number.isInteger(intervalMs) || intervalMs < 0) return null;
+
+  // `null` is meaningful here — it is how the UI says "no limit" — so an absent
+  // key and an explicit null must both survive as null rather than becoming 0.
+  const optional = (key: string, min: number): number | null | undefined => {
+    const entry = raw[key];
+    if (entry === null || entry === undefined) return null;
+    const parsed = Number(entry);
+    return Number.isInteger(parsed) && parsed >= min ? parsed : undefined;
+  };
+
+  const durationMs = optional('durationMs', 1);
+  const maxCycles = optional('maxCycles', 1);
+  if (durationMs === undefined || maxCycles === undefined) return null;
+
+  return { intervalMs, durationMs, maxCycles };
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
