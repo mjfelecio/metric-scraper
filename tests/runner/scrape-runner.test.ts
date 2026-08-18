@@ -79,7 +79,7 @@ function buildRunner(options: {
       targetRpm: options.targetRpm ?? 0,
       ...(options.burst === undefined ? {} : { burst: options.burst }),
       maxQueueSize: options.maxQueueSize ?? 0,
-      requestTimeoutMs: 5_000,
+      attemptTimeoutMsByPlatform: { tiktok: 5_000, instagram: 20_000 },
     },
     // No real waiting in tests; the backoff schedule is covered by the retry tests.
     sleep: () => Promise.resolve(),
