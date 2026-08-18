@@ -38,9 +38,9 @@ program
       'Reads a batch of URLs, scrapes each one, and appends one JSONL snapshot row',
       'per URL — including for failures, which are recorded rather than dropped.',
       '',
-      'NOTE: platform acquisition is not implemented yet. Every scrape currently',
-      'returns status=error / not_implemented. The orchestration, retry, proxy,',
-      'output and metrics layers around it are complete and exercised by a run.',
+      'TikTok canonical video/photo URLs are fetched anonymously from first-party public embed pages.',
+      'TikTok short links are not resolved yet. Instagram uses anonymous first-party',
+      'queries with an optional proxy-bound authenticated fallback for exact old-Reel views.',
     ].join('\n'),
   )
   .version('0.1.0')

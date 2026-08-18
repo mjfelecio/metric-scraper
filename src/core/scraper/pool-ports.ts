@@ -46,6 +46,7 @@ export interface ProxyPool {
 export interface SessionHealth {
   id: string;
   platform: Platform;
+  proxyId: string | null;
   requests: number;
   failures: number;
   consecutiveFailures: number;
@@ -70,7 +71,11 @@ export interface SessionPoolStats {
  * graceful-degradation path the runner already takes.
  */
 export interface SessionPool {
-  acquire(platform: Platform, signal?: AbortSignal): Promise<SessionLease | null>;
+  acquire(
+    platform: Platform,
+    signal?: AbortSignal,
+    proxyId?: string | null,
+  ): Promise<SessionLease | null>;
   release(lease: SessionLease): void;
   reportSuccess(lease: SessionLease): void;
   reportFailure(lease: SessionLease, reason?: string): void;

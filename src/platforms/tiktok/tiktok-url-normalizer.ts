@@ -3,30 +3,18 @@ import { hostMatches, normalizeUrlGeneric } from '../../core/url/generic.js';
 import { type UrlNormalizationResult, type UrlNormalizer } from '../../core/url/types.js';
 
 const TIKTOK_DOMAIN = 'tiktok.com';
-
-/**
- * Hosts that serve short/redirect links rather than a canonical post URL.
- *
- * These are recognised so the pipeline can flag "this needs resolving", but
- * nothing here follows a redirect: what the redirect chain looks like, and
- * whether following it is enough to reach a canonical URL, is part of the
- * acquisition research that has not been done yet.
- */
+const CANONICAL_HOST = 'www.tiktok.com';
 const SHORT_LINK_HOSTS = new Set(['vm.tiktok.com', 'vt.tiktok.com']);
 
+export interface CanonicalTikTokVideo {
+  handle: string;
+  kind: 'video' | 'photo';
+  videoId: string;
+}
+
 /**
- * TikTok URL canonicalization.
- *
- * Currently generic-only. The platform-specific work that belongs here once
- * acquisition is investigated:
- *
- * - resolving `vm.tiktok.com` / `vt.tiktok.com` short links to a canonical URL
- * - extracting the native video id from the canonical path
- * - deciding which query parameters TikTok actually needs (the rest can be
- *   dropped, which improves de-duplication)
- *
- * None of that is guessed here: an incorrect id would put fabricated values
- * into an append-only dataset.
+ * Canonicalizes TikTok video/photo post URLs and extracts the platform-native id.
+ * Short links remain recognizable but unresolved until the next milestone.
  */
 export class TikTokUrlNormalizer implements UrlNormalizer {
   readonly platform: Platform = 'tiktok';
@@ -37,9 +25,9 @@ export class TikTokUrlNormalizer implements UrlNormalizer {
 
   normalize(raw: string): UrlNormalizationResult {
     const generic = normalizeUrlGeneric(raw, {
-      // TODO(acquisition): add TikTok's own tracking parameters here once it is
-      // verified which ones are safe to drop.
-      extraTrackingParams: [],
+      // Canonical post routing is path-based. Query parameters on shared
+      // post URLs are attribution/tracking data and are not required.
+      dropAllQueryParams: true,
     });
 
     if (!generic.ok) {
@@ -53,14 +41,67 @@ export class TikTokUrlNormalizer implements UrlNormalizer {
       };
     }
 
+    if (SHORT_LINK_HOSTS.has(generic.url.hostname)) {
+      return {
+        ok: true,
+        url: generic.url.toString(),
+        platform: this.platform,
+        videoId: null,
+        requiresResolution: true,
+        changed: generic.changed,
+      };
+    }
+
+    const canonical = parseCanonicalTikTokUrl(generic.url);
+    if (canonical === null) {
+      return {
+        ok: false,
+        code: 'invalid_url',
+        message:
+          'TikTok URL must use the /@handle/video/{numeric-id} or /@handle/photo/{numeric-id} format',
+      };
+    }
+
+    const normalized = new URL(generic.url);
+    normalized.protocol = 'https:';
+    normalized.hostname = CANONICAL_HOST;
+    normalized.port = '';
+    normalized.pathname = `/@${canonical.handle}/${canonical.kind}/${canonical.videoId}`;
+    normalized.search = '';
+    normalized.hash = '';
+
     return {
       ok: true,
-      url: generic.url.toString(),
+      url: normalized.toString(),
       platform: this.platform,
-      // Not derivable yet — see the class comment.
-      videoId: null,
-      requiresResolution: SHORT_LINK_HOSTS.has(generic.url.hostname),
-      changed: generic.changed,
+      videoId: canonical.videoId,
+      requiresResolution: false,
+      changed: normalized.toString() !== raw.trim(),
     };
   }
+}
+
+/** Extracts identity only from TikTok's verified canonical post paths. */
+export function parseCanonicalTikTokUrl(url: URL | string): CanonicalTikTokVideo | null {
+  let parsed: URL;
+  try {
+    parsed = typeof url === 'string' ? new URL(url) : url;
+  } catch {
+    return null;
+  }
+
+  if (!hostMatches(parsed, TIKTOK_DOMAIN) || SHORT_LINK_HOSTS.has(parsed.hostname)) {
+    return null;
+  }
+
+  const match = /^\/@([^/]+)\/(video|photo)\/(\d+)\/?$/.exec(parsed.pathname);
+  if (match === null) return null;
+
+  const handle = match[1];
+  const kind = match[2];
+  const videoId = match[3];
+  if (handle === undefined || (kind !== 'video' && kind !== 'photo') || videoId === undefined) {
+    return null;
+  }
+  return { handle, kind, videoId };
 }

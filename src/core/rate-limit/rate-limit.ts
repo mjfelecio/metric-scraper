@@ -17,16 +17,15 @@ export interface QueuePacing {
 }
 
 /**
- * Spreads the budget over one-second windows rather than one-minute windows,
- * so 500 rpm means a steady ~9/sec instead of a 500-request burst followed by
- * 59 seconds of silence.
+ * Starts one job per evenly spaced interval. Rounding the interval upward
+ * makes the configured RPM a ceiling instead of rounding fractional jobs per
+ * second upward (which would turn 15 rpm into 60 rpm and 500 rpm into 540).
  */
-export function rpmToQueuePacing(targetRpm: number, windowMs = 1_000): QueuePacing {
+export function rpmToQueuePacing(targetRpm: number): QueuePacing {
   if (!Number.isFinite(targetRpm) || targetRpm <= 0) {
-    return { intervalMs: windowMs, intervalCap: Number.POSITIVE_INFINITY };
+    return { intervalMs: 1_000, intervalCap: Number.POSITIVE_INFINITY };
   }
-  const perWindow = (targetRpm * windowMs) / 60_000;
-  return { intervalMs: windowMs, intervalCap: Math.max(1, Math.ceil(perWindow)) };
+  return { intervalMs: Math.max(1, Math.ceil(60_000 / targetRpm)), intervalCap: 1 };
 }
 
 export interface RateLimiter {

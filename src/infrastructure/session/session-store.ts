@@ -19,6 +19,7 @@ import { type PlatformSession } from '../../core/scraper/lease-ports.js';
  *     {
  *       "id": "tiktok-1",
  *       "platform": "tiktok",
+ *       "proxyId": null,
  *       "cookie": "<raw Cookie header value>",
  *       "userAgent": "<optional>",
  *       "headers": { "accept-language": "en-US,en;q=0.9" }
@@ -32,6 +33,7 @@ export const SessionFileSchema = z.object({
     z.object({
       id: z.string().min(1),
       platform: PlatformSchema,
+      proxyId: z.string().min(1).nullable().default(null),
       cookie: z.string().min(1),
       userAgent: z.string().min(1).nullable().default(null),
       headers: z.record(z.string(), z.string()).default({}),
@@ -78,6 +80,7 @@ export async function loadSessionsFromFile(path: string): Promise<PlatformSessio
   return parsed.data.sessions.map((session) => ({
     id: session.id,
     platform: session.platform,
+    proxyId: session.proxyId,
     cookie: session.cookie,
     userAgent: session.userAgent,
     headers: session.headers,

@@ -3,19 +3,21 @@
 A batch pipeline for collecting **public engagement metrics** from TikTok videos and
 Instagram Reels/video posts, as an append-only time series.
 
-> ## Status: foundation only — platform acquisition is NOT implemented
+> ## Status: TikTok and Instagram canonical acquisition implemented
 >
-> `TikTokScraper` and `InstagramScraper` are deliberate placeholders. They perform no
-> network request and return an explicit `not_implemented` failure. **Every scrape
-> currently produces a row with `status: "error"`.** That is the intended behaviour of
-> this milestone, not a defect.
+> `TikTokScraper` fetches TikTok's first-party public embed pages anonymously and parses
+> their embedded hydration JSON. Canonical video and photo post URLs are accepted. It
+> requires post id, views, likes, comments and shares;
+> saves, author details and posting time remain nullable when TikTok omits them.
+> A second first-party player request replaces rounded embed likes, comments and shares
+> with exact integers. TikTok does not expose exact public view or save counts there, so
+> views remain source-reported (and can be rounded for large posts) while saves are null.
 >
-> How each platform actually exposes public metrics has not been investigated, and this
-> repository does not guess: there are no invented endpoints, no speculative HTML
-> parsing, and no fabricated metric values anywhere in it. Everything _around_ the
-> acquisition step — input handling, normalization, scheduling, concurrency, retries,
-> proxy/session rotation, output, metrics and run summaries — is complete and is
-> exercised end to end by a real run.
+> `InstagramScraper` uses anonymous first-party post and clips operations for exact
+> likes, comments and Reel play counts. It checks a bounded two clips pages across the
+> primary author and public coauthors before using proxy-bound media-info fallback.
+> It fails visibly instead of returning `ok` without an exact view count. TikTok short
+> links are detected but are not resolved in this milestone.
 
 ---
 
@@ -43,7 +45,7 @@ Out of scope for v1 (explicitly): scheduling, database design, and bot-detection
                               │
               ┌───────────────▼──────────────┐
               │  Platform implementations    │   TikTok · Instagram
-              │  src/platforms               │   (placeholders today)
+              │  src/platforms               │   (TikTok and Instagram live)
               └───────────────┬──────────────┘
                               │
               ┌───────────────▼──────────────┐
@@ -122,29 +124,55 @@ cp .env.example .env
 
 All are optional. See [`.env.example`](.env.example) for the annotated list.
 
-| Variable                     | Default    | Meaning                                                                    |
-| ---------------------------- | ---------- | -------------------------------------------------------------------------- |
-| `LOG_LEVEL`                  | `info`     | `trace`…`fatal`, or `silent`. Logs go to stderr.                           |
-| `SCRAPER_CONCURRENCY`        | `10`       | Jobs in flight at once                                                     |
-| `SCRAPER_TARGET_RPM`         | `500`      | Requests-per-minute ceiling; `0` disables pacing                           |
-| `SCRAPER_MAX_QUEUE_SIZE`     | `0`        | Max waiting jobs; `0` = unbounded                                          |
-| `SCRAPER_REQUEST_TIMEOUT_MS` | `15000`    | Per-attempt timeout                                                        |
-| `RETRY_MAX_ATTEMPTS`         | `3`        | Attempts per URL including the first; `1` disables retries                 |
-| `RETRY_INITIAL_DELAY_MS`     | `250`      | First backoff delay                                                        |
-| `RETRY_MAX_DELAY_MS`         | `10000`    | Backoff ceiling                                                            |
-| `RETRY_BACKOFF_FACTOR`       | `2`        | Growth multiplier                                                          |
-| `RETRY_JITTER`               | `true`     | Full jitter, so a batch does not re-fire in lockstep                       |
-| `OUTPUT_DIR`                 | `./output` | Where JSONL and run summaries are written                                  |
-| `PROXY_POOL`                 | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct |
-| `PROXY_MAX_FAILURES`         | `3`        | Consecutive failures before cooldown                                       |
-| `PROXY_COOLDOWN_MS`          | `60000`    | How long a failed/blocked proxy is benched                                 |
-| `SESSION_STORE_PATH`         | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous               |
-| `SESSION_MAX_FAILURES`       | `3`        | Consecutive failures before cooldown                                       |
-| `SESSION_COOLDOWN_MS`        | `300000`   | How long a blocked session is benched                                      |
+| Variable                      | Default    | Meaning                                                                    |
+| ----------------------------- | ---------- | -------------------------------------------------------------------------- |
+| `LOG_LEVEL`                   | `info`     | `trace`…`fatal`, or `silent`. Logs go to stderr.                           |
+| `SCRAPER_CONCURRENCY`         | `10`       | Jobs in flight at once                                                     |
+| `SCRAPER_TARGET_RPM`          | `500`      | Requests-per-minute ceiling; `0` disables pacing                           |
+| `SCRAPER_MAX_QUEUE_SIZE`      | `0`        | Max waiting jobs; `0` = unbounded                                          |
+| `SCRAPER_REQUEST_TIMEOUT_MS`  | `15000`    | Per-attempt timeout                                                        |
+| `RETRY_MAX_ATTEMPTS`          | `3`        | Attempts per URL including the first; `1` disables retries                 |
+| `RETRY_INITIAL_DELAY_MS`      | `250`      | First backoff delay                                                        |
+| `RETRY_MAX_DELAY_MS`          | `10000`    | Backoff ceiling                                                            |
+| `RETRY_BACKOFF_FACTOR`        | `2`        | Growth multiplier                                                          |
+| `RETRY_JITTER`                | `true`     | Full jitter, so a batch does not re-fire in lockstep                       |
+| `OUTPUT_DIR`                  | `./output` | Where JSONL and run summaries are written                                  |
+| `PROXY_POOL`                  | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct |
+| `PROXY_MAX_FAILURES`          | `3`        | Consecutive failures before cooldown                                       |
+| `PROXY_COOLDOWN_MS`           | `60000`    | How long a failed/blocked proxy is benched                                 |
+| `SESSION_STORE_PATH`          | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous               |
+| `SESSION_MAX_FAILURES`        | `3`        | Consecutive failures before cooldown                                       |
+| `SESSION_COOLDOWN_MS`         | `300000`   | How long a blocked session is benched                                      |
+| `INSTAGRAM_POST_DOC_ID`       | current ID | Anonymous post metadata operation                                          |
+| `INSTAGRAM_CLIPS_DOC_ID`      | current ID | Recent creator-Reels operation                                             |
+| `INSTAGRAM_CLIPS_MAX_PAGES`   | `2`        | Maximum anonymous clips pages checked per candidate author                 |
+| `INSTAGRAM_CLIPS_MAX_AUTHORS` | `3`        | Maximum primary/coauthor accounts checked per Reel                         |
 
 **Credentials never live in source.** Proxy credentials are read from `PROXY_POOL` and
 kept inside the in-memory `ProxyTarget`; everything user-facing (logs, metrics, run
 summaries) uses a credential-free proxy id like `http://proxy-a.example.net:8000`.
+
+Instagram sessions are supplied as a gitignored JSON file. `proxyId` must equal the
+credential-free id of the sticky HTTP/HTTPS proxy in `PROXY_POOL`; use `null` only for
+direct local testing. A session is never sent through an unmatched IP.
+
+```json
+{
+  "sessions": [
+    {
+      "id": "instagram-test-1",
+      "platform": "instagram",
+      "proxyId": "http://proxy-a.example.net:8000",
+      "cookie": "sessionid=...; csrftoken=...",
+      "userAgent": null,
+      "headers": {}
+    }
+  ]
+}
+```
+
+Use a dedicated test account and browser-created cookies. Do not store Instagram
+passwords or use a personal account.
 
 ## 6. Running the CLI
 
@@ -222,15 +250,15 @@ pnpm test
 pnpm test:watch
 ```
 
-116 tests covering the snapshot schema, config schema, text/JSON input parsing and its
+The Vitest suite covers the snapshot schema, config schema, text/JSON input parsing and its
 failure modes, URL normalization, retry policy, metrics and percentiles, JSONL
 serialization and append semantics, run-summary calculation, and the runner itself
 (failures become rows, retries are counted separately from requests, permanent failures
-are not retried, concurrency is respected, output failures are fatal).
+are not retried, concurrency is respected, output failures are fatal). TikTok-specific
+tests cover hydration parsing, anonymous HTTP behavior and platform error mapping.
 
-Nothing tests against real TikTok or Instagram. When acquisition lands, platform
-implementations are tested by passing a stub `HttpClient` through `ScrapeContext` — the
-contract is designed so no network is required.
+Automated tests do not call TikTok or Instagram. Platform implementations receive a stub
+`HttpClient` through `ScrapeContext`, so the suite stays deterministic and offline.
 
 ## 9. Building
 
@@ -250,43 +278,42 @@ pnpm format
 | TikTok    | [`src/platforms/tiktok/tiktok-scraper.ts`](src/platforms/tiktok/tiktok-scraper.ts)             | [`src/platforms/tiktok/tiktok-url-normalizer.ts`](src/platforms/tiktok/tiktok-url-normalizer.ts)             |
 | Instagram | [`src/platforms/instagram/instagram-scraper.ts`](src/platforms/instagram/instagram-scraper.ts) | [`src/platforms/instagram/instagram-url-normalizer.ts`](src/platforms/instagram/instagram-url-normalizer.ts) |
 
-Each placeholder carries step-by-step implementation notes. In short:
+TikTok anonymously fetches its first-party public embed page and player items response.
+The embed parser reads `__FRONTITY_CONNECT_STATE__`; the player response supplies exact
+likes, comments and shares to replace rounded embed values. The older
+`__UNIVERSAL_DATA_FOR_REHYDRATION__` shape remains supported as a parser fallback. The
+volatile payload parser is isolated from HTTP and orchestration.
 
-1. Implement `scrape(url, context): Promise<ScrapeResult>`.
-2. Use `context.http` for every request — never construct a client. Pass
-   `context.proxy?.target` and `context.session?.session.cookie` through, and honour
-   `context.signal`.
-3. Return `scrapeSuccess({...})` with whatever was found, `null` for anything the
-   platform does not expose. **Never substitute `0` for "unknown".**
-4. Return `scrapeFailure(status, error)` otherwise, mapping observations onto
-   `not_found` / `private` / `rate_limited` / `error`. Permanent statuses are never
-   retried.
-5. Register nothing new — [`src/platforms/index.ts`](src/platforms/index.ts) already
-   wires both platforms in.
-
-Nothing in `src/core`, `src/app`, `src/cli` or `src/web` should need to change.
+Instagram bootstraps an anonymous CSRF context once per proxy, calls the current Polaris
+post operation, and queries creator clips only when views are missing. Clips lookup is
+bounded by configurable page and author limits, uses Instagram's `max_id` cursor, and
+checks public coauthors. Successful clips pages are coalesced and reused within one run,
+then discarded so a later time-series run fetches fresh counters. Reels outside those
+bounds require a compatible session and use authenticated media-info. GraphQL document
+IDs are configurable because they are undocumented and volatile.
 
 ## 11. Output contract
 
 One JSON object per line, appended, UTF-8, keys in a fixed order:
 
-| Field                                       | Type                                                  | Notes                                            |
-| ------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------ |
-| `platform`                                  | `"tiktok" \| "instagram"`                             |                                                  |
-| `video_id`                                  | `string \| null`                                      | **Not a key.** Currently always `null` (see §12) |
-| `url`                                       | `string`                                              | The normalized URL that was requested            |
-| `scraped_at`                                | ISO-8601 `string`                                     |                                                  |
-| `views` `likes` `comments` `shares` `saves` | `number \| null`                                      | `null` = not available, never `0`                |
-| `author_handle`                             | `string \| null`                                      |                                                  |
-| `author_follower_count`                     | `number \| null`                                      |                                                  |
-| `posted_at`                                 | ISO-8601 `string \| null`                             |                                                  |
-| `status`                                    | `ok \| not_found \| private \| rate_limited \| error` |                                                  |
-| `error`                                     | `string \| null`                                      | `"<error_code>: <message>"` on failure           |
-| `latency_ms`                                | `number`                                              | Whole attempt chain, including retries           |
+| Field                                       | Type                                                  | Notes                                    |
+| ------------------------------------------- | ----------------------------------------------------- | ---------------------------------------- |
+| `platform`                                  | `"tiktok" \| "instagram"`                             |                                          |
+| `video_id`                                  | `string \| null`                                      | Platform-native id; not a unique row key |
+| `url`                                       | `string`                                              | The normalized URL that was requested    |
+| `scraped_at`                                | ISO-8601 `string`                                     |                                          |
+| `views` `likes` `comments` `shares` `saves` | `number \| null`                                      | `null` = not available, never `0`        |
+| `author_handle`                             | `string \| null`                                      |                                          |
+| `author_follower_count`                     | `number \| null`                                      |                                          |
+| `posted_at`                                 | ISO-8601 `string \| null`                             |                                          |
+| `status`                                    | `ok \| not_found \| private \| rate_limited \| error` |                                          |
+| `error`                                     | `string \| null`                                      | `"<error_code>: <message>"` on failure   |
+| `latency_ms`                                | `number`                                              | Whole attempt chain, including retries   |
 
 Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, actual
-throughput, latency p50/p95/max, status and error breakdowns, retry statistics and proxy
-statistics. Latency percentiles use the **nearest-rank** method, so a reported p95 is
+throughput, raw platform HTTP calls, latency p50/p95/max, status and error breakdowns,
+retry statistics, proxy statistics and session burn/health statistics. Latency
+percentiles use the **nearest-rank** method, so a reported p95 is
 always an observed sample. Throughput counts completed work items only — retries are
 reported separately and can never inflate it.
 
@@ -295,33 +322,36 @@ including the case of the same video appearing twice with different `scraped_at`
 
 ## 12. Current limitations
 
-- **No platform acquisition.** Every run returns `not_implemented`.
-- **`video_id` is always `null`.** Deriving an id from a URL has not been verified for
-  either platform, and a guessed id in an append-only dataset is worse than a null.
+- **Instagram uses undocumented first-party operations.** Document IDs and response
+  shapes can change. A malformed response becomes a visible `parse_error`.
+- **Instagram clips lookup is deliberately bounded.** The anonymous path checks at most
+  two pages across three primary/coauthor accounts by default. Reels outside those bounds
+  need a dedicated session; missing exact views are never considered successful.
+- **Instagram shares and saves are usually unavailable to non-owners.** They remain
+  `null` unless a tested response supplies an integer.
+- **TikTok acquisition depends on undocumented public-page hydration JSON.** A payload
+  shape change produces a visible `parse_error`; it never fabricates or substitutes metrics.
 - **Short links are detected, not resolved.** `vm.tiktok.com` / `vt.tiktok.com` are
-  flagged with `requiresResolution`, but nothing follows the redirect yet.
-- **Proxies cannot actually be used yet.** `FetchHttpClient` needs a `dispatcherFactory`
-  (e.g. undici's `ProxyAgent`) to route through one. Without it, a proxied request fails
-  loudly rather than silently going direct and exposing the origin IP — the transport
-  choice waits on knowing the proxy vendor.
+  flagged with `requiresResolution`; the TikTok scraper currently accepts canonical
+  `/@handle/video/{numeric-id}` and `/@handle/photo/{numeric-id}` URLs.
+- **Proxy transport supports HTTP and HTTPS only.** SOCKS entries fail loudly rather
+  than silently going direct and exposing the origin IP.
 - **Run state is in-process.** The dashboard's run list is memory-only; the JSONL on disk
   is the durable artifact. No database, by design.
 - **The web API is dev-only** (see §7).
-- **Single process.** Sufficient for the ~500 rpm target; the `TaskQueue` port is the
-  seam if that ever changes.
+- **Single process and direct-IP scale remain unvalidated.** The `TaskQueue` port is the
+  seam for distributed execution, but the tested direct path did not approach 500 rpm.
 - **Latency samples are kept in full** in the metrics collector — fine for runs of this
   size, would want a histogram for very long runs.
 
 ## 13. What remains to implement
 
-1. **Investigate acquisition for both platforms** — this is the next task, and everything
-   else below depends on its answers.
-2. Implement `TikTokScraper` and `InstagramScraper` against the existing contract.
-3. Complete the URL normalizers: short-link resolution, id extraction, and which query
-   parameters are load-bearing.
-4. Decide whether sessions are needed at all; if so, populate `SessionPool` from an
-   operator-supplied store (the rotation, health and graceful-degradation logic is done).
-5. Wire a proxy dispatcher into `FetchHttpClient` once the proxy vendor is known.
-6. Validate the ~500 rpm target against a real workload and tune concurrency, pacing and
+1. Run the staged Instagram proxy benchmark at strict 50, 100, 250, and 500 logical RPM.
+   Run-scoped caching reduced the direct 100-URL test from 223 to 133 raw calls, and a
+   strict 15 RPM confirmation held at 14.18 RPM, but no proxy pool is configured yet.
+2. Validate the authenticated Instagram fallback for Reels beyond the anonymous page and
+   coauthor bounds using a dedicated local test session.
+3. Resolve TikTok `vm.tiktok.com` / `vt.tiktok.com` short links and feed the final canonical
+   URL back into output and de-duplication.
+4. Validate the ~500 rpm target against a real proxy workload and tune concurrency, pacing and
    the retry policy from the measured run summaries.
-7. Add platform-level tests using stubbed `HttpClient` responses.

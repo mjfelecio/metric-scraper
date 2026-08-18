@@ -5,6 +5,7 @@ import { RunSummarySchema } from '../../src/core/models/run-summary.js';
 import { buildRunSummary } from '../../src/core/runner/build-summary.js';
 import { formatRunSummary } from '../../src/core/runner/format-summary.js';
 import { NullProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
+import { NullSessionPool } from '../../src/infrastructure/session/in-memory-session-pool.js';
 
 function summaryFixture() {
   const metrics = new MetricsCollector();
@@ -38,6 +39,7 @@ function summaryFixture() {
     counts: { candidates: 8, accepted: 6, rejected: 2 },
     metrics: metrics.view(),
     proxyStats: new NullProxyPool().getStats(),
+    sessionStats: new NullSessionPool().getStats(),
     concurrency: 10,
     targetRpm: 500,
     snapshotsPath: '/tmp/run.jsonl',
@@ -102,6 +104,7 @@ describe('buildRunSummary', () => {
       counts: { candidates: 0, accepted: 0, rejected: 0 },
       metrics: metrics.view(),
       proxyStats: new NullProxyPool().getStats(),
+      sessionStats: new NullSessionPool().getStats(),
       concurrency: 1,
       targetRpm: 0,
       snapshotsPath: null,

@@ -1,7 +1,7 @@
 import { type MetricsView } from '../metrics/metrics-collector.js';
 import { type Platform } from '../models/platform.js';
 import { type RunSummary } from '../models/run-summary.js';
-import { type ProxyPoolStats } from '../scraper/pool-ports.js';
+import { type ProxyPoolStats, type SessionPoolStats } from '../scraper/pool-ports.js';
 
 import { type RunCounts } from './types.js';
 
@@ -14,6 +14,7 @@ export interface BuildSummaryInput {
   counts: RunCounts;
   metrics: MetricsView;
   proxyStats: ProxyPoolStats;
+  sessionStats: SessionPoolStats;
   concurrency: number;
   targetRpm: number;
   snapshotsPath: string | null;
@@ -48,6 +49,7 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
 
     totals: {
       requests: metrics.totalRequests,
+      platform_http_requests: metrics.platformHttpRequests,
       successes: metrics.successfulRequests,
       failures: metrics.failedRequests,
       success_rate: metrics.successRate,
@@ -87,6 +89,23 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
         successes: usage.successes,
         failures: usage.failures,
         blocked: usage.blocked,
+      })),
+    },
+
+    sessions: {
+      configured: input.sessionStats.configured,
+      used: input.sessionStats.perSession.filter((session) => session.requests > 0).length,
+      blocked: input.sessionStats.blocked,
+      total_failures: input.sessionStats.perSession.reduce(
+        (total, session) => total + session.failures,
+        0,
+      ),
+      per_session: input.sessionStats.perSession.map((session) => ({
+        session_id: session.id,
+        proxy_id: session.proxyId,
+        requests: session.requests,
+        failures: session.failures,
+        blocked: session.blocked,
       })),
     },
 

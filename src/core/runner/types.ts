@@ -9,6 +9,8 @@ export interface JobCompletedEvent {
   retries: number;
   /** Credential-free proxy id used for the final attempt, if any. */
   proxyId: string | null;
+  /** Raw platform HTTP calls across all attempts for this logical job. */
+  platformHttpRequests: number;
 }
 
 /** Cheap, frequently emitted progress snapshot for CLI/UI display. */
