@@ -4,6 +4,7 @@ import { type Platform } from '../core/models/platform.js';
 import { type RunSummary } from '../core/models/run-summary.js';
 import { type CycleSummary, type SessionSummary } from '../core/models/session-summary.js';
 import { type ScrapeStatus } from '../core/models/status.js';
+import { type ProxyPoolStats } from '../core/scraper/pool-ports.js';
 import { type RunProgress } from '../core/runner/types.js';
 
 /**
@@ -91,6 +92,14 @@ export interface RunStateDto {
   outputPath: string | null;
   /** True when the run wrote rows that can be downloaded. */
   hasOutput: boolean;
+  /**
+   * Live proxy pool state, sampled about once a second while the run is moving.
+   *
+   * Shipped on the existing run-state poll rather than through a route of its
+   * own: it is O(proxies) and the dashboard is already asking for this object.
+   * `null` when no proxies are configured.
+   */
+  proxies: ProxyPoolStats | null;
 
   /** Continuous-session fields. All inert for a one-shot run. */
   continuous: boolean;

@@ -11,6 +11,8 @@ export interface RunPaths {
   snapshots: string;
   /** Machine-readable run summary, written next to the snapshots. */
   summary: string;
+  /** Append-only record of proxy health transitions. */
+  proxyEvents: string;
   /** Identifier shared by both filenames. */
   slug: string;
 }
@@ -34,7 +36,8 @@ export function resolveRunPaths(options: {
       ? path.resolve(options.snapshotsPath)
       : path.join(dir, `${slug}.jsonl`);
   const summary = path.join(dir, `${slug}.summary.json`);
-  return { snapshots, summary, slug };
+  const proxyEvents = path.join(dir, `${slug}.proxy-events.jsonl`);
+  return { snapshots, summary, proxyEvents, slug };
 }
 
 export async function writeRunSummary(filePath: string, summary: RunSummary): Promise<void> {
@@ -55,6 +58,8 @@ export interface SessionPaths {
   snapshots: string;
   /** Aggregate session summary. */
   summary: string;
+  /** Append-only record of proxy health transitions across every cycle. */
+  proxyEvents: string;
   /** Directory holding one summary per cycle. */
   cyclesDir: string;
   /** Path for cycle `n` (1-based). */
@@ -87,6 +92,7 @@ export function resolveSessionPaths(options: {
   return {
     snapshots,
     summary: path.join(dir, `${slug}.session.json`),
+    proxyEvents: path.join(dir, `${slug}.proxy-events.jsonl`),
     cyclesDir,
     cycleSummary: (cycle: number): string =>
       path.join(cyclesDir, `${slug}.cycle-${String(cycle).padStart(3, '0')}.json`),

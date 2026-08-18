@@ -8,6 +8,7 @@ import { type RunSummary } from '../core/models/run-summary.js';
 import { formatRunSummary } from '../core/runner/format-summary.js';
 import { loadInputFile } from '../infrastructure/input/file-input-loader.js';
 import { JsonlFileSink } from '../infrastructure/output/jsonl-file-sink.js';
+import { ProxyEventLog } from '../infrastructure/output/proxy-event-log.js';
 import { resolveRunPaths, writeRunSummary } from '../infrastructure/output/run-paths.js';
 import { createLogger, type LogLevel } from '../infrastructure/logging/pino-logger.js';
 import { createDefaultUrlNormalizerRegistry } from '../platforms/index.js';
@@ -58,7 +59,16 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
   });
 
   const sink = new JsonlFileSink({ filePath: paths.snapshots });
-  const built = await buildRunner({ config, logger, sink, overrides: options.overrides });
+  const proxyEvents = new ProxyEventLog({ filePath: paths.proxyEvents, logger });
+  const built = await buildRunner({
+    config,
+    logger,
+    sink,
+    overrides: options.overrides,
+    onProxyEvent: (event) => {
+      proxyEvents.record(event);
+    },
+  });
 
   const progress = new ProgressReporter({
     enabled: options.progress !== false && options.json !== true,
@@ -81,6 +91,7 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
     onProgress: (update) => progress.update(update),
   });
   progress.done();
+  await proxyEvents.close();
 
   await writeRunSummary(paths.summary, result.summary);
 

@@ -7,8 +7,11 @@ import {
   type StopReasonValue,
   type ThroughputSampleRecord,
 } from '../models/session-summary.js';
+import { type ProxySummary, type ProxyUsage } from '../models/run-summary.js';
 import { SCRAPE_STATUSES, type ScrapeStatus } from '../models/status.js';
+import { type ProxyPoolStats } from '../scraper/pool-ports.js';
 
+import { buildProxySummary, mergeProxyUsage } from './build-proxy-summary.js';
 import { type RunCounts } from './types.js';
 
 export interface BuildSessionSummaryInput {
@@ -30,10 +33,73 @@ export interface BuildSessionSummaryInput {
   concurrency: number;
   targetRpm: number;
   stalled: boolean;
+  /**
+   * The pool as it stood when the session ended.
+   *
+   * Taken once at the end rather than summed from the cycles: the pool lives
+   * for the whole session, so its counters are already cumulative, and its
+   * state is only meaningful at a point in time.
+   */
+  proxyStats?: ProxyPoolStats | undefined;
   snapshotsPath: string | null;
   summaryPath: string | null;
   cyclesDir: string | null;
   rowsWritten: number;
+}
+
+/**
+ * The session's proxy section.
+ *
+ * The pool's own counters are already session-cumulative, so they carry the
+ * totals and the end state. Per-platform and per-error-code attribution lives
+ * in the metrics, which reset each cycle, so that half is merged back out of
+ * the cycle summaries.
+ */
+function sessionProxies(
+  stats: ProxyPoolStats | undefined,
+  cycles: readonly CycleSummary[],
+): ProxySummary {
+  const base = buildProxySummary(stats ?? emptyProxyStats(), []);
+  const attribution = new Map(
+    mergeProxyUsage(cycles.flatMap((cycle) => cycle.summary?.proxies.per_proxy ?? [])).map(
+      (row) => [row.proxy_id, row],
+    ),
+  );
+
+  const perProxy: ProxyUsage[] = base.per_proxy.map((row) => {
+    const merged = attribution.get(row.proxy_id);
+    attribution.delete(row.proxy_id);
+    return merged === undefined
+      ? row
+      : { ...row, by_platform: merged.by_platform, by_error_code: merged.by_error_code };
+  });
+  // Cycles that used a proxy the final snapshot no longer lists.
+  perProxy.push(...attribution.values());
+
+  return {
+    ...base,
+    used: perProxy.filter((row) => row.requests > 0).length,
+    per_proxy: perProxy,
+  };
+}
+
+function emptyProxyStats(): ProxyPoolStats {
+  return {
+    configured: 0,
+    available: 0,
+    inUse: 0,
+    blocked: 0,
+    retired: 0,
+    untested: 0,
+    cooling: 0,
+    saturated: 0,
+    totalInFlight: 0,
+    capacity: null,
+    poolExhaustedCount: 0,
+    totalRequests: 0,
+    totalFailures: 0,
+    perProxy: [],
+  };
 }
 
 function emptyStatusCounts(): Record<ScrapeStatus, number> {
@@ -179,6 +245,8 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
       retried_requests: retriedRequests,
       exhausted_requests: exhaustedRequests,
     },
+
+    proxies: sessionProxies(input.proxyStats, input.cycles),
 
     stalled: input.stalled,
 

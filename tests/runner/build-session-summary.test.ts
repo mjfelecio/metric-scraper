@@ -4,6 +4,7 @@ import { ThroughputTimeline } from '../../src/core/metrics/throughput-timeline.j
 import { type RunSummary } from '../../src/core/models/run-summary.js';
 import { type CycleSummary } from '../../src/core/models/session-summary.js';
 import { buildSessionSummary } from '../../src/core/runner/build-session-summary.js';
+import { type ProxyHealth, type ProxyPoolStats } from '../../src/core/scraper/pool-ports.js';
 
 function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
   return {
@@ -42,7 +43,21 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     status_breakdown: { ok: 8, not_found: 0, private: 0, rate_limited: 1, error: 1 },
     error_breakdown: { rate_limited: 1, network_error: 1 },
     retries: { total_retries: 4, retried_requests: 3, exhausted_requests: 1 },
-    proxies: { configured: 0, used: 0, blocked: 0, retired: 0, total_failures: 0, per_proxy: [] },
+    proxies: {
+      configured: 0,
+      used: 0,
+      available: 0,
+      untested: 0,
+      cooling: 0,
+      saturated: 0,
+      blocked: 0,
+      retired: 0,
+      total_in_flight: 0,
+      capacity: null,
+      pool_exhausted: 0,
+      total_failures: 0,
+      per_proxy: [],
+    },
     sessions: { configured: 0, used: 0, blocked: 0, total_failures: 0, per_session: [] },
     output: { snapshots_path: null, summary_path: null, rows_written: 10 },
     ...overrides,
@@ -69,6 +84,7 @@ function build(options: {
   timeline?: ThroughputTimeline;
   durationMs?: number;
   targetRpm?: number;
+  proxyStats?: ProxyPoolStats;
 }) {
   const startedAt = new Date('2026-08-18T00:00:00.000Z');
   return buildSessionSummary({
@@ -89,6 +105,7 @@ function build(options: {
     concurrency: 5,
     targetRpm: options.targetRpm ?? 500,
     stalled: false,
+    ...(options.proxyStats === undefined ? {} : { proxyStats: options.proxyStats }),
     snapshotsPath: null,
     summaryPath: null,
     cyclesDir: null,
@@ -207,5 +224,135 @@ describe('buildSessionSummary', () => {
     });
     expect(summary.throughput.active_rpm).toBe(0);
     expect(summary.latency.p95_ms).toBeNull();
+  });
+});
+
+describe('buildSessionSummary proxies', () => {
+  function health(overrides: Partial<ProxyHealth> = {}): ProxyHealth {
+    return {
+      id: 'http://a:8000',
+      label: 'p1',
+      state: 'cooling',
+      blockKind: 'consecutive_failures',
+      requests: 15,
+      successes: 11,
+      failures: 4,
+      unsuitable: 0,
+      consecutiveFailures: 3,
+      blocked: true,
+      retired: false,
+      consecutiveUnsuitable: 0,
+      cooldownUntil: Date.parse('2026-08-18T00:05:00.000Z'),
+      eligibleAt: Date.parse('2026-08-18T00:05:00.000Z'),
+      inUse: false,
+      inFlight: 0,
+      capacity: 1,
+      firstUsedAt: null,
+      lastUsedAt: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      unhealthySince: Date.parse('2026-08-18T00:04:00.000Z'),
+      lastReason: 'HTTP 503',
+      lastErrorCode: 'http_error',
+      ...overrides,
+    };
+  }
+
+  function proxyStats(perProxy: ProxyHealth[]): ProxyPoolStats {
+    return {
+      configured: perProxy.length,
+      available: 0,
+      inUse: 0,
+      blocked: 1,
+      retired: 0,
+      untested: 0,
+      cooling: 1,
+      saturated: 0,
+      totalInFlight: 0,
+      capacity: 1,
+      poolExhaustedCount: 2,
+      totalRequests: 15,
+      totalFailures: 4,
+      perProxy,
+    };
+  }
+
+  function cycleWithProxy(n: number, errorCode: string, failures: number): CycleSummary {
+    return cycle(n, {
+      summary: runSummary({
+        proxies: {
+          configured: 1,
+          used: 1,
+          available: 1,
+          untested: 0,
+          cooling: 0,
+          saturated: 0,
+          blocked: 0,
+          retired: 0,
+          total_in_flight: 0,
+          capacity: 1,
+          pool_exhausted: 0,
+          total_failures: failures,
+          per_proxy: [
+            {
+              proxy_id: 'http://a:8000',
+              label: 'p1',
+              state: 'healthy',
+              block_kind: null,
+              requests: 5,
+              successes: 5 - failures,
+              failures,
+              unsuitable: 0,
+              consecutive_failures: 0,
+              blocked: false,
+              retired: false,
+              in_flight: 0,
+              capacity: 8,
+              unhealthy_since: null,
+              eligible_at: null,
+              first_used_at: null,
+              last_used_at: null,
+              last_success_at: null,
+              last_failure_at: null,
+              last_reason: null,
+              last_error_code: null,
+              by_platform: { tiktok: { requests: 5, failures } },
+              by_error_code: failures === 0 ? {} : { [errorCode]: failures },
+            },
+          ],
+        },
+      }),
+    });
+  }
+
+  it('reports the pool as it ended, with attribution merged from every cycle', () => {
+    const summary = build({
+      cycles: [cycleWithProxy(1, 'http_error', 1), cycleWithProxy(2, 'timeout', 3)],
+      proxyStats: proxyStats([health()]),
+    });
+
+    // Counters come from the pool, which has been counting all session long.
+    expect(summary.proxies.per_proxy[0]).toMatchObject({
+      requests: 15,
+      successes: 11,
+      failures: 4,
+      state: 'cooling',
+      unhealthy_since: '2026-08-18T00:04:00.000Z',
+      eligible_at: '2026-08-18T00:05:00.000Z',
+    });
+    // Attribution comes from the cycles, whose metrics reset each time.
+    expect(summary.proxies.per_proxy[0]?.by_error_code).toEqual({ http_error: 1, timeout: 3 });
+    expect(summary.proxies.per_proxy[0]?.by_platform).toEqual({
+      tiktok: { requests: 10, failures: 4 },
+    });
+    expect(summary.proxies.pool_exhausted).toBe(2);
+    expect(summary.proxies.cooling).toBe(1);
+  });
+
+  it('reports an empty pool for a session that ran without proxies', () => {
+    const summary = build({ cycles: [cycle(1)] });
+
+    expect(summary.proxies.configured).toBe(0);
+    expect(summary.proxies.per_proxy).toEqual([]);
   });
 });

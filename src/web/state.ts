@@ -13,6 +13,7 @@ import { type RunSummary } from '../core/models/run-summary.js';
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type CycleSummary, type SessionSummary } from '../core/models/session-summary.js';
 import { type RunProgress } from '../core/runner/types.js';
+import { type ProxyPoolStats } from '../core/scraper/pool-ports.js';
 
 export type InputMethod = 'paste' | 'file';
 
@@ -47,6 +48,8 @@ export interface AppState {
   error: RunErrorDto | null;
   hasOutput: boolean;
   defaults: RunDefaultsDto | null;
+  /** Live proxy pool state; `null` when no proxies are configured. */
+  proxies: ProxyPoolStats | null;
 
   schedule: SessionScheduleDto | null;
   cycle: CycleProgressDto | null;
@@ -82,6 +85,7 @@ export function createInitialState(): AppState {
     error: null,
     hasOutput: false,
     defaults: null,
+    proxies: null,
 
     schedule: null,
     cycle: null,

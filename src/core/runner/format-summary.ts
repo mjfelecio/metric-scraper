@@ -1,4 +1,5 @@
-import { type RunSummary } from '../models/run-summary.js';
+import { summarizeFailureConcentration } from '../metrics/proxy-insights.js';
+import { type ProxyUsage, type RunSummary } from '../models/run-summary.js';
 
 function ms(value: number | null): string {
   if (value === null) return '—';
@@ -15,6 +16,35 @@ function pct(value: number): string {
 
 function rate(value: number): string {
   return `${value.toFixed(1)} req/min`;
+}
+
+/** One proxy on one line: what it is doing, how it did, and why. */
+function proxyLine(proxy: ProxyUsage): string {
+  const parts = [
+    `${proxy.label} ${proxy.proxy_id}`,
+    proxy.state.toUpperCase(),
+    `${num(proxy.requests)} req, ${num(proxy.successes)} ok, ${num(proxy.failures)} failed`,
+  ];
+
+  if (proxy.in_flight > 0) parts.push(`${num(proxy.in_flight)} in flight`);
+  if (proxy.eligible_at !== null) parts.push(`until ${clock(proxy.eligible_at)}`);
+  if (proxy.unhealthy_since !== null && proxy.eligible_at === null) {
+    parts.push(`since ${clock(proxy.unhealthy_since)}`);
+  }
+
+  const errors = Object.entries(proxy.by_error_code)
+    .filter(([, count]) => count > 0)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 3)
+    .map(([code, count]) => `${code}x${count}`);
+  if (errors.length > 0) parts.push(errors.join(', '));
+
+  return parts.join(' — ');
+}
+
+/** Wall-clock time only: a summary is read next to a log, not across days. */
+function clock(iso: string): string {
+  return new Date(iso).toISOString().slice(11, 19);
 }
 
 /**
@@ -120,17 +150,37 @@ export function formatRunSummary(summary: RunSummary): string {
   if (summary.proxies.configured === 0) {
     lines.push('  none configured (direct connection)');
   } else {
-    lines.push(`  ${pad('configured')}${num(summary.proxies.configured)}`);
-    lines.push(`  ${pad('used')}${num(summary.proxies.used)}`);
-    lines.push(`  ${pad('blocked')}${num(summary.proxies.blocked)}`);
-    lines.push(`  ${pad('retired')}${num(summary.proxies.retired)}`);
-    lines.push(`  ${pad('failures')}${num(summary.proxies.total_failures)}`);
-    for (const proxy of summary.proxies.per_proxy) {
+    const proxies = summary.proxies;
+    lines.push(`  ${pad('configured')}${num(proxies.configured)}`);
+    lines.push(
+      `  ${pad('usable')}${num(proxies.available)}` +
+        `${proxies.untested > 0 ? `  (${num(proxies.untested)} never used)` : ''}`,
+    );
+    lines.push(`  ${pad('cooling')}${num(proxies.cooling)}`);
+    lines.push(`  ${pad('retired')}${num(proxies.retired)}`);
+    lines.push(
+      `  ${pad('in flight')}${num(proxies.total_in_flight)} on ${num(proxies.used)} used` +
+        `${proxies.capacity === null ? '' : ` (capacity ${num(proxies.capacity)})`}`,
+    );
+    lines.push(`  ${pad('failures')}${num(proxies.total_failures)}`);
+    if (proxies.pool_exhausted > 0) {
+      // The pool, not the platform, was the limit. Worth saying outright: it is
+      // otherwise indistinguishable from an upstream slowdown.
       lines.push(
-        `    ${proxy.proxy_id} — ${num(proxy.requests)} req, ` +
-          `${num(proxy.successes)} ok, ${num(proxy.failures)} failed` +
-          `${proxy.unsuitable > 0 ? `, ${num(proxy.unsuitable)} unsuitable` : ''}` +
-          `${proxy.blocked ? ', BLOCKED' : ''}`,
+        `  ${pad('pool exhausted')}${num(proxies.pool_exhausted)} time(s) — every proxy was out at once`,
+      );
+    }
+    for (const proxy of proxies.per_proxy) {
+      lines.push(`    ${proxyLine(proxy)}`);
+    }
+
+    const concentration = summarizeFailureConcentration(proxies.per_proxy);
+    if (concentration.concentrated) {
+      lines.push('');
+      lines.push(
+        `!  ${(concentration.topShare * 100).toFixed(0)}% of proxy failures are on ` +
+          `${concentration.worst.map((proxy) => proxy.label).join(' and ')}. ` +
+          'The rest of the pool is carrying its share.',
       );
     }
   }

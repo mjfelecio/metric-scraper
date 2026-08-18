@@ -1,6 +1,8 @@
 import { type RecentResultDto, type RunState } from '../app/types.js';
+import { summarizeFailureConcentration } from '../core/metrics/proxy-insights.js';
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type ScrapeStatus } from '../core/models/status.js';
+import { type ProxyHealth, type ProxyState } from '../core/scraper/pool-ports.js';
 import { formatDuration } from '../core/schedule/duration.js';
 
 import { isRunActive, type AppState } from './state.js';
@@ -30,6 +32,30 @@ const STATE_STYLES: Record<RunState, string> = {
   failed: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
 };
 
+/**
+ * Severity colours, deliberately not the same palette as run status: a cooling
+ * proxy is a normal, self-healing condition, while a retired one will not come
+ * back without someone doing something about it.
+ */
+const PROXY_STATE_STYLES: Record<ProxyState, string> = {
+  healthy: 'bg-emerald-500/15 text-emerald-300',
+  saturated: 'bg-sky-500/15 text-sky-300',
+  probation: 'bg-amber-500/15 text-amber-300',
+  untested: 'bg-slate-500/15 text-slate-300',
+  cooling: 'bg-orange-500/15 text-orange-300',
+  retired: 'bg-rose-500/15 text-rose-300',
+};
+
+/** Worst first, so the row that explains a bad run is never below the fold. */
+const PROXY_STATE_ORDER: Record<ProxyState, number> = {
+  retired: 0,
+  cooling: 1,
+  probation: 2,
+  untested: 3,
+  saturated: 4,
+  healthy: 5,
+};
+
 const STATUS_STYLES: Record<ScrapeStatus, string> = {
   ok: 'bg-emerald-500/15 text-emerald-300',
   not_found: 'bg-slate-500/15 text-slate-300',
@@ -44,6 +70,7 @@ export function render(state: AppState): void {
   renderError(state);
   renderProgress(state);
   renderThroughputChart(state);
+  renderProxyPanel(state);
   renderResults(state);
   renderInputReport(state);
   renderSummary(state);
@@ -224,6 +251,135 @@ function nextCycleLabel(state: AppState): string {
   return remaining <= 0 ? 'now' : formatDuration(remaining);
 }
 
+/**
+ * Live proxy pool.
+ *
+ * The operational question this answers is "is the pool the reason this run
+ * looks worse than the last one", so the shape is: how much usable capacity is
+ * there right now, and is anything concentrated. Cooldown countdowns are
+ * computed at render time — the run poll re-renders several times a second, so
+ * they tick without a timer of their own.
+ */
+function renderProxyPanel(state: AppState): void {
+  const panel = el('proxy-panel');
+  const pool = state.proxies;
+
+  if (pool === null || pool.configured === 0) {
+    panel.classList.add('hidden');
+    panel.innerHTML = '';
+    return;
+  }
+
+  panel.classList.remove('hidden');
+  const now = Date.now();
+  const proxies = [...pool.perProxy].sort(
+    (a, b) => PROXY_STATE_ORDER[a.state] - PROXY_STATE_ORDER[b.state] || b.failures - a.failures,
+  );
+  const concentration = summarizeFailureConcentration(
+    pool.perProxy.map((proxy) => ({
+      proxy_id: proxy.id,
+      label: proxy.label,
+      failures: proxy.failures,
+    })),
+  );
+
+  panel.innerHTML = `
+    <h2 class="mb-4 text-sm font-semibold uppercase tracking-wider text-slate-400">Proxy pool</h2>
+    <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      ${statCards([
+        ['Configured', String(pool.configured)],
+        ['Usable', String(pool.available)],
+        ['Cooling', String(pool.cooling)],
+        ['Retired', String(pool.retired)],
+        ['Jobs in flight', `${pool.totalInFlight} on ${pool.inUse}`],
+        ['Capacity', pool.capacity === null ? 'unlimited' : String(pool.capacity)],
+      ])}
+    </div>
+    ${
+      pool.poolExhaustedCount > 0
+        ? `<p class="mt-3 rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+             The whole pool was blocked or cooling ${pool.poolExhaustedCount} time(s). Jobs failed
+             for want of a usable proxy, not because of the platform.
+           </p>`
+        : ''
+    }
+    ${
+      concentration.concentrated
+        ? `<p class="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+             ${(concentration.topShare * 100).toFixed(0)}% of proxy failures are on
+             ${escapeHtml(concentration.worst.map((proxy) => proxy.label).join(' and '))}.
+             The rest of the pool is carrying its share.
+           </p>`
+        : ''
+    }
+    <div class="mt-4 overflow-x-auto">
+      <table class="w-full min-w-[720px] text-left text-xs">
+        <thead class="text-slate-500">
+          <tr>
+            <th class="pb-2 pr-3 font-medium">Proxy</th>
+            <th class="pb-2 pr-3 font-medium">State</th>
+            <th class="pb-2 pr-3 font-medium">In flight</th>
+            <th class="pb-2 pr-3 font-medium text-right">Req</th>
+            <th class="pb-2 pr-3 font-medium text-right">OK</th>
+            <th class="pb-2 pr-3 font-medium text-right">Fail</th>
+            <th class="pb-2 pr-3 font-medium">Detail</th>
+          </tr>
+        </thead>
+        <tbody class="font-mono">
+          ${proxies.map((proxy) => proxyRow(proxy, now)).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function proxyRow(proxy: ProxyHealth, now: number): string {
+  return `<tr class="border-t border-slate-800/70">
+      <td class="py-1.5 pr-3">
+        <span class="text-slate-300">${escapeHtml(proxy.label)}</span>
+        <span class="text-slate-500">${escapeHtml(proxy.id)}</span>
+      </td>
+      <td class="py-1.5 pr-3">
+        <span class="rounded px-1.5 py-0.5 text-[11px] ${PROXY_STATE_STYLES[proxy.state]}">
+          ${proxy.state}
+        </span>
+      </td>
+      <td class="py-1.5 pr-3 text-slate-300">
+        ${proxy.inFlight}${proxy.capacity === null ? '' : ` / ${proxy.capacity}`}
+      </td>
+      <td class="py-1.5 pr-3 text-right text-slate-300">${proxy.requests}</td>
+      <td class="py-1.5 pr-3 text-right text-emerald-300">${proxy.successes}</td>
+      <td class="py-1.5 pr-3 text-right ${proxy.failures > 0 ? 'text-rose-300' : 'text-slate-500'}">
+        ${proxy.failures}
+      </td>
+      <td class="py-1.5 pr-3 text-slate-400">${escapeHtml(proxyDetail(proxy, now))}</td>
+    </tr>`;
+}
+
+/** The one thing worth knowing about this proxy right now. */
+function proxyDetail(proxy: ProxyHealth, now: number): string {
+  if (proxy.state === 'retired') {
+    const since =
+      proxy.unhealthySince === null ? '' : ` ${formatDuration(now - proxy.unhealthySince)} ago`;
+    return `unsuitable exit node — retired${since}`;
+  }
+  if (proxy.state === 'cooling') {
+    const back =
+      proxy.eligibleAt === null
+        ? 'held out of rotation'
+        : `back in ${formatDuration(Math.max(0, proxy.eligibleAt - now))}`;
+    const why = proxy.lastErrorCode === null ? '' : ` after ${proxy.lastErrorCode}`;
+    return `${back}${why}`;
+  }
+  if (proxy.state === 'untested') return 'never used yet';
+  if (proxy.state === 'probation') {
+    return `on probation${proxy.lastErrorCode === null ? '' : ` after ${proxy.lastErrorCode}`}`;
+  }
+  if (proxy.lastSuccessAt !== null) {
+    return `last ok ${formatDuration(Math.max(0, now - proxy.lastSuccessAt))} ago`;
+  }
+  return '';
+}
+
 function renderResults(state: AppState): void {
   const container = el('results');
 
@@ -320,7 +476,8 @@ function renderSummary(state: AppState): void {
   const concurrency = summary.throughput.concurrency;
   // Capacity was available and demanded, but never used — the fingerprint of
   // accidental serialization. Showing the configured number alone would hide it.
-  const underused = concurrency.max_observed < concurrency.configured && summary.queue.max_depth > 0;
+  const underused =
+    concurrency.max_observed < concurrency.configured && summary.queue.max_depth > 0;
 
   panel.innerHTML = `
     <h2 class="mb-4 text-sm font-semibold uppercase tracking-wider text-slate-400">Run summary</h2>

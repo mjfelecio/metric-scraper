@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { ScrapeError } from '../../src/core/models/errors.js';
 import { type ProxyTarget } from '../../src/core/scraper/lease-ports.js';
+import { type ProxyEvent } from '../../src/core/scraper/pool-ports.js';
 import { InMemoryProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
 
 function target(name: string): ProxyTarget {
@@ -17,14 +18,22 @@ function target(name: string): ProxyTarget {
 
 function pool(options: {
   names: string[];
+  targets?: ProxyTarget[];
   maxConcurrentPerProxy?: number;
   cooldownMs?: number;
   maxConsecutiveFailures?: number;
-}): { pool: InMemoryProxyPool; advance: (ms: number) => void } {
+}): {
+  pool: InMemoryProxyPool;
+  advance: (ms: number) => void;
+  events: ProxyEvent[];
+  clock: () => number;
+} {
   let current = 0;
+  const events: ProxyEvent[] = [];
   const instance = new InMemoryProxyPool({
-    targets: options.names.map(target),
+    targets: options.targets ?? options.names.map(target),
     now: () => current,
+    onEvent: (event) => events.push(event),
     ...(options.maxConcurrentPerProxy === undefined
       ? {}
       : { maxConcurrentPerProxy: options.maxConcurrentPerProxy }),
@@ -38,6 +47,8 @@ function pool(options: {
     advance: (ms: number) => {
       current += ms;
     },
+    events,
+    clock: () => current,
   };
 }
 
@@ -349,3 +360,176 @@ describe('InMemoryProxyPool health', () => {
     proxies.release(held!);
   });
 });
+
+describe('InMemoryProxyPool observability', () => {
+  it('reports a proxy that has never been used as untested', () => {
+    const { pool: proxies } = pool({ names: ['a', 'b'] });
+    const stats = proxies.getStats();
+
+    expect(stats.untested).toBe(2);
+    expect(stats.perProxy.map((entry) => entry.state)).toEqual(['untested', 'untested']);
+    expect(stats.perProxy[0]?.label).toBe('p1');
+    expect(stats.perProxy[1]?.label).toBe('p2');
+  });
+
+  it('walks a failing proxy from healthy through probation into cooling and back', async () => {
+    const {
+      pool: proxies,
+      advance,
+      events,
+    } = pool({
+      names: ['a', 'b'],
+      maxConsecutiveFailures: 2,
+      cooldownMs: 60_000,
+    });
+
+    const first = (await proxies.acquire())!;
+    proxies.reportSuccess(first);
+    proxies.release(first);
+    expect(stateOf(proxies, first.id)).toBe('healthy');
+
+    proxies.reportFailure(first, 'timeout', 'timeout');
+    expect(stateOf(proxies, first.id)).toBe('probation');
+
+    proxies.reportFailure(first, 'timeout', 'timeout');
+    expect(stateOf(proxies, first.id)).toBe('cooling');
+
+    // Still cooling one millisecond short of the deadline.
+    advance(59_999);
+    expect(stateOf(proxies, first.id)).toBe('cooling');
+
+    advance(1);
+    // Back in rotation, but not yet trusted: it has failures against it since
+    // its last success.
+    expect(stateOf(proxies, first.id)).toBe('probation');
+
+    // A proxy stops being `untested` the moment it is leased rather than when
+    // the first outcome lands, so the first transition is out of probation.
+    expect(events.map((event) => `${event.from}->${event.to}`)).toEqual([
+      'probation->healthy',
+      'healthy->probation',
+      'probation->cooling',
+      'cooling->probation',
+    ]);
+  });
+
+  it('records when a proxy went bad, why, and when it is due back', async () => {
+    const { pool: proxies, advance } = pool({
+      names: ['a'],
+      maxConsecutiveFailures: 1,
+      cooldownMs: 5_000,
+    });
+
+    const lease = (await proxies.acquire())!;
+    advance(1_000);
+    proxies.markBlocked(
+      lease,
+      'HTTP 429 from https://user:secret@gate.example.net:8000',
+      'blocked',
+    );
+    proxies.release(lease);
+
+    const entry = proxies.getStats().perProxy[0]!;
+    expect(entry.state).toBe('cooling');
+    expect(entry.blockKind).toBe('detected_block');
+    expect(entry.unhealthySince).toBe(1_000);
+    expect(entry.eligibleAt).toBe(6_000);
+    expect(entry.lastErrorCode).toBe('blocked');
+    expect(entry.lastFailureAt).toBe(1_000);
+    // The reason is kept for reading, with any credentials stripped out of it.
+    expect(entry.lastReason).toContain('//***@');
+    expect(entry.lastReason).not.toContain('secret');
+  });
+
+  it('emits one transition for a retirement, not one per failure', async () => {
+    const { pool: proxies, events } = pool({ names: ['a'], maxConsecutiveFailures: 2 });
+
+    for (let i = 0; i < 2; i += 1) {
+      const lease = (await proxies.acquire())!;
+      proxies.reportUnsuitable(lease, 'HTTP 451', 'geo_blocked');
+      proxies.release(lease);
+    }
+
+    expect(proxies.getStats().perProxy[0]?.state).toBe('retired');
+    expect(events.filter((event) => event.to === 'retired')).toHaveLength(1);
+    expect(events.at(-1)?.blockKind).toBe('unsuitable_exit');
+  });
+
+  it('does not emit a transition when a busy proxy fills up', async () => {
+    const { pool: proxies, events } = pool({ names: ['a'], maxConcurrentPerProxy: 2 });
+
+    const first = (await proxies.acquire())!;
+    proxies.reportSuccess(first);
+    const second = (await proxies.acquire())!;
+
+    // Full, but perfectly healthy: capacity is not a health change, and
+    // treating it as one would flap on every lease.
+    expect(stateOf(proxies, first.id)).toBe('saturated');
+    expect(proxies.getStats().saturated).toBe(1);
+    expect(events.map((event) => event.to)).toEqual(['healthy']);
+    proxies.release(second);
+  });
+
+  it('counts the times the whole pool was out at once', async () => {
+    const { pool: proxies } = pool({ names: ['a'], maxConsecutiveFailures: 1, cooldownMs: 1_000 });
+
+    const lease = (await proxies.acquire())!;
+    proxies.reportFailure(lease, 'timeout', 'timeout');
+    proxies.release(lease);
+
+    await expect(proxies.acquire()).rejects.toThrow(/blocked or cooling down/);
+    await expect(proxies.acquire()).rejects.toThrow(/blocked or cooling down/);
+
+    expect(proxies.getStats().poolExhaustedCount).toBe(2);
+  });
+
+  it('reports capacity and in-flight load across the pool', async () => {
+    const { pool: proxies } = pool({ names: ['a', 'b'], maxConcurrentPerProxy: 4 });
+    await prove(proxies, 2);
+
+    const held = (await proxies.acquire())!;
+    const stats = proxies.getStats();
+
+    expect(stats.capacity).toBe(8);
+    expect(stats.totalInFlight).toBe(1);
+    expect(stats.inUse).toBe(1);
+    proxies.release(held);
+  });
+
+  it('keeps two entries on the same host:port separate', async () => {
+    const shared: ProxyTarget[] = [
+      {
+        ...target('gate'),
+        username: 'session-1',
+        url: 'http://session-1:pw@gate.example.net:8000',
+      },
+      {
+        ...target('gate'),
+        username: 'session-2',
+        url: 'http://session-2:pw@gate.example.net:8000',
+      },
+    ];
+    const { pool: proxies } = pool({ names: [], targets: shared, maxConsecutiveFailures: 1 });
+
+    const stats = proxies.getStats();
+    expect(new Set(stats.perProxy.map((entry) => entry.id)).size).toBe(2);
+    // The credentials that distinguish them never appear in the id.
+    for (const entry of stats.perProxy) {
+      expect(entry.id).not.toContain('session-');
+      expect(entry.id).not.toContain('pw');
+    }
+
+    // One failing must not bench the other.
+    const first = (await proxies.acquire())!;
+    proxies.reportFailure(first, 'timeout', 'timeout');
+    proxies.release(first);
+
+    const after = proxies.getStats();
+    expect(after.perProxy.filter((entry) => entry.state === 'cooling')).toHaveLength(1);
+    expect(after.available).toBe(1);
+  });
+});
+
+function stateOf(instance: InMemoryProxyPool, id: string): string | undefined {
+  return instance.getStats().perProxy.find((entry) => entry.id === id)?.state;
+}
