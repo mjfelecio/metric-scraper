@@ -142,6 +142,9 @@ describe('TikTokScraper', () => {
     [403, 'rate_limited', 'blocked', true],
     [500, 'error', 'http_error', true],
     [400, 'error', 'http_error', false],
+    // 451 is about the exit node's jurisdiction, not the video, so it gets its
+    // own code and is worth retrying through a different proxy.
+    [451, 'error', 'geo_blocked', true],
   ] as const)(
     'maps HTTP %i to %s/%s',
     async (httpStatus, expectedStatus, expectedCode, retryable) => {

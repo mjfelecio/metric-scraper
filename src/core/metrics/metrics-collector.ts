@@ -1,5 +1,5 @@
 import { SCRAPE_STATUSES, type ScrapeStatus } from '../models/status.js';
-import { type LeaseOutcome } from '../scraper/lease-ports.js';
+import { type ProxyOutcome } from '../scraper/lease-ports.js';
 
 import { max as maxOf, mean, percentileOfSorted } from './percentiles.js';
 
@@ -11,11 +11,21 @@ export interface LatencyView {
   meanMs: number | null;
 }
 
+/**
+ * Per-proxy tallies as the pool itself classified them.
+ *
+ * `successes` counts healthy uses of the proxy, which includes a `not_found`
+ * or `private` answer: the proxy fetched a definitive result, and the pool
+ * credits it the same way. `failures` counts what the pool rotated away from.
+ * Reading these next to `status_breakdown` is what makes the two reconcilable.
+ */
 export interface ProxyUsageView {
   proxyId: string;
   requests: number;
   successes: number;
   failures: number;
+  /** Subset of `failures` blamed on the exit node itself (HTTP 451). */
+  unsuitable: number;
   blocked: boolean;
 }
 
@@ -221,12 +231,19 @@ export class MetricsCollector {
     this.totalRetries += 1;
   }
 
-  recordProxyOutcome(proxyId: string, outcome: LeaseOutcome): void {
+  /**
+   * One lease outcome, using the same classification the pool rotates on.
+   *
+   * `neutral` outcomes count as a request and nothing else — the pool does not
+   * move that proxy's health either, so the two stay in step.
+   */
+  recordProxyOutcome(proxyId: string, outcome: ProxyOutcome): void {
     const usage = this.proxyUsage.get(proxyId) ?? {
       proxyId,
       requests: 0,
       successes: 0,
       failures: 0,
+      unsuitable: 0,
       blocked: false,
     };
     usage.requests += 1;
@@ -237,9 +254,15 @@ export class MetricsCollector {
       case 'failure':
         usage.failures += 1;
         break;
+      case 'unsuitable':
+        usage.failures += 1;
+        usage.unsuitable += 1;
+        break;
       case 'blocked':
         usage.failures += 1;
         usage.blocked = true;
+        break;
+      case 'neutral':
         break;
     }
     this.proxyUsage.set(proxyId, usage);

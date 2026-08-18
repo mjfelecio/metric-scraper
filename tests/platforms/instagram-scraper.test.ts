@@ -352,6 +352,23 @@ describe('InstagramScraper', () => {
     }
   });
 
+  it('maps HTTP 451 to a geo-blocked result so the exit node can be retired', async () => {
+    const request = vi
+      .fn<HttpClient['request']>()
+      .mockResolvedValueOnce(rootResponse())
+      .mockResolvedValueOnce(response(451));
+
+    const result = await new InstagramScraper().scrape(URL, context({ request }));
+
+    expect(result.outcome).toBe('failure');
+    if (result.outcome === 'failure') {
+      // Not `http_error`: this says the proxy is in the wrong jurisdiction,
+      // and another exit node may well work — so it is worth retrying.
+      expect(result.error.code).toBe('geo_blocked');
+      expect(result.error.retryable).toBe(true);
+    }
+  });
+
   it('preserves a clips HTTP failure instead of mislabeling it as a session requirement', async () => {
     const request = vi
       .fn<HttpClient['request']>()

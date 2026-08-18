@@ -104,12 +104,17 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
       configured: input.proxyStats.configured,
       used: metrics.proxyUsage.length,
       blocked: blockedProxies,
+      retired: input.proxyStats.retired,
       total_failures: input.proxyStats.totalFailures,
+      // Straight from the metrics, which are fed the same classification the
+      // pool rotates on — so `successes`/`failures` here are the numbers that
+      // actually drove cooldowns, not a second opinion about them.
       per_proxy: metrics.proxyUsage.map((usage) => ({
         proxy_id: usage.proxyId,
         requests: usage.requests,
         successes: usage.successes,
         failures: usage.failures,
+        unsuitable: usage.unsuitable,
         blocked: usage.blocked,
       })),
     },

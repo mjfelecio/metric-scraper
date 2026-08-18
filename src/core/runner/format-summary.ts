@@ -123,11 +123,13 @@ export function formatRunSummary(summary: RunSummary): string {
     lines.push(`  ${pad('configured')}${num(summary.proxies.configured)}`);
     lines.push(`  ${pad('used')}${num(summary.proxies.used)}`);
     lines.push(`  ${pad('blocked')}${num(summary.proxies.blocked)}`);
+    lines.push(`  ${pad('retired')}${num(summary.proxies.retired)}`);
     lines.push(`  ${pad('failures')}${num(summary.proxies.total_failures)}`);
     for (const proxy of summary.proxies.per_proxy) {
       lines.push(
         `    ${proxy.proxy_id} — ${num(proxy.requests)} req, ` +
           `${num(proxy.successes)} ok, ${num(proxy.failures)} failed` +
+          `${proxy.unsuitable > 0 ? `, ${num(proxy.unsuitable)} unsuitable` : ''}` +
           `${proxy.blocked ? ', BLOCKED' : ''}`,
       );
     }

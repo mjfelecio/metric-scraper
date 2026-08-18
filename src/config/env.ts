@@ -48,9 +48,11 @@ export const AppConfigSchema = z.object({
     maxConsecutiveFailures: z.number().int().min(1),
     cooldownMs: z.number().int().min(0),
     /**
-     * Jobs that may share one proxy at a time. `0` = unlimited (the historical
-     * behaviour). Setting this is what makes adding proxies increase capacity
-     * rather than just spreading the same global concurrency more thinly.
+     * Jobs that may share one proxy at a time. `0` = unlimited.
+     *
+     * Pool capacity is `proxies × limit`, so this is both what makes adding a
+     * proxy add capacity and what stops one IP absorbing a whole batch before
+     * its failures are reported. Raise it if concurrency exceeds that product.
      */
     maxConcurrentPerProxy: z.number().int().min(0),
   }),
@@ -121,7 +123,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
       pool: str(env.PROXY_POOL) ?? '',
       maxConsecutiveFailures: int(env, 'PROXY_MAX_FAILURES', 3),
       cooldownMs: int(env, 'PROXY_COOLDOWN_MS', 60_000),
-      maxConcurrentPerProxy: int(env, 'PROXY_MAX_CONCURRENT', 0),
+      maxConcurrentPerProxy: int(env, 'PROXY_MAX_CONCURRENT', 8),
     },
 
     session: {

@@ -248,6 +248,12 @@ export class InstagramScraper implements Scraper {
     if (response.status === 429 || response.status === 403) {
       throw new ScrapeError({ code: 'rate_limited', message: 'Instagram blocked CSRF bootstrap' });
     }
+    if (response.status === 451) {
+      throw new ScrapeError({
+        code: 'geo_blocked',
+        message: "Instagram is unavailable from this exit node's region",
+      });
+    }
     if (response.status < 200 || response.status >= 300) {
       throw new ScrapeError({
         code: 'http_error',
@@ -414,6 +420,21 @@ function httpFailure(
         code: isLogin ? 'private' : 'http_error',
         message: isLogin ? 'Instagram post requires login' : `Instagram ${operation} redirected`,
         retryable: !isLogin,
+      },
+      partial,
+      acquisition,
+    );
+  }
+  if (response.status === 451) {
+    // A statement about where the request came from, not about the post: this
+    // exit node's jurisdiction blocks it. Reported separately so the pool can
+    // retire the proxy, and retried because the next attempt leases another.
+    return scrapeFailure(
+      'error',
+      {
+        code: 'geo_blocked',
+        message: `Instagram ${operation} is unavailable from this exit node's region`,
+        retryable: true,
       },
       partial,
       acquisition,
