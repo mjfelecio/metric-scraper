@@ -140,3 +140,32 @@ describe('JsonlFileSink', () => {
     await expect(sink.write(snapshot())).rejects.toThrow(/already closed/);
   });
 });
+
+describe('JsonlFileSink under concurrency', () => {
+  // Regression guard. `open()` used to check `this.stream !== null` and only
+  // assign it after awaiting `mkdir` and the stream's `open` event. With a
+  // genuinely concurrent runner, every simultaneous first write saw `null` and
+  // created its own append stream; all but the last were orphaned file
+  // descriptors that were never closed. It could not fail while the runner was
+  // accidentally serialized, which is exactly why it went unnoticed.
+  it('opens exactly once when many writes race the first open', async () => {
+    const file = path.join(dir, 'concurrent.jsonl');
+    const sink = new JsonlFileSink({ filePath: file });
+
+    await Promise.all(Array.from({ length: 50 }, () => sink.write(snapshot())));
+    await sink.close();
+
+    expect(await readLines(file)).toHaveLength(50);
+    expect(sink.rowsWritten).toBe(50);
+  });
+
+  it('writes every row when concurrent writers hit stream backpressure', async () => {
+    const file = path.join(dir, 'backpressure.jsonl');
+    const sink = new JsonlFileSink({ filePath: file });
+
+    await Promise.all(Array.from({ length: 500 }, () => sink.write(snapshot())));
+    await sink.close();
+
+    expect(await readLines(file)).toHaveLength(500);
+  });
+});

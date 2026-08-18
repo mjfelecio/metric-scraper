@@ -1,32 +1,22 @@
 /**
  * Rate limiting for the whole process.
  *
- * Two pieces live here:
+ * Rate is deliberately NOT expressed as task-queue pacing. Doing that couples
+ * it to concurrency: the previous implementation converted rpm into a p-queue
+ * `interval`/`intervalCap` pair, and an `intervalCap` of 1 meant one running
+ * task blocked every other start — a configured concurrency of 10 became an
+ * effective concurrency of 1. A token bucket paces *starts* without ever
+ * capping how many requests may be in flight, which is the correct separation.
  *
- * 1. `rpmToQueuePacing` — converts a target requests-per-minute into the
- *    interval window the task queue enforces. This is what actually paces a run.
- * 2. `TokenBucketRateLimiter` — a standalone limiter for cases where a queue
- *    is not involved (e.g. a future per-proxy or per-host budget).
+ * Two tiers use this port:
+ *
+ * 1. **Job admission** (`targetRpm`) — one unit per logical scrape job,
+ *    whatever it costs in retries or hops. This is the throughput figure the
+ *    run summary reports and the acceptance target is written against.
+ * 2. **HTTP egress** (`httpRpmPerHost`) — one unit per outbound request,
+ *    including retries and multi-hop platform calls. This is what actually
+ *    protects upstream platforms.
  */
-
-export interface QueuePacing {
-  /** Length of the pacing window in milliseconds. */
-  intervalMs: number;
-  /** Maximum jobs started per window. `Infinity` means unpaced. */
-  intervalCap: number;
-}
-
-/**
- * Starts one job per evenly spaced interval. Rounding the interval upward
- * makes the configured RPM a ceiling instead of rounding fractional jobs per
- * second upward (which would turn 15 rpm into 60 rpm and 500 rpm into 540).
- */
-export function rpmToQueuePacing(targetRpm: number): QueuePacing {
-  if (!Number.isFinite(targetRpm) || targetRpm <= 0) {
-    return { intervalMs: 1_000, intervalCap: Number.POSITIVE_INFINITY };
-  }
-  return { intervalMs: Math.max(1, Math.ceil(60_000 / targetRpm)), intervalCap: 1 };
-}
 
 export interface RateLimiter {
   /** Resolves once the caller is allowed to proceed. */
@@ -106,4 +96,36 @@ export class TokenBucketRateLimiter implements RateLimiter {
     this.lastRefill = now;
     this.tokens = Math.min(this.capacity, this.tokens + (elapsedMs / 1000) * this.refillPerSecond);
   }
+}
+
+export interface RateLimiterOptions {
+  /** Requests per minute. `0` (or negative) disables limiting entirely. */
+  rpm: number;
+  /**
+   * How many units may be spent at once after an idle period. Defaults to one
+   * second's worth, minimum 1.
+   *
+   * Burst is what lets a small batch reach the concurrency ceiling promptly
+   * instead of trickling in one job per interval. It is bounded on purpose: a
+   * fixed-window limiter, which allows a whole minute's budget to fire at a
+   * window boundary, can emit twice the target rate in a single second.
+   */
+  burst?: number | undefined;
+  now?: (() => number) | undefined;
+  sleep?: ((ms: number) => Promise<void>) | undefined;
+}
+
+/** Builds the limiter for a target rate, or an unlimited one when disabled. */
+export function createRateLimiter(options: RateLimiterOptions): RateLimiter {
+  if (!Number.isFinite(options.rpm) || options.rpm <= 0) {
+    return unlimitedRateLimiter;
+  }
+  const refillPerSecond = options.rpm / 60;
+  const capacity = Math.max(1, options.burst ?? Math.ceil(refillPerSecond));
+  return new TokenBucketRateLimiter({
+    refillPerSecond,
+    capacity,
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+  });
 }

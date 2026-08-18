@@ -129,3 +129,80 @@ describe('formatRunSummary', () => {
     expect(text).toContain('/tmp/run.jsonl');
   });
 });
+
+describe('concurrency reporting', () => {
+  function summaryWith(options: {
+    configured: number;
+    peakInFlight: number;
+    peakQueueDepth: number;
+  }) {
+    const metrics = new MetricsCollector();
+    metrics.start();
+    metrics.configureConcurrency(options.configured);
+    metrics.recordQueueStats({
+      peakInFlight: options.peakInFlight,
+      peakQueueDepth: options.peakQueueDepth,
+      waitSamples: [1, 2, 3],
+    });
+    for (const latency of [1_000, 1_000, 1_000]) {
+      metrics.recordResult({
+        status: 'ok',
+        latencyMs: latency,
+        retries: 0,
+        exhausted: false,
+        errorCode: null,
+      });
+    }
+    metrics.finish();
+
+    return buildRunSummary({
+      runId: 'test-run',
+      platform: 'tiktok',
+      startedAt: new Date('2026-08-17T10:00:00.000Z'),
+      finishedAt: new Date('2026-08-17T10:00:03.000Z'),
+      counts: { candidates: 3, accepted: 3, rejected: 0 },
+      metrics: metrics.view(),
+      proxyStats: new NullProxyPool().getStats(),
+      sessionStats: new NullSessionPool().getStats(),
+      concurrency: options.configured,
+      targetRpm: 500,
+      snapshotsPath: null,
+      summaryPath: null,
+      rowsWritten: 3,
+    });
+  }
+
+  it('reports what actually ran, not what was configured', () => {
+    const summary = summaryWith({ configured: 10, peakInFlight: 1, peakQueueDepth: 9 });
+
+    expect(summary.throughput.concurrency.configured).toBe(10);
+    expect(summary.throughput.concurrency.max_observed).toBe(1);
+    expect(summary.throughput.concurrency.saturated).toBe(false);
+    expect(summary.throughput.concurrency.utilization).toBeCloseTo(0.1);
+  });
+
+  it('scores a fully serialized run at an effective concurrency of one', () => {
+    // Three 1s requests across 3s of wall clock: strictly one at a time.
+    const summary = summaryWith({ configured: 10, peakInFlight: 1, peakQueueDepth: 9 });
+    expect(summary.throughput.concurrency.effective).toBeCloseTo(1);
+  });
+
+  it('warns when capacity was available but unused', () => {
+    const text = formatRunSummary(summaryWith({ configured: 10, peakInFlight: 1, peakQueueDepth: 9 }));
+
+    // The report must not be able to claim a concurrency it never reached.
+    expect(text).toMatch(/Concurrency underused/);
+    expect(text).toMatch(/effectively sequential/);
+    expect(text).toMatch(/1 observed \/ 10 configured/);
+  });
+
+  it('stays quiet when the configured concurrency was actually reached', () => {
+    const text = formatRunSummary(summaryWith({ configured: 3, peakInFlight: 3, peakQueueDepth: 2 }));
+    expect(text).not.toMatch(/Concurrency underused/);
+  });
+
+  it('stays quiet when nothing ever queued, since capacity was never demanded', () => {
+    const text = formatRunSummary(summaryWith({ configured: 10, peakInFlight: 2, peakQueueDepth: 0 }));
+    expect(text).not.toMatch(/Concurrency underused/);
+  });
+});

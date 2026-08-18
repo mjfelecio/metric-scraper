@@ -20,6 +20,8 @@ import { type LogLevel } from '../infrastructure/logging/pino-logger.js';
 interface CommonOptions {
   concurrency?: number | undefined;
   targetRpm?: number | undefined;
+  burst?: number | undefined;
+  httpRpmPerHost?: number | undefined;
   maxAttempts?: number | undefined;
   outputDir?: string | undefined;
   outputFile?: string | undefined;
@@ -58,7 +60,17 @@ function withCommonOptions(command: Command): Command {
     .option('-c, --concurrency <n>', 'jobs in flight at once', parsePositiveInt)
     .option(
       '-r, --target-rpm <n>',
-      'requests-per-minute ceiling (0 = unpaced)',
+      'logical scrape jobs admitted per minute (0 = unpaced)',
+      parseNonNegativeInt,
+    )
+    .option(
+      '--burst <n>',
+      'jobs admissible at once after idle (0 = one second of --target-rpm)',
+      parseNonNegativeInt,
+    )
+    .option(
+      '--http-rpm-per-host <n>',
+      'ceiling on actual HTTP requests per minute per host, retries included (0 = off)',
       parseNonNegativeInt,
     )
     .option('-a, --max-attempts <n>', 'attempts per URL, including the first', parsePositiveInt)
@@ -112,6 +124,8 @@ function toExecuteOptions(platform: Platform | null, options: CommonOptions): Ex
     overrides: {
       concurrency: options.concurrency,
       targetRpm: options.targetRpm,
+      burst: options.burst,
+      httpRpmPerHost: options.httpRpmPerHost,
       ...(options.maxAttempts === undefined ? {} : { retry: { maxAttempts: options.maxAttempts } }),
     },
   };
@@ -159,6 +173,8 @@ withCommonOptions(
     overrides: {
       concurrency: options.concurrency ?? config.concurrency ?? undefined,
       targetRpm: options.targetRpm ?? config.targetRpm ?? undefined,
+      burst: options.burst ?? config.burst ?? undefined,
+      httpRpmPerHost: options.httpRpmPerHost ?? config.httpRpmPerHost ?? undefined,
       retry: {
         ...toRetryOverrides(config.retry),
         ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),

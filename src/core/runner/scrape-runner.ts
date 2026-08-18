@@ -7,6 +7,7 @@ import {
 } from '../concurrency/task-queue.js';
 import { type Logger } from '../logging/logger.js';
 import { type MetricsCollector } from '../metrics/metrics-collector.js';
+import { createRateLimiter, type RateLimiter } from '../rate-limit/rate-limit.js';
 import { ScrapeError, type ScrapeErrorInfo } from '../models/errors.js';
 import { type InputRecord } from '../models/input.js';
 import { type Platform } from '../models/platform.js';
@@ -30,8 +31,13 @@ import { buildRunSummary } from './build-summary.js';
 import { type JobCompletedEvent, type RunCounts, type RunProgress } from './types.js';
 
 export interface ScrapeRunnerConfig {
+  /** Ceiling on jobs in flight at once. */
   concurrency: number;
+  /** Logical scrape jobs admitted per minute. One URL = one unit, retries included. */
   targetRpm: number;
+  /** Jobs admissible at once after an idle period. Defaults to one second's worth. */
+  burst?: number | undefined;
+  /** Waiting (not running) jobs before the producer is made to wait. `0` = unbounded. */
   maxQueueSize: number;
   requestTimeoutMs: number;
 }
@@ -48,6 +54,8 @@ export interface ScrapeRunnerDeps {
   config: ScrapeRunnerConfig;
   /** Overridable for tests. */
   createQueue?: ((options: TaskQueueOptions) => TaskQueue) | undefined;
+  /** Job-admission rate limiter. Built from `config.targetRpm` when omitted. */
+  rateLimiter?: RateLimiter | undefined;
   sleep?: Sleep | undefined;
   now?: (() => Date) | undefined;
 }
@@ -102,20 +110,24 @@ export class ScrapeRunner {
         ? controller.signal
         : AbortSignal.any([controller.signal, options.signal]);
 
-    const queue =
-      this.deps.createQueue?.({
-        concurrency: config.concurrency,
-        targetRpm: config.targetRpm,
-        maxQueueSize: config.maxQueueSize,
-      }) ??
-      new PQueueTaskQueue({
-        concurrency: config.concurrency,
-        targetRpm: config.targetRpm,
-        maxQueueSize: config.maxQueueSize,
+    const queueOptions: TaskQueueOptions = {
+      concurrency: config.concurrency,
+      maxQueueSize: config.maxQueueSize,
+    };
+    const queue = this.deps.createQueue?.(queueOptions) ?? new PQueueTaskQueue(queueOptions);
+
+    // Rate is a separate policy from concurrency. It paces admission *outside*
+    // the queue, so a job waiting for a token never occupies a concurrency slot.
+    const rateLimiter =
+      this.deps.rateLimiter ??
+      createRateLimiter({
+        rpm: config.targetRpm,
+        ...(config.burst === undefined ? {} : { burst: config.burst }),
       });
 
     const startedAt = this.now();
     metrics.start();
+    metrics.configureConcurrency(config.concurrency);
     runLogger.info(
       {
         urls: records.length,
@@ -143,8 +155,8 @@ export class ScrapeRunner {
       });
     };
 
-    const jobs = records.map((record) =>
-      queue
+    const submit = (record: InputRecord): void => {
+      void queue
         .add(async () => {
           if (signal.aborted) return;
           const event = await this.processRecord(record, signal, runLogger, runCache);
@@ -180,18 +192,40 @@ export class ScrapeRunner {
           emitProgress();
         })
         .catch((error: unknown) => {
-          // Reaching here means the queue itself rejected (e.g. queue full).
           if (fatalError === null) {
             fatalError = ScrapeError.from(error);
             queue.clear();
             controller.abort(fatalError);
           }
-        }),
-    );
+        });
+    };
 
-    await Promise.all(jobs);
+    // Producer loop. Both gates are awaited *before* the job enters the queue:
+    // backpressure bounds how much work may be pending, and the rate limiter
+    // paces how fast work starts. Neither consumes a concurrency slot, and the
+    // submitted task is deliberately not awaited here — awaiting it would
+    // serialize the run no matter how the queue is configured.
+    for (const record of records) {
+      if (signal.aborted) break;
+
+      await queue.awaitCapacity(signal);
+      if (signal.aborted) break;
+
+      const admissionStart = Date.now();
+      try {
+        await rateLimiter.acquire(signal);
+      } catch {
+        break; // Run cancelled while waiting for a token.
+      }
+      metrics.recordAdmissionWait(Date.now() - admissionStart);
+      if (signal.aborted) break;
+
+      submit(record);
+    }
+
     await queue.onIdle();
 
+    metrics.recordQueueStats(queue.stats());
     metrics.finish();
     // Final tick, so observers see a settled state (nothing in flight, nothing
     // queued) rather than the mid-flight numbers from the last result.
@@ -293,12 +327,16 @@ export class ScrapeRunner {
       let attemptHttpRequests = 0;
 
       try {
+        // Timed so that a pool which starts blocking (per-proxy capacity, or a
+        // fully cooling-down pool) can never become an invisible serializer.
+        const acquireStart = Date.now();
         proxyLease = await this.deps.proxyPool.acquire(signal);
         sessionLease = await this.deps.sessionPool.acquire(
           record.platform,
           signal,
           proxyLease?.id ?? null,
         );
+        metrics.recordProxyAcquire(Date.now() - acquireStart);
         lastProxyId = proxyLease?.id ?? null;
 
         // The attempt is bounded by both the run's lifetime and the per-request
@@ -357,10 +395,15 @@ export class ScrapeRunner {
         'retrying after failure',
       );
 
+      // Backoff holds a concurrency slot for its whole duration, so it is
+      // recorded: an idle-looking slot must always be attributable.
+      const backoffStart = Date.now();
       try {
         await this.sleep(delayMs, signal);
       } catch {
         break; // Run cancelled while backing off.
+      } finally {
+        metrics.recordRetryBackoff(Date.now() - backoffStart);
       }
     }
 

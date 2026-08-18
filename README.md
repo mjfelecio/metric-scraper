@@ -132,9 +132,11 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | Variable                      | Default    | Meaning                                                                    |
 | ----------------------------- | ---------- | -------------------------------------------------------------------------- |
 | `LOG_LEVEL`                   | `info`     | `trace`…`fatal`, or `silent`. Logs go to stderr.                           |
-| `SCRAPER_CONCURRENCY`         | `10`       | Jobs in flight at once                                                     |
-| `SCRAPER_TARGET_RPM`          | `500`      | Requests-per-minute ceiling; `0` disables pacing                           |
-| `SCRAPER_MAX_QUEUE_SIZE`      | `0`        | Max waiting jobs; `0` = unbounded                                          |
+| `SCRAPER_CONCURRENCY`         | `10`       | Ceiling on jobs in flight at once. See [§5.1](#51-concurrency-rate-and-backpressure) |
+| `SCRAPER_TARGET_RPM`          | `500`      | **Logical jobs** admitted per minute; `0` disables pacing                  |
+| `SCRAPER_BURST`               | `0`        | Jobs admissible at once after idle; `0` = one second of target             |
+| `SCRAPER_HTTP_RPM_PER_HOST`   | `0`        | **Actual HTTP requests** per minute per host, retries included; `0` = off  |
+| `SCRAPER_MAX_QUEUE_SIZE`      | `1000`     | Max waiting jobs before the producer waits; `0` = unbounded                |
 | `SCRAPER_REQUEST_TIMEOUT_MS`  | `15000`    | Per-attempt timeout                                                        |
 | `SCRAPER_POLL_INTERVAL_MS`    | `900000`   | Default gap between cycle starts in `--watch`; `0` = back-to-back          |
 | `RETRY_MAX_ATTEMPTS`          | `3`        | Attempts per URL including the first; `1` disables retries                 |
@@ -146,6 +148,7 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | `PROXY_POOL`                  | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct |
 | `PROXY_MAX_FAILURES`          | `3`        | Consecutive failures before cooldown                                       |
 | `PROXY_COOLDOWN_MS`           | `60000`    | How long a failed/blocked proxy is benched                                 |
+| `PROXY_MAX_CONCURRENT`        | `0`        | Jobs sharing one proxy at a time; `0` = unlimited                          |
 | `SESSION_STORE_PATH`          | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous               |
 | `SESSION_MAX_FAILURES`        | `3`        | Consecutive failures before cooldown                                       |
 | `SESSION_COOLDOWN_MS`         | `300000`   | How long a blocked session is benched                                      |
@@ -157,6 +160,56 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 **Credentials never live in source.** Proxy credentials are read from `PROXY_POOL` and
 kept inside the in-memory `ProxyTarget`; everything user-facing (logs, metrics, run
 summaries) uses a credential-free proxy id like `http://proxy-a.example.net:8000`.
+
+### 5.1 Concurrency, rate, and backpressure
+
+These are three separate concerns, and collapsing them is a bug rather than a
+simplification. An earlier version expressed the rate limit as task-queue pacing
+(`intervalCap: 1` plus `carryoverConcurrencyCount`), which meant a single running
+job blocked every other start: a configured concurrency of 10 executed strictly
+one job at a time, and the run summary still reported `concurrency: 10`.
+
+| Concern | Knob | Mechanism | What it bounds |
+| --- | --- | --- | --- |
+| **Concurrency** | `SCRAPER_CONCURRENCY` | Worker pool | Jobs in flight — sockets, memory, proxy load |
+| **Rate** | `SCRAPER_TARGET_RPM`, `SCRAPER_HTTP_RPM_PER_HOST` | Token bucket | How fast we start work / hit upstream |
+| **Backpressure** | `SCRAPER_MAX_QUEUE_SIZE` | Bounded queue, producer waits | Memory under a large input |
+
+**Rate limiting is two-tier, on purpose.** `targetRpm` counts *logical jobs* — one
+URL is one unit however many HTTP calls or retries it costs. That keeps the
+reported throughput figure meaningful (§11: throughput counts completed work
+items, never retries). But it does not protect upstream, because one job is not
+one request: TikTok issues two, Instagram up to three per bounded page/author,
+and a retried job repeats all of them. `httpRpmPerHost` therefore limits the
+actual egress, applied at the HTTP client so retries and multi-hop calls are
+counted automatically.
+
+```
+1 job -> attempt 1 (2 hops) -> fail -> attempt 2 (2 hops) -> fail -> attempt 3 (2 hops)
+       = 1 unit of targetRpm
+       = 6 units of httpRpmPerHost
+```
+
+**Concurrency is a ceiling, not a target.** Sustained throughput obeys Little's
+Law: `in-flight = rate x latency`. At the ~3.5s mean latency observed against
+real TikTok URLs, a concurrency of 10 caps throughput at about 170 rpm no matter
+what `targetRpm` says — reaching 500 rpm needs roughly 30, and a 13s mean latency
+would need over 100. Set `concurrency` from measured latency and the target rate,
+not by guessing:
+
+```
+required concurrency ~= (target_rpm / 60) x mean_latency_seconds
+```
+
+**Backpressure waits rather than fails.** When the queue is full the producer is
+made to wait, so memory is bounded by `maxQueueSize` rather than by input size.
+A full queue is not a run failure — dropping work would be a poor trade in a
+system whose output feeds payouts.
+
+**Proxies add capacity only when `PROXY_MAX_CONCURRENT` is set.** Without it,
+leases are shared without limit and the global `concurrency` is the only bound,
+so adding proxies spreads the same work over more IPs without raising throughput.
+With it, capacity becomes `proxies x limit` and a larger pool genuinely scales.
 
 Instagram sessions are supplied as a gitignored JSON file. `proxyId` must equal the
 credential-free id of the sticky HTTP/HTTPS proxy in `PROXY_POOL`; use `null` only for
@@ -316,7 +369,17 @@ The Vitest suite covers the snapshot schema, config schema, text/JSON input pars
 failure modes, URL normalization, retry policy, metrics and percentiles, JSONL
 serialization and append semantics, run-summary calculation, and the runner itself
 (failures become rows, retries are counted separately from requests, permanent failures
-are not retried, concurrency is respected, output failures are fatal). TikTok-specific
+are not retried, concurrency is respected, output failures are fatal).
+
+Concurrency has its own guarantees, asserted rather than assumed: a configured 1, 5 and
+10 each reach exactly that many jobs in flight; **full concurrency is still reached while
+a rate limit is active** (the regression guard for the pacing bug described in §5.1); a
+bounded queue applies backpressure without dropping work; the reported `max_observed`
+never exceeds what actually ran; and several proxies are used simultaneously rather than
+serializing on the pool. `tests/proxy/` covers LRU rotation, per-proxy capacity, cooldown
+and recovery, and the refusal to fall back to a direct connection when every proxy is
+benched. The JSONL sink is tested under concurrent writers, which is where its
+open-once behaviour matters. TikTok-specific
 tests cover hydration parsing, anonymous HTTP behavior and platform error mapping.
 
 Continuous runs add: duration parsing, the fixed-rate scheduler (no drift, overrun
@@ -384,6 +447,30 @@ Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, a
 throughput, raw platform HTTP calls, latency p50/p95/max, status and error breakdowns,
 retry statistics, proxy statistics and session burn/health statistics.
 
+**Concurrency is reported as a measurement, not as configuration.** A summary that
+echoes the configured number back is how an effective concurrency of 1 hid behind a
+configured 10 for an entire run, so `throughput.concurrency` is an object:
+
+| Field | Meaning |
+| --- | --- |
+| `configured` | What was asked for |
+| `max_observed` | High-water mark of jobs actually running at once |
+| `effective` | `Σ(latency) / wall clock` — mean in-flight. **~1.0 means the run was sequential** |
+| `utilization` | `max_observed / configured` |
+| `saturated` | Whether the ceiling was ever actually reached |
+
+`effective` is the decisive number: it is derived from data already in the JSONL
+(`scraped_at` + `latency_ms`), so any run's concurrency can be audited after the fact.
+The CLI prints a warning whenever `max_observed < configured` while the queue backlog
+was non-empty — capacity available but unused, which is the precise fingerprint of
+accidental serialization.
+
+Two further sections make a run's wall clock attributable rather than mysterious:
+`queue` (max depth, wait p50/p95/max) and `waits` (`admission_ms`,
+`http_rate_limit_ms`, `proxy_acquire_ms`, `retry_backoff_ms`). Retry backoff is
+recorded because it holds a concurrency slot while it sleeps, and an idle-looking
+slot must always be explainable.
+
 A continuous session writes one file per session instead, plus a summary per cycle:
 
 ```
@@ -440,6 +527,27 @@ including the case of the same video appearing twice with different `scraped_at`
   seam for distributed execution, but the tested direct path did not approach 500 rpm.
   Continuous runs (§6.1) are a timer in that same process — there is no distributed
   scheduler, and a session does not survive a restart.
+- **Every limit here is process-local.** This matters before deploying more than one
+  worker, because neither knob is global — they multiply:
+
+  ```
+  4 workers x concurrency 10  = 40 concurrent requests   (not 10)
+  3 workers x 500 rpm         = ~1500 rpm upstream       (not 500)
+  ```
+
+  | Guarantee | Today | To make it global |
+  | --- | --- | --- |
+  | Concurrency ceiling | p-queue, in-process | Distributed semaphore |
+  | Job + HTTP rate | In-memory token bucket | Shared bucket behind the existing `RateLimiter` port |
+  | Proxy health / cooldown | In-memory `Map` | Shared registry — otherwise worker B keeps hitting an IP worker A just saw blocked |
+  | Proxy leases | Per-process counts | Shared lease registry with TTL |
+  | Work distribution | One process over an array | Real queue with visibility timeouts |
+  | Output | Append-only, at-least-once | Idempotency keys, once payouts depend on it |
+
+  `TaskQueue`, `RateLimiter`, `ProxyPool`, `SessionPool` and `SnapshotSink` are ports in
+  `src/core`, so distributed implementations can be swapped in without touching
+  `ScrapeRunner`. Dividing `targetRpm` by worker count is *not* a substitute: it is
+  brittle under autoscaling and silently wrong whenever a worker dies.
 - **Latency samples are kept in full** in the metrics collector, and a session keeps its
   own copy so percentiles stay exact — fine for runs of this size, would want a histogram
   for very long ones. The throughput timeline is already bounded (2,000 samples).

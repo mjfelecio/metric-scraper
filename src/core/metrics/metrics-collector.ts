@@ -19,6 +19,45 @@ export interface ProxyUsageView {
   blocked: boolean;
 }
 
+export interface ConcurrencyView {
+  /** What the operator asked for. */
+  configured: number;
+  /** High-water mark of tasks actually running at once. The truth. */
+  maxObserved: number;
+  /**
+   * Mean in-flight over the run: `Σ(latency) / elapsed`.
+   *
+   * This is the number that catches accidental serialization. A run whose
+   * per-URL latencies sum to its wall clock was sequential, and reads ~1.0
+   * however high `configured` is.
+   */
+  effective: number;
+  /** `maxObserved / configured`, 0..1. */
+  utilization: number;
+  /** Whether the ceiling was ever actually reached. */
+  saturated: boolean;
+}
+
+export interface QueueView {
+  /** Deepest the waiting-task backlog ever got. */
+  maxDepth: number;
+  waitP50Ms: number | null;
+  waitP95Ms: number | null;
+  waitMaxMs: number | null;
+}
+
+/** Where wall-clock time went outside of the request itself. */
+export interface WaitView {
+  /** Waiting on the job-admission rate limiter, outside any concurrency slot. */
+  admissionMs: number;
+  /** Waiting on the per-host HTTP rate limiter, inside a concurrency slot. */
+  httpRateLimitMs: number;
+  /** Waiting to lease a proxy. */
+  proxyAcquireMs: number;
+  /** Sleeping in retry backoff, holding a concurrency slot. */
+  retryBackoffMs: number;
+}
+
 export interface MetricsView {
   startedAt: Date | null;
   elapsedMs: number;
@@ -36,8 +75,13 @@ export interface MetricsView {
   retriedRequests: number;
   exhaustedRequests: number;
   latency: LatencyView;
+  /** Total time spent inside requests. Divided by wall clock, this is mean in-flight. */
+  latencySumMs: number;
   proxyUsage: ProxyUsageView[];
   proxyFailures: number;
+  concurrency: ConcurrencyView;
+  queue: QueueView;
+  waits: WaitView;
 }
 
 export interface RecordResultInput {
@@ -85,10 +129,55 @@ export class MetricsCollector {
   private readonly statusCounts = emptyStatusCounts();
   private readonly errorCounts = new Map<string, number>();
   private readonly latencies: number[] = [];
+  private latencySum = 0;
   private readonly proxyUsage = new Map<string, ProxyUsageView>();
+
+  private configuredConcurrency = 0;
+  private peakInFlight = 0;
+  private peakQueueDepth = 0;
+  private queueWaits: readonly number[] = [];
+  private admissionWaitMs = 0;
+  private httpRateLimitWaitMs = 0;
+  private proxyAcquireMs = 0;
+  private retryBackoffMs = 0;
 
   constructor(options: { now?: (() => number) | undefined } = {}) {
     this.now = options.now ?? (() => Date.now());
+  }
+
+  /** Records the ceiling the run was configured with, for comparison against reality. */
+  configureConcurrency(concurrency: number): void {
+    this.configuredConcurrency = concurrency;
+  }
+
+  /**
+   * Folds in the queue's own measurements. The queue owns the exact in-flight
+   * high-water mark; nothing else can observe it reliably.
+   */
+  recordQueueStats(stats: {
+    peakInFlight: number;
+    peakQueueDepth: number;
+    waitSamples: readonly number[];
+  }): void {
+    this.peakInFlight = Math.max(this.peakInFlight, stats.peakInFlight);
+    this.peakQueueDepth = Math.max(this.peakQueueDepth, stats.peakQueueDepth);
+    this.queueWaits = stats.waitSamples;
+  }
+
+  recordAdmissionWait(ms: number): void {
+    this.admissionWaitMs += Math.max(0, ms);
+  }
+
+  recordHttpRateLimitWait(ms: number): void {
+    this.httpRateLimitWaitMs += Math.max(0, ms);
+  }
+
+  recordProxyAcquire(ms: number): void {
+    this.proxyAcquireMs += Math.max(0, ms);
+  }
+
+  recordRetryBackoff(ms: number): void {
+    this.retryBackoffMs += Math.max(0, ms);
   }
 
   start(): void {
@@ -121,6 +210,7 @@ export class MetricsCollector {
       this.exhaustedRequests += 1;
     }
     this.latencies.push(input.latencyMs);
+    this.latencySum += input.latencyMs;
   }
 
   /**
@@ -164,6 +254,8 @@ export class MetricsCollector {
     const elapsedMs = this.elapsedMs();
     const sorted = [...this.latencies].sort((a, b) => a - b);
     const proxyUsage = [...this.proxyUsage.values()].map((usage) => ({ ...usage }));
+    const sortedWaits = [...this.queueWaits].sort((a, b) => a - b);
+    const configured = this.configuredConcurrency;
 
     return {
       startedAt: this.startedAtMs === null ? null : new Date(this.startedAtMs),
@@ -186,8 +278,28 @@ export class MetricsCollector {
         maxMs: maxOf(sorted),
         meanMs: mean(sorted),
       },
+      latencySumMs: this.latencySum,
       proxyUsage,
       proxyFailures: proxyUsage.reduce((total, usage) => total + usage.failures, 0),
+      concurrency: {
+        configured,
+        maxObserved: this.peakInFlight,
+        effective: elapsedMs === 0 ? 0 : this.latencySum / elapsedMs,
+        utilization: configured === 0 ? 0 : this.peakInFlight / configured,
+        saturated: configured > 0 && this.peakInFlight >= configured,
+      },
+      queue: {
+        maxDepth: this.peakQueueDepth,
+        waitP50Ms: percentileOfSorted(sortedWaits, 50),
+        waitP95Ms: percentileOfSorted(sortedWaits, 95),
+        waitMaxMs: maxOf(sortedWaits),
+      },
+      waits: {
+        admissionMs: this.admissionWaitMs,
+        httpRateLimitMs: this.httpRateLimitWaitMs,
+        proxyAcquireMs: this.proxyAcquireMs,
+        retryBackoffMs: this.retryBackoffMs,
+      },
     };
   }
 }

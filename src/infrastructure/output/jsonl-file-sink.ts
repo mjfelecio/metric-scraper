@@ -32,6 +32,14 @@ export class JsonlFileSink implements SnapshotSink {
   readonly location: string;
   private readonly validate: boolean;
   private stream: WriteStream | null = null;
+  /**
+   * Memoized so concurrent first writes share one open. Without this, N
+   * simultaneous writers each create their own append stream and N-1 are
+   * orphaned — leaked file descriptors that are never `end()`ed.
+   */
+  private opening: Promise<WriteStream> | null = null;
+  /** Shared by every writer waiting on the same `drain`, so one listener serves all. */
+  private draining: Promise<void> | null = null;
   private streamError: Error | null = null;
   private rows = 0;
   private closed = false;
@@ -47,8 +55,19 @@ export class JsonlFileSink implements SnapshotSink {
 
   /** Creates the parent directory and opens the file. Called lazily by `write`. */
   async open(): Promise<void> {
-    if (this.stream !== null) return;
+    await this.openStream();
+  }
 
+  /**
+   * Opens exactly once, however many callers race here. Every caller awaits the
+   * same promise, so exactly one stream is ever created.
+   */
+  private openStream(): Promise<WriteStream> {
+    this.opening ??= this.doOpen();
+    return this.opening;
+  }
+
+  private async doOpen(): Promise<WriteStream> {
     try {
       await mkdir(path.dirname(this.location), { recursive: true });
     } catch (error) {
@@ -75,6 +94,7 @@ export class JsonlFileSink implements SnapshotSink {
     }
 
     this.stream = stream;
+    return stream;
   }
 
   async write(snapshot: MetricSnapshot): Promise<void> {
@@ -86,22 +106,19 @@ export class JsonlFileSink implements SnapshotSink {
     }
 
     const row = this.validate ? assertValidSnapshot(snapshot) : snapshot;
-    await this.open();
+    const stream = await this.openStream();
     this.throwIfFailed();
-
-    const stream = this.stream;
-    if (stream === null) {
-      throw new ScrapeError({
-        code: 'output_error',
-        message: `output "${this.location}" is not open`,
-      });
-    }
 
     const line = `${serializeSnapshotLine(row)}\n`;
     const flushed = stream.write(line);
     if (!flushed) {
       // Backpressure: wait for the kernel buffer to drain before queueing more.
-      await once(stream, 'drain');
+      // One shared listener serves every concurrent writer, so a high
+      // concurrency does not pile up `drain` listeners on the stream.
+      this.draining ??= once(stream, 'drain').then(() => {
+        this.draining = null;
+      });
+      await this.draining;
     }
     this.throwIfFailed();
     this.rows += 1;

@@ -9,9 +9,20 @@ export const AppConfigSchema = z.object({
   logLevel: LogLevelSchema,
 
   concurrency: z.number().int().min(1).max(1_000),
-  /** `0` disables pacing entirely. */
+  /**
+   * Logical scrape jobs admitted per minute — one URL is one unit however many
+   * HTTP calls or retries it costs. `0` disables pacing entirely.
+   */
   targetRpm: z.number().int().min(0),
-  /** `0` means an unbounded queue. */
+  /** Jobs admissible at once after idle. `0` = one second's worth of `targetRpm`. */
+  burst: z.number().int().min(0),
+  /**
+   * Ceiling on actual outbound HTTP requests per minute, per host — retries and
+   * multi-hop platform calls included. This is what protects upstream; `targetRpm`
+   * does not, because one job can be many requests. `0` disables.
+   */
+  httpRpmPerHost: z.number().int().min(0),
+  /** `0` means an unbounded queue. Producers wait for room rather than failing. */
   maxQueueSize: z.number().int().min(0),
   /**
    * Default gap between cycle starts in a continuous session. Content Rewards
@@ -36,6 +47,12 @@ export const AppConfigSchema = z.object({
     pool: z.string(),
     maxConsecutiveFailures: z.number().int().min(1),
     cooldownMs: z.number().int().min(0),
+    /**
+     * Jobs that may share one proxy at a time. `0` = unlimited (the historical
+     * behaviour). Setting this is what makes adding proxies increase capacity
+     * rather than just spreading the same global concurrency more thinly.
+     */
+    maxConcurrentPerProxy: z.number().int().min(0),
   }),
 
   session: z.object({
@@ -82,7 +99,11 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
 
     concurrency: int(env, 'SCRAPER_CONCURRENCY', 10),
     targetRpm: int(env, 'SCRAPER_TARGET_RPM', 500),
-    maxQueueSize: int(env, 'SCRAPER_MAX_QUEUE_SIZE', 0),
+    burst: int(env, 'SCRAPER_BURST', 0),
+    httpRpmPerHost: int(env, 'SCRAPER_HTTP_RPM_PER_HOST', 0),
+    // Bounded by default: an unbounded queue turns a large input straight into
+    // unbounded pending work, and the producer has no way to feel the pressure.
+    maxQueueSize: int(env, 'SCRAPER_MAX_QUEUE_SIZE', 1_000),
     pollIntervalMs: int(env, 'SCRAPER_POLL_INTERVAL_MS', 900_000),
     requestTimeoutMs: int(env, 'SCRAPER_REQUEST_TIMEOUT_MS', 15_000),
 
@@ -100,6 +121,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
       pool: str(env.PROXY_POOL) ?? '',
       maxConsecutiveFailures: int(env, 'PROXY_MAX_FAILURES', 3),
       cooldownMs: int(env, 'PROXY_COOLDOWN_MS', 60_000),
+      maxConcurrentPerProxy: int(env, 'PROXY_MAX_CONCURRENT', 0),
     },
 
     session: {
@@ -145,6 +167,8 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
     logLevel: config.logLevel,
     concurrency: config.concurrency,
     targetRpm: config.targetRpm,
+    burst: config.burst,
+    httpRpmPerHost: config.httpRpmPerHost,
     maxQueueSize: config.maxQueueSize,
     pollIntervalMs: config.pollIntervalMs,
     requestTimeoutMs: config.requestTimeoutMs,

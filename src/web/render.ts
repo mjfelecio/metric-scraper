@@ -317,6 +317,10 @@ function renderSummary(state: AppState): void {
 
   const statuses = Object.entries(summary.status_breakdown).filter(([, count]) => count > 0);
   const proxies = summary.proxies;
+  const concurrency = summary.throughput.concurrency;
+  // Capacity was available and demanded, but never used — the fingerprint of
+  // accidental serialization. Showing the configured number alone would hide it.
+  const underused = concurrency.max_observed < concurrency.configured && summary.queue.max_depth > 0;
 
   panel.innerHTML = `
     <h2 class="mb-4 text-sm font-semibold uppercase tracking-wider text-slate-400">Run summary</h2>
@@ -324,6 +328,8 @@ function renderSummary(state: AppState): void {
       ${statCards([
         ['Success rate', `${(summary.totals.success_rate * 100).toFixed(1)}%`],
         ['Throughput', `${summary.throughput.requests_per_minute.toFixed(1)}/min`],
+        ['Concurrency', `${concurrency.max_observed} / ${concurrency.configured}`],
+        ['Effective', `${concurrency.effective.toFixed(2)}x`],
         ['p50', formatMs(summary.latency.p50_ms)],
         ['p95', formatMs(summary.latency.p95_ms)],
         ['max', formatMs(summary.latency.max_ms)],
@@ -334,6 +340,16 @@ function renderSummary(state: AppState): void {
         ['Duration', `${(summary.duration_ms / 1000).toFixed(1)}s`],
       ])}
     </div>
+    ${
+      underused
+        ? `<p class="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+             Concurrency underused: ${concurrency.configured} configured,
+             ${concurrency.max_observed} observed, queue backlog peaked at
+             ${summary.queue.max_depth}. Effective concurrency
+             ${concurrency.effective.toFixed(2)}x.
+           </p>`
+        : ''
+    }
 
     <div class="mt-5 grid gap-5 sm:grid-cols-2">
       <div>

@@ -16,7 +16,11 @@ import { RetryPolicy } from '../../src/core/retry/retry-policy.js';
 import { ScrapeRunner } from '../../src/core/runner/scrape-runner.js';
 import { type HttpClient } from '../../src/core/scraper/http-port.js';
 import { createScraperRegistry, type Scraper } from '../../src/core/scraper/scraper.js';
-import { NullProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
+import { type ProxyPool } from '../../src/core/scraper/pool-ports.js';
+import {
+  InMemoryProxyPool,
+  NullProxyPool,
+} from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
 import { NullSessionPool } from '../../src/infrastructure/session/in-memory-session-pool.js';
 import { createDefaultScraperRegistry } from '../../src/platforms/index.js';
 
@@ -50,6 +54,10 @@ function buildRunner(options: {
   scraper?: Scraper;
   maxAttempts?: number;
   concurrency?: number;
+  targetRpm?: number;
+  burst?: number;
+  maxQueueSize?: number;
+  proxyPool?: ProxyPool;
   sink?: MemorySnapshotSink;
 }) {
   const sink = options.sink ?? new MemorySnapshotSink();
@@ -60,7 +68,7 @@ function buildRunner(options: {
         ? createDefaultScraperRegistry()
         : createScraperRegistry([options.scraper]),
     http: unusedHttp,
-    proxyPool: new NullProxyPool(),
+    proxyPool: options.proxyPool ?? new NullProxyPool(),
     sessionPool: new NullSessionPool(),
     sink,
     metrics,
@@ -68,8 +76,9 @@ function buildRunner(options: {
     logger: nullLogger,
     config: {
       concurrency: options.concurrency ?? 4,
-      targetRpm: 0,
-      maxQueueSize: 0,
+      targetRpm: options.targetRpm ?? 0,
+      ...(options.burst === undefined ? {} : { burst: options.burst }),
+      maxQueueSize: options.maxQueueSize ?? 0,
       requestTimeoutMs: 5_000,
     },
     // No real waiting in tests; the backoff schedule is covered by the retry tests.
@@ -77,6 +86,29 @@ function buildRunner(options: {
   });
 
   return { runner, sink, metrics };
+}
+
+/** A scraper that reports the peak number of concurrent `scrape` calls. */
+function concurrencyProbe(durationMs = 10): { scraper: Scraper; peak: () => number } {
+  let inFlight = 0;
+  let peak = 0;
+  const scraper: Scraper = {
+    platform: 'tiktok',
+    async scrape(): Promise<ScrapeResult> {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, durationMs));
+      inFlight -= 1;
+      return scrapeSuccess(EMPTY_VIDEO_DATA);
+    },
+  };
+  return { scraper, peak: () => peak };
+}
+
+function urls(count: number): InputRecord[] {
+  return records(
+    ...Array.from({ length: count }, (_, i) => `https://www.tiktok.com/@a/video/${1000 + i}`),
+  );
 }
 
 describe('ScrapeRunner', () => {
@@ -223,5 +255,125 @@ describe('ScrapeRunner', () => {
     });
 
     expect(result.summary.input).toEqual({ candidates: 5, accepted: 1, rejected: 4 });
+  });
+});
+
+describe('ScrapeRunner concurrency', () => {
+  it('runs one job at a time when concurrency is 1', async () => {
+    const { scraper, peak } = concurrencyProbe();
+    const { runner } = buildRunner({ scraper, concurrency: 1 });
+
+    const result = await runner.run(urls(6));
+
+    expect(peak()).toBe(1);
+    expect(result.summary.throughput.concurrency.max_observed).toBe(1);
+  });
+
+  it('reaches five in flight when concurrency is 5', async () => {
+    const { scraper, peak } = concurrencyProbe();
+    const { runner } = buildRunner({ scraper, concurrency: 5 });
+
+    const result = await runner.run(urls(20));
+
+    expect(peak()).toBe(5);
+    expect(result.summary.throughput.concurrency.max_observed).toBe(5);
+    expect(result.summary.throughput.concurrency.saturated).toBe(true);
+  });
+
+  it('reaches ten in flight when concurrency is 10', async () => {
+    const { scraper, peak } = concurrencyProbe();
+    const { runner } = buildRunner({ scraper, concurrency: 10 });
+
+    const result = await runner.run(urls(30));
+
+    expect(peak()).toBe(10);
+    expect(result.summary.throughput.concurrency.max_observed).toBe(10);
+  });
+
+  // The regression guard. Rate limiting used to be implemented as task-queue
+  // pacing with an `intervalCap` of 1, which meant a single running job blocked
+  // every other start: a configured concurrency of 10 ran strictly sequentially.
+  // Rate limiting must pace how fast jobs START, never how many may overlap.
+  it('still reaches full concurrency while a rate limit is active', async () => {
+    const { scraper, peak } = concurrencyProbe();
+    const { runner } = buildRunner({
+      scraper,
+      concurrency: 10,
+      targetRpm: 60_000,
+      burst: 10,
+    });
+
+    const result = await runner.run(urls(30));
+
+    expect(peak()).toBeGreaterThan(1);
+    expect(peak()).toBe(10);
+    expect(result.summary.throughput.concurrency.effective).toBeGreaterThan(1);
+  });
+
+  it('reports effective concurrency near 1 when work really is sequential', async () => {
+    const { scraper } = concurrencyProbe();
+    const { runner } = buildRunner({ scraper, concurrency: 1 });
+
+    const result = await runner.run(urls(8));
+
+    // Sum of latencies ~= wall clock is the signature of a serialized run.
+    expect(result.summary.throughput.concurrency.effective).toBeLessThan(1.5);
+    expect(result.summary.throughput.concurrency.utilization).toBe(1);
+  });
+
+  it('never reports concurrency it did not actually use', async () => {
+    // Only two URLs, so a ceiling of 10 can never be reached. The summary must
+    // say so rather than echoing the configured number back.
+    const { scraper } = concurrencyProbe();
+    const { runner } = buildRunner({ scraper, concurrency: 10 });
+
+    const result = await runner.run(urls(2));
+
+    const concurrency = result.summary.throughput.concurrency;
+    expect(concurrency.configured).toBe(10);
+    expect(concurrency.max_observed).toBeLessThanOrEqual(2);
+    expect(concurrency.saturated).toBe(false);
+  });
+
+  it('applies backpressure without failing jobs when the queue is bounded', async () => {
+    const { scraper } = concurrencyProbe(2);
+    const { runner, sink } = buildRunner({
+      scraper,
+      concurrency: 4,
+      maxQueueSize: 5,
+    });
+
+    const result = await runner.run(urls(40));
+
+    // Every job still produces a row; a full queue must slow the producer, not
+    // drop work or abort the run.
+    expect(sink.snapshots).toHaveLength(40);
+    expect(result.fatalError).toBeNull();
+    expect(result.summary.queue.max_depth).toBeLessThanOrEqual(6);
+  });
+
+  it('uses several proxies at once rather than serializing on the pool', async () => {
+    const proxyPool = new InMemoryProxyPool({
+      targets: ['a', 'b', 'c'].map((name) => ({
+        protocol: 'http' as const,
+        host: `${name}.example.net`,
+        port: 8000,
+        username: null,
+        password: null,
+        url: `http://${name}.example.net:8000`,
+      })),
+      maxConcurrentPerProxy: 2,
+    });
+    const { scraper, peak } = concurrencyProbe();
+    const { runner } = buildRunner({ scraper, concurrency: 6, proxyPool });
+
+    const result = await runner.run(urls(18));
+
+    // 3 proxies x 2 slots = 6 units of capacity, and all of it should be used.
+    expect(peak()).toBe(6);
+    expect(result.summary.proxies.per_proxy).toHaveLength(3);
+    for (const proxy of result.summary.proxies.per_proxy) {
+      expect(proxy.requests).toBeGreaterThan(0);
+    }
   });
 });

@@ -24,6 +24,10 @@ export const RunConfigSchema = z
     format: InputFormatSchema.or(z.literal('auto')).nullish(),
     concurrency: z.number().int().min(1).max(1_000).nullish(),
     targetRpm: z.number().int().min(0).nullish(),
+    /** Jobs admissible at once after idle; `0` = one second of `targetRpm`. */
+    burst: z.number().int().min(0).nullish(),
+    /** Ceiling on actual HTTP requests per minute per host, retries included. */
+    httpRpmPerHost: z.number().int().min(0).nullish(),
     /** Repeat the batch continuously instead of running it once. */
     watch: z.boolean().nullish(),
     /** Time between cycle starts, e.g. `"15m"`, `"30s"`, or `0` for back-to-back. */

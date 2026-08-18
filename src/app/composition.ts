@@ -8,6 +8,7 @@ import { type ProxyPool, type SessionPool } from '../core/scraper/pool-ports.js'
 import { ScrapeRunner } from '../core/runner/scrape-runner.js';
 import { type UrlNormalizerRegistry } from '../core/url/normalizer-registry.js';
 import { FetchHttpClient } from '../infrastructure/http/fetch-http-client.js';
+import { RateLimitedHttpClient } from '../infrastructure/http/rate-limited-http-client.js';
 import { InMemoryProxyPool, NullProxyPool } from '../infrastructure/proxy/in-memory-proxy-pool.js';
 import { parseProxyList } from '../infrastructure/proxy/proxy-config.js';
 import {
@@ -23,6 +24,8 @@ import {
 export interface RunnerOverrides {
   concurrency?: number | undefined;
   targetRpm?: number | undefined;
+  burst?: number | undefined;
+  httpRpmPerHost?: number | undefined;
   retry?: Partial<RetryPolicyOptions> | undefined;
 }
 
@@ -62,13 +65,15 @@ export async function buildRunner(options: {
   const { config, logger, sink } = options;
   const concurrency = options.overrides?.concurrency ?? config.concurrency;
   const targetRpm = options.overrides?.targetRpm ?? config.targetRpm;
+  const burst = options.overrides?.burst ?? config.burst;
+  const httpRpmPerHost = options.overrides?.httpRpmPerHost ?? config.httpRpmPerHost;
 
   const proxyPool = options.proxyPool ?? createProxyPool(config, logger);
   const sessionPool = options.sessionPool ?? (await createSessionPool(config, logger));
   const metrics = new MetricsCollector();
   const proxyAgents = new Map<string, ProxyAgent>();
 
-  const http = new FetchHttpClient({
+  const transport = new FetchHttpClient({
     defaultTimeoutMs: config.requestTimeoutMs,
     dispatcherFactory: (target) => {
       if (target.protocol !== 'http' && target.protocol !== 'https') {
@@ -85,6 +90,19 @@ export async function buildRunner(options: {
     },
   });
 
+  // Egress limiting wraps the transport, so retries and the multi-hop calls a
+  // platform scraper makes internally are all counted. A job-level limit cannot
+  // see that traffic.
+  const http =
+    httpRpmPerHost > 0
+      ? new RateLimitedHttpClient({
+          inner: transport,
+          rpmPerHost: httpRpmPerHost,
+          ...(burst > 0 ? { burst } : {}),
+          onWait: (waitMs) => metrics.recordHttpRateLimitWait(waitMs),
+        })
+      : transport;
+
   const runner = new ScrapeRunner({
     scrapers: createDefaultScraperRegistry({ instagram: config.instagram }),
     http,
@@ -97,6 +115,7 @@ export async function buildRunner(options: {
     config: {
       concurrency,
       targetRpm,
+      ...(burst > 0 ? { burst } : {}),
       maxQueueSize: config.maxQueueSize,
       requestTimeoutMs: config.requestTimeoutMs,
     },
@@ -124,6 +143,7 @@ export function createProxyPool(config: AppConfig, logger: Logger): ProxyPool {
     targets,
     maxConsecutiveFailures: config.proxy.maxConsecutiveFailures,
     cooldownMs: config.proxy.cooldownMs,
+    maxConcurrentPerProxy: config.proxy.maxConcurrentPerProxy,
     logger,
   });
 }

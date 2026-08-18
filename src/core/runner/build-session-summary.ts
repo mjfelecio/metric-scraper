@@ -72,6 +72,8 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
   let completedCycles = 0;
   let failedCycles = 0;
   let overranCycles = 0;
+  let maxObservedConcurrency = 0;
+  let queueMaxDepth = 0;
 
   for (const cycle of input.cycles) {
     if (cycle.overran) overranCycles += 1;
@@ -88,6 +90,11 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
     totalRetries += summary.retries.total_retries;
     retriedRequests += summary.retries.retried_requests;
     exhaustedRequests += summary.retries.exhausted_requests;
+    maxObservedConcurrency = Math.max(
+      maxObservedConcurrency,
+      summary.throughput.concurrency.max_observed,
+    );
+    queueMaxDepth = Math.max(queueMaxDepth, summary.queue.max_depth);
 
     for (const [status, count] of Object.entries(summary.status_breakdown)) {
       statusBreakdown[status as ScrapeStatus] += count ?? 0;
@@ -137,7 +144,19 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
 
     throughput: {
       target_rpm: input.targetRpm,
-      concurrency: input.concurrency,
+      concurrency: {
+        configured: input.concurrency,
+        max_observed: maxObservedConcurrency,
+        // Measured against time actually spent scraping: idle gaps between
+        // cycles would otherwise make a healthy polling session look sequential.
+        effective:
+          activeMs === 0
+            ? 0
+            : input.latenciesMs.reduce((total, latency) => total + latency, 0) / activeMs,
+        utilization:
+          input.concurrency === 0 ? 0 : Math.min(1, maxObservedConcurrency / input.concurrency),
+        saturated: input.concurrency > 0 && maxObservedConcurrency >= input.concurrency,
+      },
       wall_clock_rpm: perMinute(durationMs),
       active_rpm: perMinute(activeMs),
       peak_rpm: input.timeline.peakRequestsPerMinute(),

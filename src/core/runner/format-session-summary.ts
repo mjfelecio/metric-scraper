@@ -64,7 +64,12 @@ export function formatSessionSummary(summary: SessionSummary): string {
 
   lines.push('');
   lines.push('Throughput');
-  lines.push(`  ${pad('target')}${rate(target)} (concurrency ${num(throughput.concurrency)})`);
+  lines.push(`  ${pad('target')}${rate(target)}`);
+  lines.push(
+    `  ${pad('concurrency')}${num(throughput.concurrency.max_observed)} observed / ` +
+      `${num(throughput.concurrency.configured)} configured ` +
+      `(effective ${throughput.concurrency.effective.toFixed(2)})`,
+  );
   lines.push(`  ${pad('active')}${rate(throughput.active_rpm)}   (excludes idle gaps)`);
   lines.push(`  ${pad('wall clock')}${rate(throughput.wall_clock_rpm)}   (includes idle gaps)`);
   lines.push(`  ${pad('peak')}${rate(throughput.peak_rpm)}`);

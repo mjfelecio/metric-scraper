@@ -58,7 +58,29 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
     throughput: {
       requests_per_minute: durationMs === 0 ? 0 : (metrics.totalRequests / durationMs) * 60_000,
       target_rpm: input.targetRpm,
-      concurrency: input.concurrency,
+      concurrency: {
+        configured: input.concurrency,
+        max_observed: metrics.concurrency.maxObserved,
+        // Measured against the same wall clock the rest of this block uses, so
+        // `effective` and `requests_per_minute` can never disagree about the run.
+        effective: durationMs === 0 ? 0 : metrics.latencySumMs / durationMs,
+        utilization: Math.min(1, metrics.concurrency.utilization),
+        saturated: metrics.concurrency.saturated,
+      },
+    },
+
+    queue: {
+      max_depth: metrics.queue.maxDepth,
+      wait_p50_ms: metrics.queue.waitP50Ms,
+      wait_p95_ms: metrics.queue.waitP95Ms,
+      wait_max_ms: metrics.queue.waitMaxMs,
+    },
+
+    waits: {
+      admission_ms: metrics.waits.admissionMs,
+      http_rate_limit_ms: metrics.waits.httpRateLimitMs,
+      proxy_acquire_ms: metrics.waits.proxyAcquireMs,
+      retry_backoff_ms: metrics.waits.retryBackoffMs,
     },
 
     latency: {

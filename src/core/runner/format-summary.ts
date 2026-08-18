@@ -40,10 +40,39 @@ export function formatRunSummary(summary: RunSummary): string {
   lines.push(`${pad('Successes')}${num(summary.totals.successes)}`);
   lines.push(`${pad('Failures')}${num(summary.totals.failures)}`);
   lines.push(`${pad('Success rate')}${pct(summary.totals.success_rate)}`);
+  const concurrency = summary.throughput.concurrency;
   lines.push(
     `${pad('Throughput')}${rate(summary.throughput.requests_per_minute)} ` +
-      `(target ${num(summary.throughput.target_rpm)}, concurrency ${num(summary.throughput.concurrency)})`,
+      `(target ${num(summary.throughput.target_rpm)} rpm)`,
   );
+  lines.push(
+    `${pad('Concurrency')}${num(concurrency.max_observed)} observed / ` +
+      `${num(concurrency.configured)} configured  ` +
+      `(effective ${concurrency.effective.toFixed(2)})`,
+  );
+
+  // The exact fingerprint of accidental serialization: work was queued and
+  // waiting while configured capacity sat unused. This is what a run summary
+  // failed to say when a configured concurrency of 10 ran one job at a time.
+  if (concurrency.max_observed < concurrency.configured && summary.queue.max_depth > 0) {
+    lines.push('');
+    lines.push(
+      `!  Concurrency underused: ${num(concurrency.configured)} configured, ` +
+        `${num(concurrency.max_observed)} observed, while the queue backlog peaked at ` +
+        `${num(summary.queue.max_depth)}.`,
+    );
+    lines.push(
+      `   Capacity was available but unused. Effective concurrency ${concurrency.effective.toFixed(2)}` +
+        `${concurrency.effective < 1.5 ? ' — this run was effectively sequential.' : '.'}`,
+    );
+  }
+
+  lines.push('');
+  lines.push(`${pad('Queue wait p95')}${ms(summary.queue.wait_p95_ms)}`);
+  lines.push(`${pad('Admission wait')}${ms(summary.waits.admission_ms)}`);
+  lines.push(`${pad('HTTP limiter wait')}${ms(summary.waits.http_rate_limit_ms)}`);
+  lines.push(`${pad('Proxy acquire')}${ms(summary.waits.proxy_acquire_ms)}`);
+  lines.push(`${pad('Retry backoff')}${ms(summary.waits.retry_backoff_ms)}`);
   lines.push('');
   lines.push(`${pad('Latency p50')}${ms(summary.latency.p50_ms)}`);
   lines.push(`${pad('Latency p95')}${ms(summary.latency.p95_ms)}`);

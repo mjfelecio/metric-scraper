@@ -31,6 +31,47 @@ export const ProxySummarySchema = z.object({
 });
 export type ProxySummary = z.infer<typeof ProxySummarySchema>;
 
+/**
+ * Configured vs. actual concurrency.
+ *
+ * Reporting only the configured number is how an effective concurrency of 1
+ * hid behind a configured 10 for an entire run. `max_observed` and `effective`
+ * are measurements, so the two can never silently disagree again.
+ */
+export const ConcurrencySummarySchema = z.object({
+  configured: z.number().int().positive(),
+  /** High-water mark of jobs actually running at once. */
+  max_observed: z.number().int().nonnegative(),
+  /** Mean in-flight: `Σ(latency) / wall clock`. ~1.0 means the run was sequential. */
+  effective: z.number().nonnegative(),
+  /** `max_observed / configured`, 0..1. */
+  utilization: z.number().min(0).max(1),
+  /** Whether the configured ceiling was ever actually reached. */
+  saturated: z.boolean(),
+});
+export type ConcurrencySummary = z.infer<typeof ConcurrencySummarySchema>;
+
+export const QueueSummarySchema = z.object({
+  /** Deepest the backlog of waiting jobs ever got. */
+  max_depth: z.number().int().nonnegative(),
+  wait_p50_ms: z.number().nonnegative().nullable(),
+  wait_p95_ms: z.number().nonnegative().nullable(),
+  wait_max_ms: z.number().nonnegative().nullable(),
+});
+export type QueueSummary = z.infer<typeof QueueSummarySchema>;
+
+/** Wall-clock time spent waiting rather than requesting, so a run stays attributable. */
+export const WaitSummarySchema = z.object({
+  /** On the job-admission limiter, outside any concurrency slot. */
+  admission_ms: z.number().nonnegative(),
+  /** On the per-host HTTP limiter, inside a concurrency slot. */
+  http_rate_limit_ms: z.number().nonnegative(),
+  proxy_acquire_ms: z.number().nonnegative(),
+  /** Retry backoff, which holds a concurrency slot while it sleeps. */
+  retry_backoff_ms: z.number().nonnegative(),
+});
+export type WaitSummary = z.infer<typeof WaitSummarySchema>;
+
 export const RetrySummarySchema = z.object({
   /**
    * Total retry attempts across the run. Counted separately from `requests`
@@ -71,9 +112,13 @@ export const RunSummarySchema = z.object({
 
   throughput: z.object({
     requests_per_minute: z.number().nonnegative(),
+    /** Logical scrape jobs admitted per minute. One URL = one unit. */
     target_rpm: z.number().nonnegative(),
-    concurrency: z.number().int().positive(),
+    concurrency: ConcurrencySummarySchema,
   }),
+
+  queue: QueueSummarySchema,
+  waits: WaitSummarySchema,
 
   latency: LatencySummarySchema,
 

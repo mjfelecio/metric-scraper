@@ -1,7 +1,12 @@
 import { z } from 'zod';
 
 import { PlatformSchema } from './platform.js';
-import { LatencySummarySchema, RetrySummarySchema, RunSummarySchema } from './run-summary.js';
+import {
+  ConcurrencySummarySchema,
+  LatencySummarySchema,
+  RetrySummarySchema,
+  RunSummarySchema,
+} from './run-summary.js';
 import { ScrapeStatusSchema } from './status.js';
 
 /**
@@ -89,7 +94,8 @@ export const SessionSummarySchema = z.object({
 
   throughput: z.object({
     target_rpm: z.number().nonnegative(),
-    concurrency: z.number().int().positive(),
+    /** Aggregated across cycles: the worst-case observed against the configured ceiling. */
+    concurrency: ConcurrencySummarySchema,
     /** Requests over the whole session, idle gaps included. Low by design when polling. */
     wall_clock_rpm: z.number().nonnegative(),
     /** Requests over time actually spent scraping, idle gaps excluded. */
