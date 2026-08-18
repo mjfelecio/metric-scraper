@@ -4,7 +4,11 @@ import { type Logger } from '../core/logging/logger.js';
 import { MetricsCollector } from '../core/metrics/metrics-collector.js';
 import { type SnapshotSink } from '../core/output/snapshot-sink.js';
 import { RetryPolicy, type RetryPolicyOptions } from '../core/retry/retry-policy.js';
-import { type ProxyPool, type SessionPool } from '../core/scraper/pool-ports.js';
+import {
+  type ProxyEventListener,
+  type ProxyPool,
+  type SessionPool,
+} from '../core/scraper/pool-ports.js';
 import { ScrapeRunner } from '../core/runner/scrape-runner.js';
 import { type UrlNormalizerRegistry } from '../core/url/normalizer-registry.js';
 import { FetchHttpClient } from '../infrastructure/http/fetch-http-client.js';
@@ -61,6 +65,11 @@ export async function buildRunner(options: {
    */
   proxyPool?: ProxyPool | undefined;
   sessionPool?: SessionPool | undefined;
+  /**
+   * Notified on every proxy health transition. Ignored when `proxyPool` is
+   * supplied — a caller that brought its own pool already chose its listener.
+   */
+  onProxyEvent?: ProxyEventListener | undefined;
 }): Promise<BuiltRunner> {
   const { config, logger, sink } = options;
   const concurrency = options.overrides?.concurrency ?? config.concurrency;
@@ -68,7 +77,7 @@ export async function buildRunner(options: {
   const burst = options.overrides?.burst ?? config.burst;
   const httpRpmPerHost = options.overrides?.httpRpmPerHost ?? config.httpRpmPerHost;
 
-  const proxyPool = options.proxyPool ?? createProxyPool(config, logger);
+  const proxyPool = options.proxyPool ?? createProxyPool(config, logger, options.onProxyEvent);
   const sessionPool = options.sessionPool ?? (await createSessionPool(config, logger));
   const metrics = new MetricsCollector();
   const proxyAgents = new Map<string, ProxyAgent>();
@@ -132,7 +141,11 @@ export async function buildRunner(options: {
   };
 }
 
-export function createProxyPool(config: AppConfig, logger: Logger): ProxyPool {
+export function createProxyPool(
+  config: AppConfig,
+  logger: Logger,
+  onProxyEvent?: ProxyEventListener,
+): ProxyPool {
   const targets = parseProxyList(config.proxy.pool);
   if (targets.length === 0) {
     logger.debug('no proxies configured; requests will go out directly');
@@ -156,7 +169,9 @@ export function createProxyPool(config: AppConfig, logger: Logger): ProxyPool {
     maxConsecutiveFailures: config.proxy.maxConsecutiveFailures,
     cooldownMs: config.proxy.cooldownMs,
     maxConcurrentPerProxy: config.proxy.maxConcurrentPerProxy,
+    probationConcurrency: config.proxy.probationConcurrency,
     logger,
+    ...(onProxyEvent === undefined ? {} : { onEvent: onProxyEvent }),
   });
 }
 

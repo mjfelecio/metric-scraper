@@ -55,6 +55,15 @@ export const AppConfigSchema = z.object({
      * its failures are reported. Raise it if concurrency exceeds that product.
      */
     maxConcurrentPerProxy: z.number().int().min(0),
+    /**
+     * In-flight requests allowed on a proxy that has not proved itself yet, or
+     * whose last outcome was a failure.
+     *
+     * Health is only evaluated when a lease is handed out, so this is what
+     * bounds how many jobs a dead IP can absorb before its first failure is
+     * reported back.
+     */
+    probationConcurrency: z.number().int().min(1),
   }),
 
   session: z.object({
@@ -124,6 +133,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
       maxConsecutiveFailures: int(env, 'PROXY_MAX_FAILURES', 3),
       cooldownMs: int(env, 'PROXY_COOLDOWN_MS', 60_000),
       maxConcurrentPerProxy: int(env, 'PROXY_MAX_CONCURRENT', 8),
+      probationConcurrency: int(env, 'PROXY_PROBATION_CONCURRENT', 1),
     },
 
     session: {

@@ -159,4 +159,50 @@ describe('MetricsCollector', () => {
     expect(view.proxyUsage[1]).toMatchObject({ blocked: true, failures: 1 });
     expect(view.proxyFailures).toBe(2);
   });
+
+  it('splits per-proxy outcomes by platform and error code', () => {
+    const metrics = new MetricsCollector();
+    metrics.start();
+    metrics.recordProxyOutcome('http://a.example:8000', 'success', { platform: 'tiktok' });
+    metrics.recordProxyOutcome('http://a.example:8000', 'failure', {
+      platform: 'instagram',
+      errorCode: 'http_error',
+    });
+    metrics.recordProxyOutcome('http://a.example:8000', 'failure', {
+      platform: 'instagram',
+      errorCode: 'http_error',
+    });
+    // Neutral outcomes blame nobody, but the reason is still worth counting:
+    // parse errors spread across a healthy pool are the evidence that the
+    // proxies are not the problem.
+    metrics.recordProxyOutcome('http://a.example:8000', 'neutral', {
+      platform: 'tiktok',
+      errorCode: 'parse_error',
+    });
+
+    const usage = metrics.view().proxyUsage[0]!;
+    expect(usage.byPlatform).toEqual({
+      tiktok: { requests: 2, failures: 0 },
+      instagram: { requests: 2, failures: 2 },
+    });
+    expect(usage.byErrorCode).toEqual({ http_error: 2, parse_error: 1 });
+  });
+
+  it('hands out a copy, so a view cannot be mutated into the collector', () => {
+    const metrics = new MetricsCollector();
+    metrics.start();
+    metrics.recordProxyOutcome('http://a.example:8000', 'failure', {
+      platform: 'tiktok',
+      errorCode: 'timeout',
+    });
+
+    const first = metrics.view().proxyUsage[0]!;
+    first.byErrorCode['timeout'] = 99;
+    first.byPlatform.tiktok = { requests: 99, failures: 99 };
+
+    expect(metrics.view().proxyUsage[0]?.byErrorCode).toEqual({ timeout: 1 });
+    expect(metrics.view().proxyUsage[0]?.byPlatform).toEqual({
+      tiktok: { requests: 1, failures: 1 },
+    });
+  });
 });

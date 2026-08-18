@@ -4,6 +4,7 @@ import { PlatformSchema } from './platform.js';
 import {
   ConcurrencySummarySchema,
   LatencySummarySchema,
+  ProxySummarySchema,
   RetrySummarySchema,
   RunSummarySchema,
 } from './run-summary.js';
@@ -110,6 +111,16 @@ export const SessionSummarySchema = z.object({
   status_breakdown: z.record(ScrapeStatusSchema, z.number().int().nonnegative()),
   error_breakdown: z.record(z.string(), z.number().int().nonnegative()),
   retries: RetrySummarySchema,
+
+  /**
+   * The proxy pool over the whole session.
+   *
+   * The pool outlives a cycle by design — cooldowns are measured in minutes —
+   * so this is the only place that answers "did the pool degrade over the
+   * afternoon, or was one cycle unlucky". Counters are cumulative; state is the
+   * pool as it stood when the session ended.
+   */
+  proxies: ProxySummarySchema,
 
   /** True if any cycle stopped making progress while work was still in flight. */
   stalled: z.boolean(),

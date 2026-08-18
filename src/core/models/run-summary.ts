@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { PROXY_STATES } from '../scraper/pool-ports.js';
+
 import { PlatformSchema } from './platform.js';
 import { ScrapeStatusSchema } from './status.js';
 
@@ -13,31 +15,91 @@ export const LatencySummarySchema = z.object({
 export type LatencySummary = z.infer<typeof LatencySummarySchema>;
 
 /**
- * Per-proxy tallies, classified exactly as the pool's rotation classified them.
+ * Per-proxy tallies and health, classified exactly as the pool's rotation
+ * classified them.
  *
  * `successes` means "healthy use of this proxy", so a `not_found` or `private`
  * answer counts here: the proxy delivered a definitive result and the pool
  * credits it. Per-URL outcomes live in `status_breakdown` instead. Anything
  * counted in `failures` is something rotation acted on.
+ *
+ * The health fields are the pool's own state at the end of the run, not a
+ * second opinion about it — which is what makes "proxy X handled 42 jobs,
+ * became unhealthy at 19:21, and was due back at 19:26" readable from the
+ * artifact alone.
  */
+export const ProxyStateSchema = z.enum(PROXY_STATES);
+export type ProxyStateValue = z.infer<typeof ProxyStateSchema>;
+
+export const ProxyPlatformUsageSchema = z.object({
+  requests: z.number().int().nonnegative(),
+  failures: z.number().int().nonnegative(),
+});
+
 export const ProxyUsageSchema = z.object({
   /** Stable identifier. Never contains credentials. */
   proxy_id: z.string(),
+  /** `p1`…`pN`, from configuration order. Stable within a run. */
+  label: z.string(),
+  state: ProxyStateSchema,
+  /** Why it is out of rotation: consecutive_failures, detected_block, unsuitable_exit. */
+  block_kind: z.string().nullable(),
   requests: z.number().int().nonnegative(),
   successes: z.number().int().nonnegative(),
   failures: z.number().int().nonnegative(),
   /** Subset of `failures` blamed on the exit node itself (HTTP 451). */
   unsuitable: z.number().int().nonnegative(),
+  consecutive_failures: z.number().int().nonnegative(),
   blocked: z.boolean(),
+  retired: z.boolean(),
+  /** Leases held at the moment the summary was taken. */
+  in_flight: z.number().int().nonnegative(),
+  /** Jobs it may hold at once given its health; `null` when unlimited. */
+  capacity: z.number().int().nonnegative().nullable(),
+  /** When it entered its current out-of-rotation state; `null` while usable. */
+  unhealthy_since: z.string().nullable(),
+  /** When it becomes eligible again; `null` when usable now or retired for good. */
+  eligible_at: z.string().nullable(),
+  first_used_at: z.string().nullable(),
+  last_used_at: z.string().nullable(),
+  last_success_at: z.string().nullable(),
+  last_failure_at: z.string().nullable(),
+  /** Last non-success reason, redacted and truncated. */
+  last_reason: z.string().nullable(),
+  last_error_code: z.string().nullable(),
+  /** Requests and failures split by platform. */
+  by_platform: z.record(z.string(), ProxyPlatformUsageSchema),
+  /** Failure reasons keyed by `ScrapeErrorCode`, including neutral outcomes. */
+  by_error_code: z.record(z.string(), z.number().int().nonnegative()),
 });
 export type ProxyUsage = z.infer<typeof ProxyUsageSchema>;
 
 export const ProxySummarySchema = z.object({
   configured: z.number().int().nonnegative(),
+  /** Proxies that handled at least one request. */
   used: z.number().int().nonnegative(),
+  /** Eligible for rotation at the end of the run. */
+  available: z.number().int().nonnegative(),
+  /** Configured but never used. */
+  untested: z.number().int().nonnegative(),
+  /** Waiting out a cooldown. */
+  cooling: z.number().int().nonnegative(),
+  /** Usable but with every slot taken: capacity pressure, not ill health. */
+  saturated: z.number().int().nonnegative(),
   blocked: z.number().int().nonnegative(),
   /** Proxies taken out of rotation for good as unsuitable exit nodes. */
   retired: z.number().int().nonnegative(),
+  /** Leases held across the pool when the summary was taken. */
+  total_in_flight: z.number().int().nonnegative(),
+  /** Simultaneous proxied requests the usable pool can serve; `null` = unlimited. */
+  capacity: z.number().int().nonnegative().nullable(),
+  /**
+   * Times a job found the whole pool blocked or cooling.
+   *
+   * Non-zero means the run was limited by the pool rather than by upstream,
+   * which is otherwise indistinguishable from a slow platform.
+   */
+  pool_exhausted: z.number().int().nonnegative(),
   total_failures: z.number().int().nonnegative(),
   per_proxy: z.array(ProxyUsageSchema),
 });

@@ -7,6 +7,7 @@ import { ScrapeError } from '../core/models/errors.js';
 import { type InputRecord } from '../core/models/input.js';
 import { type Platform } from '../core/models/platform.js';
 import { type SnapshotSink } from '../core/output/snapshot-sink.js';
+import { type ProxyPoolStats } from '../core/scraper/pool-ports.js';
 import { type RunSummary } from '../core/models/run-summary.js';
 import {
   type CycleSummary,
@@ -22,6 +23,7 @@ import {
   type ScheduleOutcome,
 } from '../core/schedule/interval-scheduler.js';
 import { JsonlFileSink } from '../infrastructure/output/jsonl-file-sink.js';
+import { ProxyEventLog } from '../infrastructure/output/proxy-event-log.js';
 import {
   writeRunSummary,
   writeSessionSummary,
@@ -69,6 +71,14 @@ export interface SessionProgress {
   /** Epoch ms of the next scheduled cycle start; `null` when back-to-back. */
   nextCycleAt: number | null;
   stalled: boolean;
+  /**
+   * The pool as it stands right now.
+   *
+   * Sampled on the same cadence as the throughput timeline rather than per
+   * result: `getStats` is O(proxies), and a pool view is only useful at a
+   * cadence a human can read anyway.
+   */
+  proxies: ProxyPoolStats;
 }
 
 export interface RunSessionOptions {
@@ -140,7 +150,18 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
   // Built once for the whole session. Proxy and session cooldowns are measured
   // in minutes, so rebuilding the pools every cycle would un-bench every proxy
   // that had just been benched for failing.
-  const proxyPool = createProxyPool(config, sessionLogger);
+  //
+  // The event log spans the session for the same reason: a proxy benched in
+  // cycle 2 and released in cycle 5 is one story, and splitting it per cycle
+  // would make it unreadable.
+  const proxyEvents = new ProxyEventLog({
+    filePath: paths.proxyEvents,
+    context: { session_id: sessionId },
+    logger: sessionLogger,
+  });
+  const proxyPool = createProxyPool(config, sessionLogger, (event) => {
+    proxyEvents.record(event);
+  });
   const sessionPool = await createSessionPool(config, sessionLogger);
 
   const concurrency = options.overrides?.concurrency ?? config.concurrency;
@@ -189,6 +210,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     sustainedTargetMs: timeline.sustained(targetRpm).windowMs,
     nextCycleAt,
     stalled,
+    proxies: proxyPool.getStats(),
   });
 
   // The sampler runs on its own fixed cadence rather than off `onProgress`.
@@ -401,11 +423,14 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     concurrency,
     targetRpm,
     stalled,
+    proxyStats: proxyPool.getStats(),
     snapshotsPath: paths.snapshots,
     summaryPath: paths.summary,
     cyclesDir: paths.cyclesDir,
     rowsWritten,
   });
+
+  await proxyEvents.close();
 
   if (options.persistSummary !== false) {
     try {

@@ -1,3 +1,4 @@
+import { type Platform } from '../models/platform.js';
 import { SCRAPE_STATUSES, type ScrapeStatus } from '../models/status.js';
 import { type ProxyOutcome } from '../scraper/lease-ports.js';
 
@@ -19,6 +20,11 @@ export interface LatencyView {
  * credits it the same way. `failures` counts what the pool rotated away from.
  * Reading these next to `status_breakdown` is what makes the two reconcilable.
  */
+export interface ProxyPlatformUsage {
+  requests: number;
+  failures: number;
+}
+
 export interface ProxyUsageView {
   proxyId: string;
   requests: number;
@@ -27,6 +33,34 @@ export interface ProxyUsageView {
   /** Subset of `failures` blamed on the exit node itself (HTTP 451). */
   unsuitable: number;
   blocked: boolean;
+  /**
+   * Split by platform, because "the evening run was worse" is often a statement
+   * about one platform rather than about the pool. A proxy failing only
+   * Instagram while TikTok goes through it fine is not a bad proxy.
+   */
+  byPlatform: Partial<Record<Platform, ProxyPlatformUsage>>;
+  /**
+   * Failure reasons as `ScrapeErrorCode`, per proxy.
+   *
+   * This is what separates a degraded exit node from a code regression:
+   * `http_error`/`blocked` concentrated on two proxies is a pool problem, while
+   * `parse_error` spread across healthy proxies is ours or the platform's.
+   * Neutral outcomes are counted here too — they say nothing about the proxy,
+   * but they are exactly the evidence that the proxy is not the culprit.
+   */
+  byErrorCode: Record<string, number>;
+}
+
+/** Everything an attempt says about the proxy beyond the outcome itself. */
+export interface ProxyOutcomeContext {
+  platform?: Platform | undefined;
+  /** `ScrapeErrorCode` for a failure, `null` on success. */
+  errorCode?: string | null | undefined;
+}
+
+interface ProxyUsageEntry extends Omit<ProxyUsageView, 'byPlatform' | 'byErrorCode'> {
+  byPlatform: Map<Platform, ProxyPlatformUsage>;
+  byErrorCode: Map<string, number>;
 }
 
 export interface ConcurrencyView {
@@ -140,7 +174,7 @@ export class MetricsCollector {
   private readonly errorCounts = new Map<string, number>();
   private readonly latencies: number[] = [];
   private latencySum = 0;
-  private readonly proxyUsage = new Map<string, ProxyUsageView>();
+  private readonly proxyUsage = new Map<string, ProxyUsageEntry>();
 
   private configuredConcurrency = 0;
   private peakInFlight = 0;
@@ -237,7 +271,11 @@ export class MetricsCollector {
    * `neutral` outcomes count as a request and nothing else — the pool does not
    * move that proxy's health either, so the two stay in step.
    */
-  recordProxyOutcome(proxyId: string, outcome: ProxyOutcome): void {
+  recordProxyOutcome(
+    proxyId: string,
+    outcome: ProxyOutcome,
+    context: ProxyOutcomeContext = {},
+  ): void {
     const usage = this.proxyUsage.get(proxyId) ?? {
       proxyId,
       requests: 0,
@@ -245,6 +283,8 @@ export class MetricsCollector {
       failures: 0,
       unsuitable: 0,
       blocked: false,
+      byPlatform: new Map<Platform, ProxyPlatformUsage>(),
+      byErrorCode: new Map<string, number>(),
     };
     usage.requests += 1;
     switch (outcome) {
@@ -265,6 +305,17 @@ export class MetricsCollector {
       case 'neutral':
         break;
     }
+
+    if (context.platform !== undefined) {
+      const platform = usage.byPlatform.get(context.platform) ?? { requests: 0, failures: 0 };
+      platform.requests += 1;
+      if (outcome !== 'success' && outcome !== 'neutral') platform.failures += 1;
+      usage.byPlatform.set(context.platform, platform);
+    }
+    if (context.errorCode != null) {
+      usage.byErrorCode.set(context.errorCode, (usage.byErrorCode.get(context.errorCode) ?? 0) + 1);
+    }
+
     this.proxyUsage.set(proxyId, usage);
   }
 
@@ -276,7 +327,15 @@ export class MetricsCollector {
   view(): MetricsView {
     const elapsedMs = this.elapsedMs();
     const sorted = [...this.latencies].sort((a, b) => a - b);
-    const proxyUsage = [...this.proxyUsage.values()].map((usage) => ({ ...usage }));
+    // Copied out rather than shared: a view is a snapshot, and handing out the
+    // live maps would let a caller watch (or mutate) the collector's own state.
+    const proxyUsage: ProxyUsageView[] = [...this.proxyUsage.values()].map((usage) => ({
+      ...usage,
+      byPlatform: Object.fromEntries(
+        [...usage.byPlatform].map(([platform, counts]) => [platform, { ...counts }]),
+      ),
+      byErrorCode: Object.fromEntries(usage.byErrorCode),
+    }));
     const sortedWaits = [...this.queueWaits].sort((a, b) => a - b);
     const configured = this.configuredConcurrency;
 

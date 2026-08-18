@@ -377,7 +377,10 @@ export class ScrapeRunner {
         // attempt said about the proxy.
         const proxyOutcome = classifyProxyOutcome(result);
         this.applyProxyOutcome(proxyLease, proxyOutcome, result);
-        metrics.recordProxyOutcome(proxyLease.id, proxyOutcome);
+        metrics.recordProxyOutcome(proxyLease.id, proxyOutcome, {
+          platform: record.platform,
+          errorCode: result.outcome === 'ok' ? null : result.error.code,
+        });
       }
       if (sessionLease !== null) {
         if (result.acquisition?.sessionUsed === true) {
@@ -440,18 +443,21 @@ export class ScrapeRunner {
   private applyProxyOutcome(lease: ProxyLease, outcome: ProxyOutcome, result: ScrapeResult): void {
     const pool = this.deps.proxyPool;
     const reason = result.outcome === 'ok' ? undefined : result.error.message;
+    // Carried alongside the message so the pool can say *what kind* of failure
+    // benched a proxy, not just that something did.
+    const errorCode = result.outcome === 'ok' ? undefined : result.error.code;
     switch (outcome) {
       case 'success':
         pool.reportSuccess(lease);
         break;
       case 'blocked':
-        pool.markBlocked(lease, reason);
+        pool.markBlocked(lease, reason, errorCode);
         break;
       case 'unsuitable':
-        pool.reportUnsuitable(lease, reason);
+        pool.reportUnsuitable(lease, reason, errorCode);
         break;
       case 'failure':
-        pool.reportFailure(lease, reason);
+        pool.reportFailure(lease, reason, errorCode);
         break;
       case 'neutral':
         // Neither credited nor blamed: the lease just goes back.

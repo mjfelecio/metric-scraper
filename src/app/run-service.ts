@@ -11,6 +11,7 @@ import { type Platform } from '../core/models/platform.js';
 import { type RunSummary } from '../core/models/run-summary.js';
 import { type CycleSummary } from '../core/models/session-summary.js';
 import { JsonlFileSink } from '../infrastructure/output/jsonl-file-sink.js';
+import { ProxyEventLog } from '../infrastructure/output/proxy-event-log.js';
 import {
   resolveRunPaths,
   resolveSessionPaths,
@@ -39,6 +40,9 @@ const MAX_RETAINED_RUNS = 20;
 
 /** Samples retained per run for the dashboard graph. */
 const MAX_TIMELINE_SAMPLES = 2_000;
+
+/** How often a one-shot run re-reads the proxy pool for the dashboard. */
+const PROXY_SAMPLE_INTERVAL_MS = 1_000;
 
 interface RunRecord {
   state: RunStateDto;
@@ -180,6 +184,7 @@ export class RunService {
         error: null,
         outputPath: null,
         hasOutput: false,
+        proxies: null,
         continuous,
         schedule,
         cycle: null,
@@ -285,6 +290,7 @@ export class RunService {
         onProgress: (progress: SessionProgress) => {
           state.state = progress.state === 'waiting' ? 'waiting' : 'running';
           state.stalled = progress.stalled;
+          state.proxies = progress.proxies.configured === 0 ? null : progress.proxies;
           state.cycle = {
             current: progress.cycle,
             completed: progress.cyclesCompleted,
@@ -381,14 +387,35 @@ export class RunService {
       state.outputPath = paths.snapshots;
       state.platform = platform;
 
+      const proxyEvents = new ProxyEventLog({
+        filePath: paths.proxyEvents,
+        context: { run_id: state.runId },
+        logger: this.logger,
+      });
       const built = await buildRunner({
         config: this.config,
         logger: this.logger,
         sink,
         overrides: { concurrency: request.concurrency, targetRpm: request.targetRpm },
+        onProxyEvent: (event) => {
+          proxyEvents.record(event);
+        },
       });
 
       state.state = 'running';
+
+      // Sampled on a clock rather than per result: `getStats` is O(proxies) and
+      // a one-shot run can finish hundreds of jobs a second, which would turn a
+      // display concern into a per-job cost.
+      let proxiesSampledAt = 0;
+      const sampleProxies = (): void => {
+        const at = Date.now();
+        if (at - proxiesSampledAt < PROXY_SAMPLE_INTERVAL_MS) return;
+        proxiesSampledAt = at;
+        const stats = built.proxyPool.getStats();
+        state.proxies = stats.configured === 0 ? null : stats;
+      };
+      sampleProxies();
 
       const result = await built.runner.run(parsed.records, {
         runId: state.runId,
@@ -402,6 +429,7 @@ export class RunService {
         },
         onProgress: (progress) => {
           state.progress = progress;
+          sampleProxies();
         },
         onResult: (event) => {
           const entry: RecentResultDto = {
@@ -420,6 +448,9 @@ export class RunService {
         },
       });
 
+      proxiesSampledAt = 0;
+      sampleProxies();
+      await proxyEvents.close();
       await this.persistSummary(paths.summary, result.summary);
 
       state.summary = result.summary;

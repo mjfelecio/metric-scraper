@@ -1,3 +1,4 @@
+import { summarizeFailureConcentration } from '../metrics/proxy-insights.js';
 import { type SessionSummary } from '../models/session-summary.js';
 import { formatDuration } from '../schedule/duration.js';
 
@@ -109,6 +110,37 @@ export function formatSessionSummary(summary: SessionSummary): string {
   lines.push(`  ${pad('total retries')}${num(summary.retries.total_retries)}`);
   lines.push(`  ${pad('retried requests')}${num(summary.retries.retried_requests)}`);
   lines.push(`  ${pad('exhausted')}${num(summary.retries.exhausted_requests)}`);
+
+  if (summary.proxies.configured > 0) {
+    const proxies = summary.proxies;
+    lines.push('');
+    lines.push('Proxies   (cumulative over the session; state as it stood at the end)');
+    lines.push(`  ${pad('configured')}${num(proxies.configured)}`);
+    lines.push(`  ${pad('usable at end')}${num(proxies.available)}`);
+    lines.push(`  ${pad('cooling at end')}${num(proxies.cooling)}`);
+    lines.push(`  ${pad('retired')}${num(proxies.retired)}`);
+    lines.push(`  ${pad('failures')}${num(proxies.total_failures)}`);
+    if (proxies.pool_exhausted > 0) {
+      lines.push(
+        `  ${pad('pool exhausted')}${num(proxies.pool_exhausted)} time(s) — every proxy was out at once`,
+      );
+    }
+    for (const proxy of proxies.per_proxy) {
+      lines.push(
+        `    ${proxy.label} ${proxy.proxy_id} — ${proxy.state.toUpperCase()} — ` +
+          `${num(proxy.requests)} req, ${num(proxy.successes)} ok, ${num(proxy.failures)} failed`,
+      );
+    }
+
+    const concentration = summarizeFailureConcentration(proxies.per_proxy);
+    if (concentration.concentrated) {
+      lines.push('');
+      lines.push(
+        `  ! ${(concentration.topShare * 100).toFixed(0)}% of proxy failures are on ` +
+          `${concentration.worst.map((proxy) => proxy.label).join(' and ')}`,
+      );
+    }
+  }
 
   if (summary.stalled) {
     lines.push('');

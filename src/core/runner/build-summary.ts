@@ -3,6 +3,7 @@ import { type Platform } from '../models/platform.js';
 import { type RunSummary } from '../models/run-summary.js';
 import { type ProxyPoolStats, type SessionPoolStats } from '../scraper/pool-ports.js';
 
+import { buildProxySummary } from './build-proxy-summary.js';
 import { type RunCounts } from './types.js';
 
 export interface BuildSummaryInput {
@@ -31,8 +32,6 @@ export interface BuildSummaryInput {
 export function buildRunSummary(input: BuildSummaryInput): RunSummary {
   const { metrics } = input;
   const durationMs = Math.max(0, input.finishedAt.getTime() - input.startedAt.getTime());
-
-  const blockedProxies = input.proxyStats.perProxy.filter((proxy) => proxy.blocked).length;
 
   return {
     run_id: input.runId,
@@ -100,24 +99,9 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
       exhausted_requests: metrics.exhaustedRequests,
     },
 
-    proxies: {
-      configured: input.proxyStats.configured,
-      used: metrics.proxyUsage.length,
-      blocked: blockedProxies,
-      retired: input.proxyStats.retired,
-      total_failures: input.proxyStats.totalFailures,
-      // Straight from the metrics, which are fed the same classification the
-      // pool rotates on — so `successes`/`failures` here are the numbers that
-      // actually drove cooldowns, not a second opinion about them.
-      per_proxy: metrics.proxyUsage.map((usage) => ({
-        proxy_id: usage.proxyId,
-        requests: usage.requests,
-        successes: usage.successes,
-        failures: usage.failures,
-        unsuitable: usage.unsuitable,
-        blocked: usage.blocked,
-      })),
-    },
+    // Pool state joined with the metrics tallies, so the section says what each
+    // proxy is *doing* and not only how many requests it carried.
+    proxies: buildProxySummary(input.proxyStats, metrics.proxyUsage),
 
     sessions: {
       configured: input.sessionStats.configured,

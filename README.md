@@ -149,6 +149,7 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | `PROXY_MAX_FAILURES`          | `3`        | Consecutive failures before cooldown                                                 |
 | `PROXY_COOLDOWN_MS`           | `60000`    | How long a failed/blocked proxy is benched                                           |
 | `PROXY_MAX_CONCURRENT`        | `8`        | Jobs sharing one proxy at a time; `0` = unlimited                                    |
+| `PROXY_PROBATION_CONCURRENT`  | `1`        | Jobs on a proxy that has not succeeded yet, or whose last outcome failed             |
 | `SESSION_STORE_PATH`          | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous                         |
 | `SESSION_MAX_FAILURES`        | `3`        | Consecutive failures before cooldown                                                 |
 | `SESSION_COOLDOWN_MS`         | `300000`   | How long a blocked session is benched                                                |
@@ -237,6 +238,43 @@ is handed out, so an unproven proxy — or one whose last outcome was a failure 
 takes one request at a time until it succeeds. That bounds what a dead IP can
 absorb to roughly `PROXY_MAX_FAILURES` requests instead of however many jobs
 happen to be in flight, without limiting proxies that are working.
+
+**Every proxy is in exactly one state, and the state is published.** "Blocked" is
+not a boolean: a proxy waiting out a cooldown, one that has never been tried, and
+one retired for good need different answers from an operator. The state is derived
+from the fields rotation already uses — never tracked separately — so what the
+dashboard shows is what rotation actually did:
+
+| State       | Meaning                                                               | Comes back?                    |
+| ----------- | --------------------------------------------------------------------- | ------------------------------ |
+| `untested`  | Configured, nothing sent through it yet                               | —                              |
+| `healthy`   | Has succeeded, nothing unresolved since, has spare capacity           | —                              |
+| `saturated` | Healthy but every slot is taken right now                             | As soon as a job finishes      |
+| `probation` | Never succeeded, or failing since its last success; capped to one job | On its next success            |
+| `cooling`   | Benched after `PROXY_MAX_FAILURES`, or a detected block               | At `eligible_at`               |
+| `retired`   | Unsuitable exit node (repeated HTTP 451)                              | No — a jurisdiction has no TTL |
+
+Alongside the state, each proxy reports when it was first and last used, when it
+last succeeded and last failed, when it went bad (`unhealthy_since`) and when it is
+due back (`eligible_at`), why (`block_kind`, `last_error_code`, a redacted
+`last_reason`), how many jobs it is holding right now, and its request split by
+platform and by error code. Pool-wide, `capacity` is the simultaneous proxied
+requests the usable pool can serve, and `pool_exhausted` counts the times a job
+found every proxy out at once — the difference between "the platform was slow" and
+"we ran out of pool".
+
+**Proxies are identified by a label, never by a credential.** Each entry gets `p1`…`pN`
+from configuration order, shown next to the credential-free `protocol://host:port`.
+Two entries on the same gateway host with different credentials — the usual shape of a
+rotating residential pool — are kept apart by a short digest of the full URL
+(`http://gate.example.net:8000#a1b2`); no part of the credential goes into the id, and
+credentials are stripped from any reason text before it is stored.
+
+Reading a bad run: failures concentrated on one or two proxies point at those exit
+nodes, while failures spread evenly across a healthy pool — especially `parse_error`,
+which is classified `neutral` and blames no proxy — point at a code change or at the
+platform. The CLI and the dashboard both flag concentration when it is real, using the
+same shared calculation.
 
 Instagram sessions are supplied as a gitignored JSON file. `proxyId` must equal the
 credential-free id of the sticky HTTP/HTTPS proxy in `PROXY_POOL`; use `null` only for
@@ -367,6 +405,15 @@ Tick **Continuous** to run a session instead, with the same three knobs as the C
 cycles — without it a fifteen-minute interval makes a healthy dashboard look hung — plus a
 **throughput graph** and a session-summary download.
 
+When proxies are configured, a **proxy pool** panel appears: usable / cooling / retired
+counts, live capacity and how many jobs are in flight on how many proxies, then one row
+per proxy with its state, in-flight load, request tallies, and a cooldown countdown for
+anything benched. It answers the question a bad run actually raises — is the pool the
+reason, or is something else — and flags it outright when failures are concentrated on a
+few proxies or when the whole pool was out at once. The snapshot rides on the run-state
+poll the dashboard already makes, sampled about once a second; it is not a second
+transport and it never runs per job.
+
 The graph plots the _instantaneous_ rate, derived from the delta between samples rather
 than the cumulative average, because a running average smooths away exactly the dips a
 soak test exists to find. It shows successes and failures shaded, a dashed reference line
@@ -474,6 +521,14 @@ Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, a
 throughput, raw platform HTTP calls, latency p50/p95/max, status and error breakdowns,
 retry statistics, proxy statistics and session burn/health statistics.
 
+When proxies are configured, a run also writes `<name>.proxy-events.jsonl`: one row per
+proxy **health transition** — never per request — recording `from`/`to` state, the reason
+and error code, and `eligible_at`. That is what makes "proxy p3 went bad at 19:21 and was
+back at 19:26" answerable after the fact; the summary only holds the end state, and the
+pool itself only ever holds the present. The file is bounded by state changes rather than
+by request volume, and a write failure disables the log with a warning rather than ending
+the run — losing a scrape row is unacceptable, losing an observability row is not.
+
 **Concurrency is reported as a measurement, not as configuration.** A summary that
 echoes the configured number back is how an effective concurrency of 1 hid behind a
 configured 10 for an entire run, so `throughput.concurrency` is an object:
@@ -533,6 +588,11 @@ including the case of the same video appearing twice with different `scraped_at`
 
 ## 12. Current limitations
 
+- **Proxy health lives for one process.** Cooldowns and retirement are in-memory and
+  session-scoped: a new run starts with a fresh pool. That is deliberate — a cooldown is a
+  statement about a 30-second-old observation, and restoring yesterday's would bench
+  proxies that have long since recovered. The durable record is the summary plus
+  `*.proxy-events.jsonl`, which is what a past run should be read from.
 - **Instagram uses undocumented first-party operations.** Document IDs and response
   shapes can change. A malformed response becomes a visible `parse_error`.
 - **Instagram clips lookup is deliberately bounded.** The anonymous path checks at most

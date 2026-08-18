@@ -272,6 +272,7 @@ async function poll(runId: string): Promise<void> {
         summary: state.summary,
         error: state.error,
         hasOutput: state.hasOutput,
+        proxies: state.proxies,
         continuous: state.continuous,
         schedule: state.schedule,
         cycle: state.cycle,
