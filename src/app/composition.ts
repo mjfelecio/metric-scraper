@@ -4,6 +4,7 @@ import { type Logger } from '../core/logging/logger.js';
 import { MetricsCollector } from '../core/metrics/metrics-collector.js';
 import { type SnapshotSink } from '../core/output/snapshot-sink.js';
 import { RetryPolicy, type RetryPolicyOptions } from '../core/retry/retry-policy.js';
+import { type ProxyTarget } from '../core/scraper/lease-ports.js';
 import {
   type ProxyEventListener,
   type ProxyPool,
@@ -80,23 +81,10 @@ export async function buildRunner(options: {
   const proxyPool = options.proxyPool ?? createProxyPool(config, logger, options.onProxyEvent);
   const sessionPool = options.sessionPool ?? (await createSessionPool(config, logger));
   const metrics = new MetricsCollector();
-  const proxyAgents = new Map<string, ProxyAgent>();
 
   const transport = new FetchHttpClient({
     defaultTimeoutMs: config.requestTimeoutMs,
-    dispatcherFactory: (target) => {
-      if (target.protocol !== 'http' && target.protocol !== 'https') {
-        throw new Error(
-          `proxy protocol ${target.protocol} is not supported by the fetch transport; use http or https`,
-        );
-      }
-      let agent = proxyAgents.get(target.url);
-      if (agent === undefined) {
-        agent = new ProxyAgent(target.url);
-        proxyAgents.set(target.url, agent);
-      }
-      return agent;
-    },
+    dispatcherFactory: createProxyAgentFactory(config),
   });
 
   // Egress limiting wraps the transport, so retries and the multi-hop calls a
@@ -138,6 +126,32 @@ export async function buildRunner(options: {
     normalizers: createDefaultUrlNormalizerRegistry(),
     concurrency,
     targetRpm,
+  };
+}
+
+/**
+ * Builds a per-proxy `ProxyAgent` dispatcher, one per distinct proxy URL, with
+ * an explicit connect-phase timeout.
+ *
+ * Undici defaults to a 10s connect timeout otherwise, which lets a dead proxy
+ * sit half-connected for 10s per attempt — most of a 15s request timeout that
+ * never gets the chance to fire, and the dominant cost of scraping through a
+ * partly-dead pool.
+ */
+export function createProxyAgentFactory(config: AppConfig): (target: ProxyTarget) => unknown {
+  const proxyAgents = new Map<string, ProxyAgent>();
+  return (target) => {
+    if (target.protocol !== 'http' && target.protocol !== 'https') {
+      throw new Error(
+        `proxy protocol ${target.protocol} is not supported by the fetch transport; use http or https`,
+      );
+    }
+    let agent = proxyAgents.get(target.url);
+    if (agent === undefined) {
+      agent = new ProxyAgent({ uri: target.url, connectTimeout: config.proxy.connectTimeoutMs });
+      proxyAgents.set(target.url, agent);
+    }
+    return agent;
   };
 }
 

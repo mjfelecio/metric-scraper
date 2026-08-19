@@ -71,6 +71,28 @@ describe('loadConfig', () => {
       /RETRY_MAX_DELAY_MS/,
     );
   });
+
+  it('defaults the proxy connect timeout to 3000ms', () => {
+    expect(load({}).proxy.connectTimeoutMs).toBe(3_000);
+  });
+
+  it('reads an override for the proxy connect timeout', () => {
+    expect(load({ PROXY_CONNECT_TIMEOUT_MS: '1500' }).proxy.connectTimeoutMs).toBe(1_500);
+  });
+
+  it('rejects a proxy connect timeout at or above the request timeout', () => {
+    expect(() =>
+      load({ SCRAPER_REQUEST_TIMEOUT_MS: '5000', PROXY_CONNECT_TIMEOUT_MS: '5000' }),
+    ).toThrow(/PROXY_CONNECT_TIMEOUT_MS/);
+    expect(() =>
+      load({ SCRAPER_REQUEST_TIMEOUT_MS: '5000', PROXY_CONNECT_TIMEOUT_MS: '6000' }),
+    ).toThrow(/PROXY_CONNECT_TIMEOUT_MS/);
+  });
+
+  it('accepts a proxy connect timeout comfortably below the request timeout', () => {
+    const config = load({ SCRAPER_REQUEST_TIMEOUT_MS: '15000', PROXY_CONNECT_TIMEOUT_MS: '3000' });
+    expect(config.proxy.connectTimeoutMs).toBe(3_000);
+  });
 });
 
 describe('redactConfig', () => {

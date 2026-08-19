@@ -64,6 +64,13 @@ export const AppConfigSchema = z.object({
      * reported back.
      */
     probationConcurrency: z.number().int().min(1),
+    /**
+     * Undici's own connect-phase timeout for each proxy's dispatcher. Without
+     * this, undici defaults to 10s before giving up on a dead proxy — well past
+     * what a dead exit node needs to be declared unreachable, and it fires
+     * before `requestTimeoutMs` ever gets a chance to.
+     */
+    connectTimeoutMs: z.number().int().min(1),
   }),
 
   session: z.object({
@@ -134,6 +141,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
       cooldownMs: int(env, 'PROXY_COOLDOWN_MS', 60_000),
       maxConcurrentPerProxy: int(env, 'PROXY_MAX_CONCURRENT', 8),
       probationConcurrency: int(env, 'PROXY_PROBATION_CONCURRENT', 1),
+      connectTimeoutMs: int(env, 'PROXY_CONNECT_TIMEOUT_MS', 3_000),
     },
 
     session: {
@@ -162,6 +170,14 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     throw new ScrapeError({
       code: 'config_error',
       message: 'invalid configuration — RETRY_MAX_DELAY_MS must be >= RETRY_INITIAL_DELAY_MS',
+    });
+  }
+
+  if (parsed.data.proxy.connectTimeoutMs >= parsed.data.requestTimeoutMs) {
+    throw new ScrapeError({
+      code: 'config_error',
+      message:
+        'invalid configuration — PROXY_CONNECT_TIMEOUT_MS must be less than SCRAPER_REQUEST_TIMEOUT_MS',
     });
   }
 

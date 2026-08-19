@@ -52,11 +52,13 @@ export class HttpError extends ScrapeError {
     code?: 'timeout' | 'network_error' | 'http_error' | 'proxy_error' | 'config_error';
     httpStatus?: number | null;
     cause?: unknown;
+    causeCode?: string | undefined;
   }) {
     super({
       code: options.code ?? 'network_error',
       message: options.message,
       cause: options.cause,
+      causeCode: options.causeCode,
     });
     this.name = 'HttpError';
     this.httpStatus = options.httpStatus ?? null;

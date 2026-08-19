@@ -150,6 +150,7 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | `PROXY_COOLDOWN_MS`           | `60000`    | How long a failed/blocked proxy is benched                                           |
 | `PROXY_MAX_CONCURRENT`        | `8`        | Jobs sharing one proxy at a time; `0` = unlimited                                    |
 | `PROXY_PROBATION_CONCURRENT`  | `1`        | Jobs on a proxy that has not succeeded yet, or whose last outcome failed             |
+| `PROXY_CONNECT_TIMEOUT_MS`    | `3000`     | Undici connect-phase timeout per proxy; must be < `SCRAPER_REQUEST_TIMEOUT_MS`       |
 | `SESSION_STORE_PATH`          | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous                         |
 | `SESSION_MAX_FAILURES`        | `3`        | Consecutive failures before cooldown                                                 |
 | `SESSION_COOLDOWN_MS`         | `300000`   | How long a blocked session is benched                                                |
