@@ -11,6 +11,7 @@ queueing, retry accounting, JSONL output, run summaries).
 | `instagram-urls.json` | JSON-array input, including one duplicate.                                                                                                      |
 | `mixed-urls.txt`      | Both platforms in one batch, for the auto-routing path.                                                                                         |
 | `sample-output.jsonl` | **Synthetic** example of the output contract.                                                                                                   |
+| `tiktok-apify-smoke.txt` | Four unique TikTok posts for the Apify comparison benchmark, one supplied twice so video-id de-duplication is visible before anything is billed. |
 
 ## About `sample-output.jsonl`
 

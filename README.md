@@ -478,6 +478,28 @@ cycle in flight, and the summary is still written — a second Ctrl-C exits imme
 Run configs carry the same settings (`watch`, `interval`, `duration`, `maxCycles`), and
 precedence is unchanged: **CLI > run config > environment**.
 
+### Research benchmark: Apify vs. our TikTok scraper
+
+`pnpm compare:tiktok-apify` measures whether a paid provider returns finer TikTok view
+counts than we already collect, or the same public rounded values. It is a decision tool,
+not an integration — it lives entirely under `scripts/`, nothing in `src/` imports it, and
+`pnpm build:server` emits none of it.
+
+```bash
+# Dry run: entirely offline, no Apify request, no TikTok request, nothing charged.
+pnpm compare:tiktok-apify -- data/examples/tiktok-apify-smoke.txt
+
+# Paid run: requires --execute AND APIFY_TOKEN in the shell environment.
+pnpm compare:tiktok-apify -- data/examples/tiktok-apify-smoke.txt --execute
+```
+
+Dry run is the default and prints exactly what a paid run would submit — billable URL
+count, Actor, charge cap and the full Actor input with every paid add-on disabled. Caps
+are enforced in code ($0.25 and 5 URLs by default; $5 and 25 as hard ceilings no flag can
+raise), and a missing token, an over-cap URL count or a bad Actor id **refuse** rather
+than falling back to running anyway. See
+[`docs/apify-tiktok-comparison.md`](docs/apify-tiktok-comparison.md).
+
 ## 7. Running the web UI
 
 ```bash
@@ -575,8 +597,16 @@ cycles append to one file, retries stay out of throughput, cancellation still re
 and the dashboard chart. The scheduler and timeline tests inject a fake clock, so nothing
 waits on real time.
 
-Automated tests do not call TikTok or Instagram. Platform implementations receive a stub
-`HttpClient` through `ScrapeContext`, so the suite stays deterministic and offline.
+`tests/benchmark/` covers the Apify comparison harness, and covers the paid boundary
+without ever crossing it: dry run issues zero requests of any kind, execute mode refuses
+without a token, Bearer auth leaks nothing into URLs or errors, every terminal run status
+and each of 401/402/429/5xx is handled, the join is by video id with the dataset
+deliberately out of order, malformed metrics stay `null` rather than becoming `0`, and
+secrets are scrubbed from artifacts written to disk.
+
+Automated tests do not call TikTok, Instagram or Apify. Platform implementations receive a
+stub `HttpClient` through `ScrapeContext` and the benchmark receives a stub Apify
+transport, so the suite stays deterministic, offline and free.
 
 ## 9. Building
 
