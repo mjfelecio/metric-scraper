@@ -157,12 +157,27 @@ function renderCompleteness(summary: BenchmarkSummary, rows: readonly Comparison
     (row) => row.local.ok && row.local.metrics.authorHandle !== null,
   ).length;
 
+  const apifySaves = rows.filter((row) => row.apify.ok && row.apify.metrics.saves !== null).length;
+  const localSaves = rows.filter((row) => row.local.ok && row.local.metrics.saves !== null).length;
+
   lines.push('');
   lines.push(`- Author handle present — local: **${localHandles}**, Apify: **${apifyHandles}**`);
   lines.push(
     `- Author bio/signature present — local: **0** (the local scraper does not collect it), ` +
       `Apify: **${apifyBios}**`,
   );
+  lines.push(`- Saves/collectCount present — local: **${localSaves}**, Apify: **${apifySaves}**`);
+
+  if (apifySaves > localSaves) {
+    lines.push('');
+    lines.push(
+      'On saves, read that gap carefully. Our scraper returns `null` because it fetches',
+      '`/embed/v2/`, whose payload carries no `collectCount` — **not** because TikTok withholds',
+      'the field. The full `webapp.video-detail` parser path already maps `collectCount` onto',
+      '`saves`. So a win for Apify here is an argument about our own acquisition path, not a',
+      'reason to buy the data.',
+    );
+  }
   return lines;
 }
 

@@ -192,6 +192,31 @@ describe('renderReport', () => {
     expect(report).toContain('Not applicable: no data was gathered.');
   });
 
+  it('does not let an Apify saves win read as a reason to buy the data', () => {
+    const rows = joinComparison(
+      [target('1')],
+      // Mirrors reality: our embed path yields no saves, Apify's row does.
+      [observation('1', { views: 100, saves: null })],
+      [observation('1', { views: 100, saves: 42 })],
+    );
+    const report = renderReport(summaryFor(rows), rows);
+
+    expect(report).toContain('Saves/collectCount present — local: **0**, Apify: **1**');
+    expect(report).toMatch(/not\*\* because TikTok withholds/);
+    expect(report).toMatch(/argument about our own acquisition path/);
+  });
+
+  it('omits the saves caveat when there is no gap to explain', () => {
+    const rows = joinComparison(
+      [target('1')],
+      [observation('1', { views: 100, saves: 42 })],
+      [observation('1', { views: 100, saves: 42 })],
+    );
+    const report = renderReport(summaryFor(rows), rows);
+
+    expect(report).not.toMatch(/argument about our own acquisition path/);
+  });
+
   it('keeps Apify and local bandwidth explicitly separate', () => {
     const rows = joinComparison(
       [target('1')],

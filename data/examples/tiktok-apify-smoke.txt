@@ -29,9 +29,11 @@
 #   - if it returns something like 3,041,882, it has lower-order detail we do
 #     not — still not proof of exactness, but grounds for a bigger experiment.
 #
-# Our scraper reports `saves` as null for all four (it does not collect
-# collectCount), so Apify's collectCount would be a genuine completeness gain
-# independent of the view question.
+# Our scraper reports `saves` as null for all four. That is down to the endpoint
+# it uses (/embed/v2/, whose payload has no collectCount), not to TikTok
+# withholding the field — the full video-detail parser path in the same file
+# already maps collectCount onto saves. So if Apify returns collectCount, that
+# is an argument about our own acquisition path, not a reason to buy the data.
 https://www.tiktok.com/@emrys8473/video/7643585712641559841
 https://www.tiktok.com/@emrys8473/video/7668862416435907873
 https://www.tiktok.com/@lyndon.films/video/7670640507646741793

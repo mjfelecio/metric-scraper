@@ -284,9 +284,27 @@ rationalised afterwards:
 - if it returns something like 3,041,882, it carries lower-order detail we do
   not — still not proof of exactness, but grounds for a larger experiment.
 
-Separately: our scraper reports `saves` as `null` for all four because it does
-not collect `collectCount`. Apify's `collectCount` would be a real completeness
-gain regardless of how the view question resolves.
+### One field we lose, and why it is not an argument for Apify
+
+Our scraper returns `saves` as `null` on all four. Everything else the embed page
+can give — handle, follower count, `posted_at` — comes back fine, so `saves` is
+the single gap.
+
+It is worth being precise about the cause, because the obvious reading is wrong.
+`TikTokScraper` fetches `/embed/v2/{id}`, whose payload has no `collectCount`
+field, so `parseTikTokEmbedState` sets `saves: null`. The _other_ parser path in
+the same file, for the full `webapp.video-detail` payload, already maps
+`stats.collectCount` onto `saves` and has all along.
+
+So this is a consequence of which endpoint we chose, **not** evidence that saves
+are only obtainable from a paid provider. If Apify returns `collectCount` on the
+smoke run, the honest conclusion is "TikTok exposes this and our current
+acquisition path does not ask for it" — a reason to look at our own endpoint,
+not a reason to buy the data. The report must not be read as "Apify gives us
+saves that we cannot otherwise get."
+
+Changing the production acquisition path is out of scope for this experiment and
+nothing here does it.
 
 ## 10. After the smoke test
 
