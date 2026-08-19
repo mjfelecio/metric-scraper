@@ -25,7 +25,7 @@ import { createLogger, type LogLevel } from '../src/infrastructure/logging/pino-
 import { TikTokScraper } from '../src/platforms/tiktok/tiktok-scraper.js';
 
 import { resolveComparisonPaths, writeArtifacts } from './apify-comparison/artifacts.js';
-import { ClockworksTikTokAdapter } from './apify-comparison/clockworks-tiktok-adapter.js';
+import { adapterFor, supportedActorIds } from './apify-comparison/adapter-registry.js';
 import { CountingHttpClient } from './apify-comparison/counting-http-client.js';
 import { FetchApifyTransport } from './apify-comparison/fetch-apify-transport.js';
 import { loadTargets } from './apify-comparison/load-targets.js';
@@ -53,7 +53,10 @@ program
   )
   .argument('<input>', 'newline-delimited .txt or .json array of TikTok post URLs')
   .option('--execute', 'actually start a paid Apify run (default: dry run, offline)')
-  .option('--actor <id>', `Actor to benchmark (default: ${DEFAULT_ACTOR_ID})`)
+  .option(
+    '--actor <id>',
+    `Actor to benchmark (default: ${DEFAULT_ACTOR_ID}, supported: ${supportedActorIds().join(', ')})`,
+  )
   .option(
     '--max-charge-usd <usd>',
     `dollar ceiling for the run (default: ${DEFAULT_MAX_CHARGE_USD}, hard max: ${HARD_MAX_CHARGE_USD})`,
@@ -90,7 +93,7 @@ program
     const outcome = await runComparison({
       options,
       loaded,
-      adapter: new ClockworksTikTokAdapter(),
+      adapter: adapterFor(options.actor.input),
       scraper: new TikTokScraper(),
       http,
       logger,
