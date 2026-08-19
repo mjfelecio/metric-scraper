@@ -1,6 +1,7 @@
 import { parseCanonicalTikTokUrl } from '../../src/platforms/tiktok/tiktok-url-normalizer.js';
 
 import { type ActorAdapter, type NormalizedRow, type NormalizedRowOk } from './actor-adapter.js';
+import { count, epochToIso, firstString, isRecord } from './row-readers.js';
 import { EMPTY_METRICS, type BenchmarkMetrics, type BenchmarkTarget } from './types.js';
 
 /**
@@ -144,14 +145,7 @@ function readMetrics(row: Record<string, unknown>): BenchmarkMetrics {
 function readPostedAt(row: Record<string, unknown>): string | null {
   const iso = firstString(row.createTimeISO);
   if (iso !== null && !Number.isNaN(Date.parse(iso))) return iso;
-
-  const epoch = count(row.createTime);
-  if (epoch === null || epoch <= 0) return null;
-  // TikTok's `createTime` is seconds; a value large enough to be milliseconds
-  // is treated as such rather than being read as a date in the year 50,000.
-  const ms = epoch > 1e12 ? epoch : epoch * 1_000;
-  const date = new Date(ms);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  return epochToIso(row.createTime);
 }
 
 function readVideoId(row: Record<string, unknown>, url: string | null): string | null {
@@ -182,36 +176,4 @@ function readErrorMessage(row: Record<string, unknown>): string | null {
   if (message !== null) return message;
   if (row.error === true) return 'the Actor flagged this row as an error without a message';
   return null;
-}
-
-/**
- * A count, or `null`.
- *
- * Accepts the numeric strings TikTok payloads sometimes carry, and rejects
- * everything else — including `NaN`, negatives and non-integers. Absence and
- * malformation are the same answer here: we do not know.
- */
-function count(...candidates: readonly unknown[]): number | null {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'number') {
-      if (Number.isSafeInteger(candidate) && candidate >= 0) return candidate;
-      continue;
-    }
-    if (typeof candidate === 'string' && /^\d+$/.test(candidate.trim())) {
-      const parsed = Number(candidate.trim());
-      if (Number.isSafeInteger(parsed)) return parsed;
-    }
-  }
-  return null;
-}
-
-function firstString(...candidates: readonly unknown[]): string | null {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.trim().length > 0) return candidate.trim();
-  }
-  return null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
