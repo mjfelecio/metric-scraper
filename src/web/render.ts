@@ -356,7 +356,7 @@ function proxySourceLine(source: ProxySourceStats): string {
       ${source.validating} validating,
       ${source.admitted} admitted,
       ${source.rejected} rejected,
-      target ${source.desiredActive} active.
+      target ${source.targetCapacity} slots.
       Probes: ${source.probeSuccesses} passed / ${source.probeFailures} failed.
       ${
         source.lastRefreshError === null

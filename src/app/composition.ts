@@ -1,4 +1,4 @@
-import { type AppConfig } from '../config/env.js';
+import { type AppConfig, resolveTargetCapacity } from '../config/env.js';
 import { ProxyAgent } from 'undici';
 import { type Logger } from '../core/logging/logger.js';
 import { MetricsCollector } from '../core/metrics/metrics-collector.js';
@@ -181,6 +181,14 @@ export function createProxySupply(
   config: AppConfig,
   logger: Logger,
   onProxyEvent?: ProxyEventListener,
+  /**
+   * The concurrency the run will actually use, overrides included.
+   *
+   * Passed in rather than read off the config because the supply target is
+   * derived from it: a run started at `--concurrency 100` needs a pool sized
+   * for 100, not for whatever the file said.
+   */
+  concurrency: number = config.concurrency,
 ): ProxySupply {
   const sourceUrl = config.proxy.source.url;
   const pool = createProxyPool(config, logger, onProxyEvent, sourceUrl !== '');
@@ -192,23 +200,32 @@ export function createProxySupply(
   // proxy we are not yet sure works would make an empty pool unrecoverable.
   const http = new FetchHttpClient({ defaultTimeoutMs: config.requestTimeoutMs });
   const settings = config.proxy.source;
+  const targetCapacity = resolveTargetCapacity(config, concurrency);
 
   const source = new ProxySourceManager({
     source: new ProxyScrapeSource({ url: sourceUrl, http, logger }),
     probe: new TcpProxyProbe({ timeoutMs: settings.validateTimeoutMs }),
     roster: pool,
-    desiredActive: settings.desiredActive,
-    minHealthy: settings.minHealthy,
+    targetCapacity,
+    minCapacity: settings.minCapacity,
     validateConcurrency: settings.validateConcurrency,
     refreshIntervalMs: settings.refreshIntervalMs,
     maxCandidates: settings.maxCandidates,
     logger,
   });
 
+  if (config.proxy.maxConcurrentPerProxy === 0) {
+    logger.warn(
+      'PROXY_MAX_CONCURRENT is 0, so per-proxy capacity is unbounded and the supply target ' +
+        'falls back to counting usable proxies; set a limit for the target to mean slots',
+    );
+  }
+
   logger.info(
     {
-      desired_active: settings.desiredActive,
-      min_healthy: settings.minHealthy,
+      target_capacity: targetCapacity,
+      min_capacity: settings.minCapacity,
+      concurrency,
       configured: pool.size,
     },
     'dynamic proxy source configured',
@@ -250,6 +267,11 @@ export function createProxyPool(
     maxConcurrentPerProxy: config.proxy.maxConcurrentPerProxy,
     probationConcurrency: config.proxy.probationConcurrency,
     explorationPeriod: config.proxy.explorationPeriod,
+    acquireWaitMs: config.proxy.acquireWaitMs,
+    // A source-fed pool can be evicted down to nothing and refilled seconds
+    // later. Reading that empty moment as "no proxies wanted" would send the
+    // request out on the origin IP.
+    requireProxy: allowEmpty,
     logger,
     ...(onProxyEvent === undefined ? {} : { onEvent: onProxyEvent }),
   });

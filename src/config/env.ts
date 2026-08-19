@@ -81,6 +81,15 @@ export const AppConfigSchema = z.object({
      * before `requestTimeoutMs` ever gets a chance to.
      */
     connectTimeoutMs: z.number().int().min(1),
+    /**
+     * How long a job waits for a proxy before the attempt fails.
+     *
+     * Only ever spent when waiting could help: a cooldown due to expire, or a
+     * source with candidates left to admit. `0` fails at once. Without it a
+     * burst of evictions failed every in-flight job rather than costing them a
+     * few seconds of latency.
+     */
+    acquireWaitMs: z.number().int().min(0),
 
     /**
      * A live supply of candidate proxies, on top of (never instead of) `pool`.
@@ -92,10 +101,14 @@ export const AppConfigSchema = z.object({
     source: z.object({
       url: z.string(),
       refreshIntervalMs: z.number().int().min(0),
-      /** Usable proxies to aim for. Compare against `SCRAPER_CONCURRENCY`. */
-      desiredActive: z.number().int().min(1),
-      /** Startup waits for this many, not for `desiredActive`. */
-      minHealthy: z.number().int().min(1),
+      /**
+       * Usable capacity to aim for, in concurrent slots. `0` derives it from
+       * the run's effective concurrency, which is the only way the two cannot
+       * silently disagree.
+       */
+      targetCapacity: z.number().int().min(0),
+      /** Startup waits for this much capacity, not for `targetCapacity`. */
+      minCapacity: z.number().int().min(1),
       validateConcurrency: z.number().int().min(1),
       validateTimeoutMs: z.number().int().min(1),
       maxCandidates: z.number().int().min(1),
@@ -140,6 +153,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     loadDotenv({ quiet: true });
   }
   const env = options.env ?? process.env;
+  rejectRetiredKeys(env);
 
   const candidate = {
     logLevel: str(env.LOG_LEVEL) ?? 'info',
@@ -172,11 +186,12 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
       probationConcurrency: int(env, 'PROXY_PROBATION_CONCURRENT', 1),
       explorationPeriod: int(env, 'PROXY_EXPLORATION_PERIOD', 5),
       connectTimeoutMs: int(env, 'PROXY_CONNECT_TIMEOUT_MS', 3_000),
+      acquireWaitMs: int(env, 'PROXY_ACQUIRE_WAIT_MS', 5_000),
       source: {
         url: str(env.PROXY_SOURCE_URL) ?? '',
         refreshIntervalMs: int(env, 'PROXY_SOURCE_REFRESH_MS', 900_000),
-        desiredActive: int(env, 'PROXY_SOURCE_DESIRED_ACTIVE', 20),
-        minHealthy: int(env, 'PROXY_SOURCE_MIN_HEALTHY', 5),
+        targetCapacity: int(env, 'PROXY_SOURCE_TARGET_CAPACITY', 0),
+        minCapacity: int(env, 'PROXY_SOURCE_MIN_CAPACITY', 5),
         validateConcurrency: int(env, 'PROXY_SOURCE_VALIDATE_CONCURRENCY', 10),
         validateTimeoutMs: int(env, 'PROXY_SOURCE_VALIDATE_TIMEOUT_MS', 5_000),
         maxCandidates: int(env, 'PROXY_SOURCE_MAX_CANDIDATES', 5_000),
@@ -223,6 +238,46 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   return parsed.data;
 }
 
+/**
+ * The capacity the proxy supply should aim at, in concurrent slots.
+ *
+ * Unset (`0`) means "however much the run is actually going to use", which is
+ * the only setting under which the target and the concurrency cannot drift
+ * apart — they were separately configured before, and a 5× disagreement between
+ * them went unnoticed for as long as it existed.
+ */
+export function resolveTargetCapacity(config: AppConfig, concurrency: number): number {
+  const configured = config.proxy.source.targetCapacity;
+  return configured > 0 ? configured : Math.max(1, concurrency);
+}
+
+/**
+ * Settings that were removed because their unit changed, and what replaced them.
+ *
+ * These were denominated in proxies; their replacements are denominated in
+ * concurrent slots, which for a pool with an eight-slot ceiling is a number
+ * meaning something up to eight times larger. Silently reading the old value
+ * under the new meaning is exactly the kind of unit error this pair of settings
+ * caused in the first place, so a stale `.env` fails loudly instead.
+ */
+const RETIRED_KEYS: Record<string, string> = {
+  PROXY_SOURCE_DESIRED_ACTIVE: 'PROXY_SOURCE_TARGET_CAPACITY',
+  PROXY_SOURCE_MIN_HEALTHY: 'PROXY_SOURCE_MIN_CAPACITY',
+};
+
+function rejectRetiredKeys(env: EnvSource): void {
+  for (const [retired, replacement] of Object.entries(RETIRED_KEYS)) {
+    if (str(env[retired]) === undefined) continue;
+    throw new ScrapeError({
+      code: 'config_error',
+      message:
+        `invalid configuration — ${retired} has been replaced by ${replacement}, ` +
+        'which is denominated in concurrent slots rather than in proxies; ' +
+        'set the new name to the capacity you want (or leave it unset to follow SCRAPER_CONCURRENCY)',
+    });
+  }
+}
+
 /** Config with secrets removed, safe to log or return from the web API. */
 export function redactConfig(config: AppConfig): Record<string, unknown> {
   const proxyCount = config.proxy.pool
@@ -248,7 +303,7 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
       source:
         config.proxy.source.url === ''
           ? null
-          : { desired_active: config.proxy.source.desiredActive },
+          : { target_capacity: resolveTargetCapacity(config, config.concurrency) },
     },
     session: { configured: config.session.storePath !== null },
     instagram: { ...config.instagram },

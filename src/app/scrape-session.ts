@@ -159,17 +159,22 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     context: { session_id: sessionId },
     logger: sessionLogger,
   });
-  const proxySupply = createProxySupply(config, sessionLogger, (event) => {
-    proxyEvents.record(event);
-  });
+  const concurrency = options.overrides?.concurrency ?? config.concurrency;
+  const targetRpm = options.overrides?.targetRpm ?? config.targetRpm;
+
+  const proxySupply = createProxySupply(
+    config,
+    sessionLogger,
+    (event) => {
+      proxyEvents.record(event);
+    },
+    concurrency,
+  );
   const proxyPool = proxySupply.pool;
   // Stocked before the first cycle so it does not start against an empty pool,
   // then topped up in the background for the rest of the session.
   await proxySupply.source?.start();
   const sessionPool = await createSessionPool(config, sessionLogger);
-
-  const concurrency = options.overrides?.concurrency ?? config.concurrency;
-  const targetRpm = options.overrides?.targetRpm ?? config.targetRpm;
 
   // Session-cumulative counters, updated as results land rather than derived
   // from cycle summaries, so the live timeline is accurate mid-cycle.

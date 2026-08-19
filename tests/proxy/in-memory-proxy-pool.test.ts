@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ScrapeError } from '../../src/core/models/errors.js';
 import { type ProxyLease, type ProxyTarget } from '../../src/core/scraper/lease-ports.js';
 import { type ProxyEvent } from '../../src/core/scraper/pool-ports.js';
+import { type ProxySourceStats } from '../../src/core/scraper/proxy-source-ports.js';
 import { InMemoryProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
 
 function target(name: string): ProxyTarget {
@@ -24,18 +25,31 @@ function pool(options: {
   maxConsecutiveFailures?: number;
   probationConcurrency?: number;
   explorationPeriod?: number;
+  requireProxy?: boolean;
+  acquireWaitMs?: number;
 }): {
   pool: InMemoryProxyPool;
   advance: (ms: number) => void;
+  /** Advances the clock and runs every acquire-wait timer that has come due. */
+  advanceTimers: (ms: number) => Promise<void>;
   events: ProxyEvent[];
   clock: () => number;
 } {
   let current = 0;
   const events: ProxyEvent[] = [];
+  // Acquire-wait timers are driven by the same clock the pool reads, so a test
+  // never has to sit through a real one to observe what waiting does.
+  let timerSequence = 0;
+  const timers = new Map<number, { dueAt: number; fire: () => void }>();
   const instance = new InMemoryProxyPool({
     targets: options.targets ?? options.names.map(target),
     now: () => current,
     onEvent: (event) => events.push(event),
+    setTimer: (fire, ms) => {
+      const id = ++timerSequence;
+      timers.set(id, { dueAt: current + ms, fire });
+      return () => timers.delete(id);
+    },
     ...(options.maxConcurrentPerProxy === undefined
       ? {}
       : { maxConcurrentPerProxy: options.maxConcurrentPerProxy }),
@@ -49,11 +63,22 @@ function pool(options: {
     ...(options.explorationPeriod === undefined
       ? {}
       : { explorationPeriod: options.explorationPeriod }),
+    ...(options.requireProxy === undefined ? {} : { requireProxy: options.requireProxy }),
+    ...(options.acquireWaitMs === undefined ? {} : { acquireWaitMs: options.acquireWaitMs }),
   });
   return {
     pool: instance,
     advance: (ms: number) => {
       current += ms;
+    },
+    advanceTimers: async (ms: number) => {
+      current += ms;
+      for (const [id, timer] of [...timers]) {
+        if (timer.dueAt > current) continue;
+        timers.delete(id);
+        timer.fire();
+      }
+      await flush();
     },
     events,
     clock: () => current,
@@ -91,6 +116,33 @@ function capacities(instance: InMemoryProxyPool): Record<string, number | null> 
       .getStats()
       .perProxy.map((entry) => [entry.id.split('//')[1]!.split('.')[0]!, entry.capacity]),
   );
+}
+
+/**
+ * A source snapshot, so a test can say "more capacity is on its way".
+ *
+ * `candidates` and `validating` are the only two fields the pool reads: they
+ * are what separates a roster that can be refilled from one that cannot.
+ */
+function sourceStats(overrides: Partial<ProxySourceStats> = {}): ProxySourceStats {
+  return {
+    name: 'fake',
+    candidates: 0,
+    validating: 0,
+    admitted: 0,
+    rejected: 0,
+    fetched: 0,
+    malformed: 0,
+    duplicates: 0,
+    refreshes: 1,
+    refreshFailures: 0,
+    lastRefreshAt: 0,
+    lastRefreshError: null,
+    probeSuccesses: 0,
+    probeFailures: 0,
+    targetCapacity: 10,
+    ...overrides,
+  };
 }
 
 /**
@@ -632,7 +684,13 @@ describe('InMemoryProxyPool health', () => {
   });
 
   it('fails loudly when every proxy is cooling down rather than going direct', async () => {
-    const { pool: proxies } = pool({ names: ['a'], maxConsecutiveFailures: 1 });
+    // With no wait budget this is the contract exactly as it was before waiting
+    // existed: nothing usable, so the attempt fails at once.
+    const { pool: proxies } = pool({
+      names: ['a'],
+      maxConsecutiveFailures: 1,
+      acquireWaitMs: 0,
+    });
 
     const lease = await proxies.acquire();
     proxies.markBlocked(lease!, 'blocked');
@@ -764,6 +822,169 @@ describe('InMemoryProxyPool health', () => {
   });
 });
 
+/**
+ * `acquire` when there is nothing to hand out.
+ *
+ * The three cases below look identical from inside the pool and are completely
+ * different to a run: capacity that is seconds away, capacity that is minutes
+ * away, and capacity that is never coming. Answering all three the same way is
+ * what turned a burst of evictions into a run with zero successes.
+ */
+describe('InMemoryProxyPool acquisition under exhaustion', () => {
+  it('waits out a cooldown that expires inside the budget instead of failing the job', async () => {
+    const { pool: proxies, advanceTimers } = pool({
+      names: ['a'],
+      maxConsecutiveFailures: 1,
+      cooldownMs: 1_000,
+      acquireWaitMs: 5_000,
+    });
+
+    const lease = (await proxies.acquire())!;
+    proxies.reportFailure(lease, 'timeout', 'timeout');
+    proxies.release(lease);
+    expect(stateOf(proxies, lease.id)).toBe('cooling');
+
+    let settled = false;
+    const pending = proxies.acquire().then((granted) => {
+      settled = true;
+      return granted;
+    });
+
+    await flush();
+    expect(settled).toBe(false);
+
+    await advanceTimers(1_000);
+    await expect(pending).resolves.not.toBeNull();
+    // A wait that ended in a lease is latency, not degradation.
+    expect(proxies.getStats().poolExhaustedCount).toBe(0);
+  });
+
+  it('waits for a source to admit a replacement while the roster is unusable', async () => {
+    const { pool: proxies } = pool({
+      names: ['a'],
+      maxConsecutiveFailures: 1,
+      // Far outside the budget: nothing but the pending supply justifies waiting.
+      cooldownMs: 600_000,
+      acquireWaitMs: 5_000,
+    });
+    proxies.setSourceStatsProvider(() => sourceStats({ candidates: 5 }));
+
+    const lease = (await proxies.acquire())!;
+    proxies.reportFailure(lease, 'timeout', 'timeout');
+    proxies.release(lease);
+
+    let settled = false;
+    const pending = proxies.acquire().then((granted) => {
+      settled = true;
+      return granted;
+    });
+
+    await flush();
+    expect(settled).toBe(false);
+
+    proxies.add([target('b')], 'fake');
+    await flush();
+
+    await expect(pending).resolves.toMatchObject({ id: 'http://b.example.net:8000' });
+    expect(proxies.getStats().poolExhaustedCount).toBe(0);
+  });
+
+  it('fails at once when every proxy is retired and nothing can replace them', async () => {
+    // Retirement does not expire and no source is attached, so waiting cannot
+    // produce a proxy. The test would time out if the pool waited anyway.
+    const { pool: proxies } = pool({ names: ['a'], maxConsecutiveFailures: 1 });
+
+    const lease = (await proxies.acquire())!;
+    proxies.reportUnsuitable(lease, 'HTTP 451');
+    proxies.release(lease);
+    expect(proxies.getStats().retired).toBe(1);
+
+    await expect(proxies.acquire()).rejects.toThrow(/blocked or cooling down/);
+    expect(proxies.getStats().poolExhaustedCount).toBe(1);
+  });
+
+  it('gives up once the budget runs out, and counts that as an exhaustion', async () => {
+    const { pool: proxies, advanceTimers } = pool({
+      names: ['a'],
+      maxConsecutiveFailures: 1,
+      cooldownMs: 600_000,
+      acquireWaitMs: 5_000,
+    });
+    proxies.setSourceStatsProvider(() => sourceStats({ candidates: 5 }));
+
+    const lease = (await proxies.acquire())!;
+    proxies.reportFailure(lease, 'timeout', 'timeout');
+    proxies.release(lease);
+
+    const pending = proxies.acquire();
+    const rejected = expect(pending).rejects.toThrow(/blocked or cooling down/);
+    await flush();
+
+    await advanceTimers(5_000);
+    await rejected;
+    // Still retryable, so the retry policy's backoff absorbs it exactly as before.
+    expect(proxies.getStats().poolExhaustedCount).toBe(1);
+  });
+
+  it('never answers "go direct" when an empty roster is being fed by a source', async () => {
+    const { pool: proxies } = pool({ names: [], requireProxy: true, acquireWaitMs: 5_000 });
+    proxies.setSourceStatsProvider(() => sourceStats({ validating: 3 }));
+
+    let settled = false;
+    const pending = proxies.acquire().then((granted) => {
+      settled = true;
+      return granted;
+    });
+
+    await flush();
+    // Eviction can empty a source-fed roster for a tick. Reading that as "no
+    // proxies wanted" would put the origin IP on the wire.
+    expect(settled).toBe(false);
+
+    proxies.add([target('fresh')], 'fake');
+    await flush();
+
+    await expect(pending).resolves.toMatchObject({ id: 'http://fresh.example.net:8000' });
+  });
+
+  it('fails rather than returning null when an empty roster has no supply behind it', async () => {
+    const { pool: proxies } = pool({ names: [], requireProxy: true });
+
+    await expect(proxies.acquire()).rejects.toThrow(/empty/);
+    expect(proxies.getStats().poolExhaustedCount).toBe(1);
+  });
+
+  it('still goes direct when no proxies were ever configured', async () => {
+    // The default for local development, and the reason nothing in this
+    // repository needs proxy credentials to run.
+    const { pool: proxies } = pool({ names: [] });
+
+    await expect(proxies.acquire()).resolves.toBeNull();
+    expect(proxies.getStats().poolExhaustedCount).toBe(0);
+  });
+
+  it('does not strand a caller that is cancelled while waiting for capacity', async () => {
+    const { pool: proxies } = pool({
+      names: ['a'],
+      maxConsecutiveFailures: 1,
+      cooldownMs: 600_000,
+      acquireWaitMs: 5_000,
+    });
+    proxies.setSourceStatsProvider(() => sourceStats({ candidates: 1 }));
+    const controller = new AbortController();
+
+    const lease = (await proxies.acquire())!;
+    proxies.reportFailure(lease, 'timeout', 'timeout');
+    proxies.release(lease);
+
+    const waiting = proxies.acquire(controller.signal);
+    await flush();
+    controller.abort();
+
+    await expect(waiting).rejects.toThrow();
+  });
+});
+
 describe('InMemoryProxyPool observability', () => {
   it('reports a proxy that has never been used as untested', () => {
     const { pool: proxies } = pool({ names: ['a', 'b'] });
@@ -874,7 +1095,14 @@ describe('InMemoryProxyPool observability', () => {
   });
 
   it('counts the times the whole pool was out at once', async () => {
-    const { pool: proxies } = pool({ names: ['a'], maxConsecutiveFailures: 1, cooldownMs: 1_000 });
+    const { pool: proxies } = pool({
+      names: ['a'],
+      maxConsecutiveFailures: 1,
+      cooldownMs: 1_000,
+      // The counter means "gave up and threw", so it is measured with waiting
+      // off; an attempt that waits and then succeeds is not an exhaustion.
+      acquireWaitMs: 0,
+    });
 
     const lease = (await proxies.acquire())!;
     proxies.reportFailure(lease, 'timeout', 'timeout');

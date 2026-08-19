@@ -68,7 +68,7 @@ function sourceRow(source: ProxySourceStats | null): ProxySourceSummary | null {
     last_refresh_error: source.lastRefreshError,
     probe_successes: source.probeSuccesses,
     probe_failures: source.probeFailures,
-    desired_active: source.desiredActive,
+    target_capacity: source.targetCapacity,
   };
 }
 

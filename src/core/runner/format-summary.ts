@@ -171,7 +171,7 @@ export function formatRunSummary(summary: RunSummary): string {
       lines.push(
         `  ${pad('source')}${source.name} — ${num(source.admitted)} admitted, ` +
           `${num(source.candidates)} waiting, ${num(source.rejected)} rejected ` +
-          `(target ${num(source.desired_active)} active)`,
+          `(target ${num(source.target_capacity)} slots)`,
       );
       lines.push(
         `  ${pad('validation')}${num(source.probe_successes)} passed / ` +
