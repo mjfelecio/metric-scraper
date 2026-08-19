@@ -91,10 +91,17 @@ export class ClockworksTikTokAdapter implements ActorAdapter {
   /**
    * Reads one dataset row.
    *
-   * Handles both output shapes this Actor family has used: flat
-   * (`playCount` at the top level) and nested (`stats.playCount`). Anything
-   * unrecognised becomes `null`, never `0` — a zero would silently claim the
-   * post has no views, which is the single most damaging thing this benchmark
+   * Flat is the shape this Actor documents: `playCount` and friends at the top
+   * level, the author under `authorMeta`, identity in `id` / `webVideoUrl` /
+   * `submittedVideoUrl`. That is the mapping the live run will exercise.
+   *
+   * The nested (`stats.playCount`, `author.uniqueId`) branch is a defensive
+   * fallback for a build that reverts to TikTok's own payload naming, not a
+   * shape observed on this Actor. It is only ever consulted when the flat field
+   * is absent, so it cannot mask the documented one.
+   *
+   * Anything unrecognised becomes `null`, never `0` — a zero would silently
+   * claim the post has no views, the single most damaging thing this benchmark
    * could get wrong.
    */
   normalizeRow(row: unknown): NormalizedRow {
@@ -154,10 +161,25 @@ function readVideoId(row: Record<string, unknown>, url: string | null): string |
   return parseCanonicalTikTokUrl(url)?.videoId ?? null;
 }
 
-/** Actor error rows vary in shape; all of these have been seen in the wild. */
+/**
+ * Detects an Actor error row.
+ *
+ * `errorCode` is the documented discriminator — this Actor emits rows like
+ * `{ url, input, error, errorCode: "POST_NOT_FOUND_OR_PRIVATE" }` — so it is
+ * checked on its own rather than only as a companion to a message. Missing it
+ * would be quietly expensive: an error row with no recognised message field
+ * would fall through as a *successful* row whose metrics all happen to be
+ * null, which inflates the count of videos Apify handled and turns a source
+ * failure into a fake "Apify reported nothing for this metric".
+ *
+ * The message spellings are belt-and-braces for builds that word it differently.
+ */
 function readErrorMessage(row: Record<string, unknown>): string | null {
+  const code = firstString(row.errorCode);
   const message = firstString(row.error, row.errorMessage, row.errorDescription);
-  if (message !== null && message.length > 0) return message;
+
+  if (code !== null) return message === null ? code : `${code}: ${message}`;
+  if (message !== null) return message;
   if (row.error === true) return 'the Actor flagged this row as an error without a message';
   return null;
 }

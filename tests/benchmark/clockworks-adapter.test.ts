@@ -199,6 +199,34 @@ describe('ClockworksTikTokAdapter.normalizeRow', () => {
     expect(row.message.length).toBeGreaterThan(0);
   });
 
+  /** The shape this Actor actually documents for a failed URL. */
+  it('reads the documented error row, which carries an errorCode', () => {
+    const row = adapter.normalizeRow({
+      url: 'https://www.tiktok.com/@someuser/video/7643585712641559841',
+      input: 'someuser',
+      error: 'Post not found or private',
+      errorCode: 'POST_NOT_FOUND_OR_PRIVATE',
+    });
+
+    expect(row.kind).toBe('error');
+    if (row.kind !== 'error') throw new Error('expected an error row');
+    // The code is machine-readable and worth keeping in front of the message.
+    expect(row.message).toBe('POST_NOT_FOUND_OR_PRIVATE: Post not found or private');
+    // Still joinable, so the failure lands on the right video rather than
+    // becoming an unmatched row.
+    expect(row.videoId).toBe('7643585712641559841');
+  });
+
+  it('treats an errorCode with no message as a failure, not a null-metric success', () => {
+    const row = adapter.normalizeRow({ id: '7643585712641559841', errorCode: 'NOT_FOUND' });
+
+    // The regression that matters: without the errorCode check this fell
+    // through as `ok` with every metric null, inflating Apify's success count.
+    expect(row.kind).toBe('error');
+    if (row.kind !== 'error') throw new Error('expected an error row');
+    expect(row.message).toBe('NOT_FOUND');
+  });
+
   it('rejects a row that is not an object', () => {
     expect(adapter.normalizeRow('nope').kind).toBe('error');
     expect(adapter.normalizeRow(null).kind).toBe('error');

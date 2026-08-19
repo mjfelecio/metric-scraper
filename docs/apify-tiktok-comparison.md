@@ -204,10 +204,20 @@ transport is untouched; delete the decorator and the pipeline is unchanged.
 
 `ActorAdapter` is the only seam that knows a vendor. Implement `buildInput`,
 `describeFeatureFlags` and `normalizeRow`, and the join, delta, precision,
-economics and report code needs no change. `ClockworksTikTokAdapter` reads both
-the flat (`playCount`) and nested (`stats.playCount`) output shapes, each proven
-by a fixture — support is added when a fixture proves the mapping, not when the
-docs suggest it.
+economics and report code needs no change. `ClockworksTikTokAdapter` reads the flat
+output shape this Actor documents — `playCount` and friends at the top level,
+the author under `authorMeta.name` / `.signature` / `.fans`, identity in `id`,
+`webVideoUrl` and `submittedVideoUrl`. The nested (`stats.playCount`,
+`author.uniqueId`) branch is a **defensive fallback** for a build that reverts to
+TikTok's own payload naming, not a shape observed on this Actor; it is consulted
+only when the flat field is absent, so it cannot mask the documented one.
+
+Error rows are detected by `errorCode`, which is the Actor's documented
+discriminator, not only by a message field. That distinction is load-bearing: a
+failed row that carried a code but no recognised message would otherwise be read
+as a _successful_ row whose metrics all happened to be null — inflating the
+count of videos Apify handled and disguising a source failure as "Apify reported
+nothing for this metric".
 
 ## 7. Tests
 
