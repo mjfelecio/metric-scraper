@@ -96,11 +96,21 @@ describe('ApifyClient.startRun', () => {
     await client(transport).startRun(START);
 
     const url = new URL(requests[0]?.url ?? '');
-    expect(url.pathname).toBe('/v2/acts/clockworks~tiktok-scraper/runs');
+    // The documented path is /v2/actors/…; /v2/acts/… is only a legacy alias.
+    expect(url.pathname).toBe('/v2/actors/clockworks~tiktok-scraper/runs');
     expect(url.searchParams.get('maxTotalChargeUsd')).toBe('0.25');
     expect(url.searchParams.get('maxItems')).toBe('1');
+    // `timeout` is in seconds, and `waitForFinish` is capped at 60 by the API.
     expect(url.searchParams.get('timeout')).toBe('120');
     expect(url.searchParams.get('waitForFinish')).toBe('60');
+  });
+
+  it('never asks the API to wait longer than the 60s it allows', async () => {
+    const { transport, requests } = recordingTransport([json(201, runPayload())]);
+    await client(transport).startRun({ ...START, waitForFinishSecs: 600 });
+
+    const waitForFinish = new URL(requests[0]?.url ?? '').searchParams.get('waitForFinish');
+    expect(Number(waitForFinish)).toBeLessThanOrEqual(60);
   });
 
   it('reads cost and bandwidth metadata off the run', async () => {

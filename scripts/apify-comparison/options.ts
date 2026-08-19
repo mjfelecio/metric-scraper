@@ -22,8 +22,9 @@ export const HARD_MAX_URLS = 25;
 export const DEFAULT_LOCAL_TIMEOUT_MS = 15_000;
 export const DEFAULT_APIFY_TIMEOUT_MS = 120_000;
 
-/** Apify's own `waitForFinish` is capped at 60s by the API. */
-export const MAX_WAIT_FOR_FINISH_SECONDS = 60;
+// The `waitForFinish` ceiling lives with the API client that enforces it, and
+// is re-exported here so callers keep a single import for benchmark settings.
+export { MAX_WAIT_FOR_FINISH_SECONDS } from './apify-client.js';
 
 export interface RawOptions {
   readonly inputPath: string;

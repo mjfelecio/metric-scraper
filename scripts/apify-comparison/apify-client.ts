@@ -82,6 +82,9 @@ export interface StartRunInput {
   readonly waitForFinishSecs: number;
 }
 
+/** The API's own ceiling on `waitForFinish`; anything larger is rejected. */
+export const MAX_WAIT_FOR_FINISH_SECONDS = 60;
+
 const MAX_RATE_LIMIT_RETRIES = 3;
 const MAX_SERVER_ERROR_RETRIES = 2;
 const INITIAL_BACKOFF_MS = 1_000;
@@ -119,8 +122,18 @@ export class ApifyClient {
    * the common case for a handful of direct post URLs and costs no polling.
    */
   async startRun(input: StartRunInput): Promise<ApifyRun> {
-    const url = new URL(`${API_BASE}/acts/${input.actorPathId}/runs`);
-    url.searchParams.set('waitForFinish', String(input.waitForFinishSecs));
+    // `/v2/actors/…`, the documented path. `/v2/acts/…` is a legacy alias that
+    // still resolves, but an undocumented alias is not something a paid call
+    // should depend on.
+    const url = new URL(`${API_BASE}/actors/${input.actorPathId}/runs`);
+    // The API caps this at 60 seconds and rejects anything larger. Clamping
+    // here rather than trusting the caller keeps that contract with the client
+    // that actually knows it — a caller that forgets would otherwise turn a
+    // generous timeout into a failed run.
+    url.searchParams.set(
+      'waitForFinish',
+      String(Math.min(input.waitForFinishSecs, MAX_WAIT_FOR_FINISH_SECONDS)),
+    );
     url.searchParams.set('timeout', String(input.timeoutSecs));
     url.searchParams.set('maxItems', String(input.maxItems));
     // The dollar ceiling Apify itself enforces. The local caps in `options.ts`

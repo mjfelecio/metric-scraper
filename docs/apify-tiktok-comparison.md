@@ -200,7 +200,33 @@ ours is what our proxy provider would bill. Ours is measured by a benchmark-only
 since TLS framing and compression are invisible from the client. Production
 transport is untouched; delete the decorator and the pipeline is unchanged.
 
-## 6. Testing a second Actor
+## 6. The API surface it depends on
+
+Every endpoint, query parameter and response field was checked against the
+published API v2 documentation rather than assumed:
+
+| Call             | Path                                                               |
+| ---------------- | ------------------------------------------------------------------ |
+| Start a run      | `POST /v2/actors/{owner~name}/runs`                                |
+| Poll a run       | `GET /v2/actor-runs/{runId}`                                       |
+| Read the dataset | `GET /v2/actor-runs/{runId}/dataset/items?format=json&clean=false` |
+
+The documented run path is `/v2/actors/…`; `/v2/acts/…` is a legacy alias that
+still resolves, and is deliberately not relied on.
+
+Safety parameters on the start call: `maxTotalChargeUsd` (the cost ceiling Apify
+itself enforces, in addition to the local cap), `maxItems`, `timeout` in seconds,
+and `waitForFinish`. The API caps `waitForFinish` at 60 seconds and rejects
+anything larger, so the client clamps it rather than trusting its caller — a
+generous timeout should not become a failed run.
+
+Run creation returns `201` with the run wrapped in `data`; the dataset endpoint
+returns a bare JSON array. All eight documented statuses are handled explicitly:
+`READY` and `RUNNING` keep polling, `SUCCEEDED` is the only success, and
+`FAILED`, `TIMING-OUT`, `TIMED-OUT`, `ABORTING` and `ABORTED` are terminal
+failures.
+
+## 7. Testing a second Actor
 
 `ActorAdapter` is the only seam that knows a vendor. Implement `buildInput`,
 `describeFeatureFlags` and `normalizeRow`, and the join, delta, precision,
@@ -219,7 +245,7 @@ as a _successful_ row whose metrics all happened to be null — inflating the
 count of videos Apify handled and disguising a source failure as "Apify reported
 nothing for this metric".
 
-## 7. Tests
+## 8. Tests
 
 Every test is deterministic and makes no network call, paid or free
 (`tests/benchmark/`, 149 tests). They cover the paid boundary without ever
@@ -228,7 +254,7 @@ Bearer auth carries no leak, each terminal run status is handled, 401/402/429/5x
 behave as intended, malformed metrics stay `null`, and secrets are scrubbed from
 artifacts on disk.
 
-## 8. After the smoke test
+## 9. After the smoke test
 
 The four-URL set is a smoke test — too small to generalise from, and it contains
 no 1M+ post, the band where public rounding is coarsest and where a paid source
