@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ScrapeError } from '../../src/core/models/errors.js';
-import { type ProxyTarget } from '../../src/core/scraper/lease-ports.js';
+import { type ProxyLease, type ProxyTarget } from '../../src/core/scraper/lease-ports.js';
 import { type ProxyEvent } from '../../src/core/scraper/pool-ports.js';
 import { InMemoryProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
 
@@ -22,6 +22,8 @@ function pool(options: {
   maxConcurrentPerProxy?: number;
   cooldownMs?: number;
   maxConsecutiveFailures?: number;
+  probationConcurrency?: number;
+  explorationPeriod?: number;
 }): {
   pool: InMemoryProxyPool;
   advance: (ms: number) => void;
@@ -41,6 +43,12 @@ function pool(options: {
     ...(options.maxConsecutiveFailures === undefined
       ? {}
       : { maxConsecutiveFailures: options.maxConsecutiveFailures }),
+    ...(options.probationConcurrency === undefined
+      ? {}
+      : { probationConcurrency: options.probationConcurrency }),
+    ...(options.explorationPeriod === undefined
+      ? {}
+      : { explorationPeriod: options.explorationPeriod }),
   });
   return {
     pool: instance,
@@ -53,22 +61,82 @@ function pool(options: {
 }
 
 /**
- * Walks every proxy through one success, which is what takes them off
- * probation. Capacity tests are about the steady state, not the ramp.
+ * Walks every proxy through `rounds` successes.
  *
- * The leases are held until every proxy has one, because an unproven proxy
- * only takes one job at a time — releasing between acquisitions would hand
- * them all to whichever proxy proved itself first.
+ * Capacity is earned a doubling at a time, so `rounds` is how far up the ramp
+ * the proxies start: one round is two slots, two rounds four, three rounds
+ * eight. Tests about the steady state say how proven they mean.
+ *
+ * Each round holds every lease until all `count` proxies have one, because a
+ * proxy's earned capacity only grows once per success — releasing in between
+ * would hand the whole round to whichever proxy succeeded first.
  */
-async function prove(instance: InMemoryProxyPool, count: number): Promise<void> {
-  const leases = [];
-  for (let i = 0; i < count; i += 1) {
-    leases.push((await instance.acquire())!);
+async function prove(instance: InMemoryProxyPool, count: number, rounds = 1): Promise<void> {
+  for (let round = 0; round < rounds; round += 1) {
+    const leases = [];
+    for (let i = 0; i < count; i += 1) {
+      leases.push((await instance.acquire())!);
+    }
+    for (const lease of leases) {
+      instance.reportSuccess(lease);
+      instance.release(lease);
+    }
   }
-  for (const lease of leases) {
-    instance.reportSuccess(lease);
-    instance.release(lease);
+}
+
+/** Every proxy's earned capacity, keyed by the name it was built from. */
+function capacities(instance: InMemoryProxyPool): Record<string, number | null> {
+  return Object.fromEntries(
+    instance
+      .getStats()
+      .perProxy.map((entry) => [entry.id.split('//')[1]!.split('.')[0]!, entry.capacity]),
+  );
+}
+
+/**
+ * Lets every pending continuation run.
+ *
+ * A woken waiter travels several microtask hops — resolve, re-check the pool,
+ * resolve `acquire`, then the caller's own `then` — so counting `await`s is a
+ * guess. A macrotask boundary is not.
+ */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Takes leases until the pool blocks, so a test can measure real capacity.
+ *
+ * The probe that finds the pool full is aborted rather than abandoned: an
+ * abandoned `acquire` stays parked as a waiter and would take the next released
+ * slot out from under whatever the test does next.
+ */
+async function drain(instance: InMemoryProxyPool, ceiling = 32): Promise<ProxyLease[]> {
+  const held: ProxyLease[] = [];
+  for (;;) {
+    const probe = new AbortController();
+    let settled = false;
+    const attempt = instance.acquire(probe.signal).then(
+      (lease) => {
+        settled = true;
+        return lease;
+      },
+      () => null,
+    );
+
+    await flush();
+    if (!settled) {
+      probe.abort();
+      await attempt;
+      break;
+    }
+
+    const lease = await attempt;
+    if (lease === null) break;
+    held.push(lease);
+    if (held.length >= ceiling) break;
   }
+  return held;
 }
 
 describe('InMemoryProxyPool rotation', () => {
@@ -187,26 +255,24 @@ describe('InMemoryProxyPool capacity', () => {
     proxies.release(held!);
   });
 
-  it('caps a failing proxy at one in-flight job while healthy ones stay open', async () => {
+  it('holds a repeatedly-failing proxy to one job while a healthy one stays open', async () => {
     const { pool: proxies } = pool({ names: ['a', 'b'], maxConcurrentPerProxy: 4 });
-    await prove(proxies, 2);
+    // Two rounds, so both proxies are at the full four slots before anything
+    // goes wrong: this is about what failure takes away, not about the ramp.
+    await prove(proxies, 2, 2);
 
-    // Put 'a' into an unresolved-failure state; 'b' stays healthy.
-    const first = await proxies.acquire();
-    const dead = first!.id;
-    proxies.reportFailure(first!, 'timeout');
-    proxies.release(first!);
+    // Two failures walk 'a' from 4 slots to 2 to 1 — the floor, but reached by
+    // halving rather than by the last outcome latching it there. 'b' is
+    // untouched, so the pool has 1 + 4 slots left.
+    const first = (await proxies.acquire())!;
+    const suspect = first.id;
+    proxies.reportFailure(first, 'timeout');
+    proxies.release(first);
+    proxies.reportFailure(first, 'timeout');
 
-    const leases: string[] = [];
-    for (let i = 0; i < 5; i += 1) {
-      const lease = await proxies.acquire();
-      leases.push(lease!.id);
-    }
-
-    // The suspect proxy takes exactly one of the five; the proven one absorbs
-    // the rest rather than the pool serializing on the failure.
-    expect(leases.filter((id) => id === dead)).toHaveLength(1);
-    expect(leases.filter((id) => id !== dead)).toHaveLength(4);
+    const held = await drain(proxies);
+    expect(held.filter((lease) => lease.id === suspect)).toHaveLength(1);
+    expect(held.filter((lease) => lease.id !== suspect)).toHaveLength(4);
   });
 
   it('stops handing work to a dead proxy long before the batch is done', async () => {
@@ -235,6 +301,309 @@ describe('InMemoryProxyPool capacity', () => {
     // failure: a proxy that has just failed is behind every working one.
     expect(dead?.requests).toBeLessThanOrEqual(3);
     expect(good?.requests).toBeGreaterThanOrEqual(17);
+  });
+});
+
+describe('InMemoryProxyPool earned capacity', () => {
+  it('ramps a proxy up a doubling at a time and stops at the configured ceiling', async () => {
+    const { pool: proxies } = pool({ names: ['a'], maxConcurrentPerProxy: 8 });
+
+    const seen: (number | null)[] = [capacities(proxies).a!];
+    for (let i = 0; i < 5; i += 1) {
+      const lease = (await proxies.acquire())!;
+      proxies.reportSuccess(lease);
+      proxies.release(lease);
+      seen.push(capacities(proxies).a!);
+    }
+
+    // Three successes to full concurrency: fast enough to matter inside a short
+    // run, slow enough that one lucky response does not open eight slots.
+    expect(seen).toEqual([1, 2, 4, 8, 8, 8]);
+  });
+
+  it('halves capacity on a failure instead of collapsing it to the floor', async () => {
+    const { pool: proxies } = pool({ names: ['a'], maxConcurrentPerProxy: 8 });
+    await prove(proxies, 1, 3);
+    expect(capacities(proxies).a).toBe(8);
+
+    const lease = (await proxies.acquire())!;
+    proxies.reportFailure(lease, 'timeout');
+    proxies.release(lease);
+
+    // The whole of #20: one failure used to latch this proxy at 1 until its
+    // next success, so a pool of intermittently-failing proxies never held more
+    // than one job each however good their record.
+    expect(capacities(proxies).a).toBe(4);
+    const held = await drain(proxies);
+    expect(held).toHaveLength(4);
+  });
+
+  it('lets an 80%-success proxy keep several slots while carrying a recent failure', async () => {
+    const { pool: proxies } = pool({
+      names: ['a'],
+      maxConcurrentPerProxy: 8,
+      maxConsecutiveFailures: 3,
+    });
+
+    // Eight successes and two failures over ten requests, failures last.
+    for (let i = 0; i < 10; i += 1) {
+      const lease = (await proxies.acquire())!;
+      if (i === 4 || i === 9) proxies.reportFailure(lease, 'timeout');
+      else proxies.reportSuccess(lease);
+      proxies.release(lease);
+    }
+
+    const entry = proxies.getStats().perProxy[0]!;
+    expect(entry.successes).toBe(8);
+    expect(entry.consecutiveFailures).toBe(1);
+    expect(entry.state).toBe('probation');
+    // Reduced, not revoked: an unresolved failure costs a proxy half its
+    // concurrency, and its record buys the other half.
+    expect(entry.capacity).toBe(4);
+  });
+
+  it('never lets a proxy that has not succeeded past one job at a time', async () => {
+    const { pool: proxies } = pool({
+      names: ['a'],
+      maxConcurrentPerProxy: 8,
+      maxConsecutiveFailures: 100,
+    });
+
+    for (let i = 0; i < 10; i += 1) {
+      const lease = (await proxies.acquire())!;
+      // A definitive answer about a URL counts as a healthy use of a proxy, but
+      // nothing here is one: this proxy has never carried a request home.
+      proxies.reportFailure(lease, 'ECONNRESET');
+      proxies.release(lease);
+      expect(capacities(proxies).a).toBe(1);
+    }
+
+    expect(await drain(proxies)).toHaveLength(1);
+  });
+
+  it('walks capacity back down a step at a time and brings it back at the floor', async () => {
+    const { pool: proxies, advance } = pool({
+      names: ['a'],
+      maxConcurrentPerProxy: 8,
+      maxConsecutiveFailures: 3,
+      cooldownMs: 60_000,
+    });
+    await prove(proxies, 1, 3);
+
+    const lease = (await proxies.acquire())!;
+    proxies.release(lease);
+    const walk: (number | null)[] = [capacities(proxies).a!];
+    for (let i = 0; i < 3; i += 1) {
+      proxies.reportFailure(lease, 'timeout');
+      walk.push(capacities(proxies).a!);
+    }
+    expect(walk).toEqual([8, 4, 2, 1]);
+    expect(proxies.getStats().perProxy[0]?.state).toBe('cooling');
+
+    advance(60_000);
+    // A served cooldown restores the failure budget, but not the concurrency:
+    // the proxy comes back having to earn its slots again rather than being
+    // handed eight the moment the clock says it may try.
+    expect(proxies.getStats().perProxy[0]?.consecutiveFailures).toBe(0);
+    expect(capacities(proxies).a).toBe(1);
+  });
+
+  it('admits waiters exactly up to capacity, one per release', async () => {
+    const { pool: proxies } = pool({ names: ['a'], maxConcurrentPerProxy: 4 });
+    await prove(proxies, 1, 2);
+    expect(capacities(proxies).a).toBe(4);
+
+    const held = await drain(proxies);
+    expect(held).toHaveLength(4);
+
+    // Two more callers arrive with nothing free. Both must park.
+    const admitted: string[] = [];
+    const waiters = [proxies.acquire(), proxies.acquire()].map(async (pending) => {
+      admitted.push((await pending)!.id);
+    });
+    await flush();
+    expect(admitted).toHaveLength(0);
+
+    proxies.release(held[0]!);
+    await flush();
+    // A broadcast wake-up cannot lose a waiter, and cannot over-admit either:
+    // the second re-checks, finds the pool full again, and parks.
+    expect(admitted).toHaveLength(1);
+
+    proxies.release(held[1]!);
+    await Promise.all(waiters);
+    expect(admitted).toHaveLength(2);
+  });
+
+  it('keeps the ramp out of the way when no per-proxy limit is configured', async () => {
+    const { pool: proxies } = pool({ names: ['a', 'b'] });
+    await prove(proxies, 2);
+
+    const failed = (await proxies.acquire())!;
+    proxies.reportFailure(failed, 'timeout');
+    proxies.release(failed);
+
+    // With no budget to ration there is nothing to ramp, so a failure no longer
+    // costs a working proxy its concurrency — but a proxy that has never worked
+    // is still handed one job at a time, which is the bound that earns its keep.
+    for (const entry of proxies.getStats().perProxy) expect(entry.capacity).toBeNull();
+    expect(proxies.add([target('c')], 'fake')).toBe(1);
+    expect(capacities(proxies).c).toBe(1);
+  });
+});
+
+/**
+ * Runs `count` leases the way the runner does — acquire, report, release — and
+ * returns which proxy served each one.
+ */
+async function runLeases(
+  instance: InMemoryProxyPool,
+  count: number,
+  succeeds: (id: string) => boolean,
+): Promise<string[]> {
+  const served: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const lease = (await instance.acquire())!;
+    served.push(lease.id.split('//')[1]!.split('.')[0]!);
+    if (succeeds(lease.id)) instance.reportSuccess(lease);
+    else instance.reportFailure(lease, 'timeout');
+    instance.release(lease);
+  }
+  return served;
+}
+
+function tally(served: readonly string[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const name of served) counts[name] = (counts[name] ?? 0) + 1;
+  return counts;
+}
+
+describe('InMemoryProxyPool exploration', () => {
+  it('gives a newly admitted proxy traffic while a proven one still has room', async () => {
+    const { pool: proxies } = pool({
+      names: ['proven'],
+      maxConcurrentPerProxy: 8,
+      explorationPeriod: 5,
+    });
+    await prove(proxies, 1, 3);
+    expect(capacities(proxies).proven).toBe(8);
+
+    proxies.add([target('fresh')], 'proxyscrape');
+    const served = await runLeases(proxies, 5, () => true);
+
+    // The whole of #21: the proven proxy has seven free slots, so under strict
+    // tiering the new one would never be selected at all and could never earn
+    // the success it needs to be preferred.
+    expect(served).toContain('fresh');
+    expect(served.indexOf('fresh')).toBeLessThan(5);
+  });
+
+  it('spends about one lease in five on unproven proxies and no more', async () => {
+    const { pool: proxies } = pool({
+      names: ['proven', 'u1', 'u2', 'u3'],
+      maxConcurrentPerProxy: 8,
+      maxConsecutiveFailures: 1_000,
+      explorationPeriod: 5,
+    });
+
+    // Only 'proven' ever works. The others stay unproven for the whole run, so
+    // every lease they get is a lease exploration deliberately spent.
+    const served = await runLeases(proxies, 100, (id) => id.includes('proven.'));
+    const explored = served.filter((name) => name !== 'proven').length;
+
+    // A hard, predictable ceiling on requests spent on unknown proxies — which
+    // is the reason for a fixed share rather than weighted-random selection.
+    expect(explored).toBeGreaterThan(15);
+    expect(explored).toBeLessThanOrEqual(25);
+  });
+
+  it('rotates the exploration budget rather than re-testing one proxy', async () => {
+    const { pool: proxies } = pool({
+      names: ['proven', 'u1', 'u2', 'u3'],
+      maxConcurrentPerProxy: 8,
+      maxConsecutiveFailures: 1_000,
+      explorationPeriod: 5,
+    });
+
+    const served = await runLeases(proxies, 100, (id) => id.includes('proven.'));
+    const counts = tally(served);
+
+    // Least-tried-first, so the budget is shared out instead of being burnt on
+    // whichever unproven proxy happens to sort first.
+    for (const name of ['u1', 'u2', 'u3']) expect(counts[name]).toBeGreaterThan(4);
+  });
+
+  it('bounds what exploration can waste on a proxy that never works', async () => {
+    const { pool: proxies } = pool({
+      names: ['proven', 'dead'],
+      maxConcurrentPerProxy: 8,
+      maxConsecutiveFailures: 3,
+      cooldownMs: 60_000,
+      explorationPeriod: 5,
+    });
+
+    const served = await runLeases(proxies, 100, (id) => id.includes('proven.'));
+
+    // Exploration is self-limiting: a proxy that keeps failing hits the failure
+    // threshold and leaves the eligible set, so the worst case is exactly the
+    // budget the pool already spends discovering any bad proxy.
+    expect(tally(served).dead).toBe(3);
+    expect(proxies.getStats().perProxy.find((e) => e.label === 'p2')?.state).toBe('cooling');
+  });
+
+  it('keeps selection deterministic rather than reaching for randomness', async () => {
+    const outcome = (id: string): boolean => !id.includes('u2.');
+    const first = await runLeases(pool({ names: ['a', 'u1', 'u2'] }).pool, 60, outcome);
+    const second = await runLeases(pool({ names: ['a', 'u1', 'u2'] }).pool, 60, outcome);
+
+    // Same pool, same outcomes, same lease sequence. Random selection would
+    // spread load too, but nothing about it could be reasoned about or tested.
+    expect(first).toEqual(second);
+  });
+
+  it('keeps lease counts within a bounded spread across a working pool', async () => {
+    const names = Array.from({ length: 10 }, (_, index) => `p${index}`);
+    const { pool: proxies } = pool({ names, maxConcurrentPerProxy: 8, explorationPeriod: 5 });
+
+    const served = await runLeases(proxies, 200, () => true);
+    const counts = names.map((name) => tally(served)[name] ?? 0);
+    counts.sort((left, right) => left - right);
+    const median = counts[Math.floor(counts.length / 2)]!;
+
+    // The measured failure in #21 was one proxy taking 19 leases against a
+    // median of 3 while nineteen others idled.
+    expect(counts[0]).toBeGreaterThan(0);
+    expect(counts.at(-1)!).toBeLessThanOrEqual(median * 3);
+  });
+
+  it('falls back to strict preference when exploration is switched off', async () => {
+    const { pool: proxies } = pool({
+      names: ['proven'],
+      maxConcurrentPerProxy: 8,
+      explorationPeriod: 0,
+    });
+    await prove(proxies, 1, 3);
+    proxies.add([target('fresh')], 'proxyscrape');
+
+    const served = await runLeases(proxies, 10, () => true);
+    // The escape hatch: with a budget of zero, an unproven proxy is served only
+    // when the established tier has nothing left to give.
+    expect(served.every((name) => name === 'proven')).toBe(true);
+  });
+
+  it('lets a proxy that has worked before compete after a failure', async () => {
+    const { pool: proxies } = pool({ names: ['a', 'b'], maxConcurrentPerProxy: 4 });
+    await prove(proxies, 2, 2);
+
+    const failed = (await proxies.acquire())!;
+    proxies.reportFailure(failed, 'timeout');
+    proxies.release(failed);
+
+    const served = await runLeases(proxies, 6, () => true);
+    // It goes to the back of the queue, not out of it. Treating one failure as
+    // a demotion to the unproven tier is what kept the proven set at two
+    // members and concentrated every failure on them.
+    expect(new Set(served).size).toBe(2);
   });
 });
 
@@ -517,13 +886,20 @@ describe('InMemoryProxyPool observability', () => {
     expect(proxies.getStats().poolExhaustedCount).toBe(2);
   });
 
-  it('reports capacity and in-flight load across the pool', async () => {
+  it('reports the capacity the pool has earned, not the capacity it may reach', async () => {
     const { pool: proxies } = pool({ names: ['a', 'b'], maxConcurrentPerProxy: 4 });
+
+    // `proxies × limit` is 8, but nothing has earned anything yet.
+    expect(proxies.getStats().capacity).toBe(2);
+
     await prove(proxies, 2);
+    expect(proxies.getStats().capacity).toBe(4);
+
+    await prove(proxies, 2);
+    expect(proxies.getStats().capacity).toBe(8);
 
     const held = (await proxies.acquire())!;
     const stats = proxies.getStats();
-
     expect(stats.capacity).toBe(8);
     expect(stats.totalInFlight).toBe(1);
     expect(stats.inUse).toBe(1);
@@ -610,8 +986,12 @@ describe('InMemoryProxyPool roster', () => {
     const { pool: proxies } = pool({ names: [], targets: [] });
     const base = target('gate');
 
-    expect(proxies.add([{ ...base, username: 'one', url: 'http://one:p@gate.example.net:8000' }])).toBe(1);
-    expect(proxies.add([{ ...base, username: 'two', url: 'http://two:p@gate.example.net:8000' }])).toBe(1);
+    expect(
+      proxies.add([{ ...base, username: 'one', url: 'http://one:p@gate.example.net:8000' }]),
+    ).toBe(1);
+    expect(
+      proxies.add([{ ...base, username: 'two', url: 'http://two:p@gate.example.net:8000' }]),
+    ).toBe(1);
 
     const ids = proxies.getStats().perProxy.map((proxy) => proxy.id);
     expect(new Set(ids).size).toBe(2);

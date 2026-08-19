@@ -23,6 +23,25 @@ import { proxyId, redactEntry } from './proxy-config.js';
 /** Reasons are for reading, not for parsing; a stack-length message helps nobody. */
 const MAX_REASON_LENGTH = 200;
 
+/**
+ * One lease in this many is reserved for a proxy that has never succeeded.
+ *
+ * The tension is deliberate: exploration spends requests on proxies likely to
+ * fail. A fixed share is predictable and easy to bound, which is why it is this
+ * rather than weighted-random selection — and 5 puts the cost at 20% of leases
+ * in the worst case, while the failure threshold bounds what any one bad proxy
+ * can waste.
+ */
+const DEFAULT_EXPLORATION_PERIOD = 5;
+
+/**
+ * Normalised loads closer than this count as equal, so LRU decides.
+ *
+ * `inFlight / capacity` is a ratio of small integers, but it is still floating
+ * point, and an exact `!==` would let representation noise pick a proxy.
+ */
+const LOAD_EPSILON = 1e-9;
+
 export interface InMemoryProxyPoolOptions {
   targets: readonly ProxyTarget[];
   /** Consecutive failures before a proxy is put in cooldown. */
@@ -30,25 +49,32 @@ export interface InMemoryProxyPoolOptions {
   /** How long a failed or blocked proxy stays out of rotation. */
   cooldownMs?: number | undefined;
   /**
-   * Jobs that may share one proxy at a time. `0` means unlimited sharing.
+   * The most jobs any one proxy may hold at a time. `0` means unlimited.
    *
-   * With a limit set, pool capacity becomes `proxies × limit`, which is what
-   * makes adding a proxy add throughput instead of merely spreading the same
-   * global concurrency across more IPs — and what keeps one IP from absorbing
-   * a whole batch.
+   * This is a ceiling, not an allocation: a proxy earns its way up to it (see
+   * `capacityOf`). `proxies × limit` is therefore the pool's *maximum* capacity,
+   * and `ProxyPoolStats.capacity` reports what has actually been earned.
    */
   maxConcurrentPerProxy?: number | undefined;
   /**
-   * In-flight requests allowed on a proxy that has not yet proved itself, or
-   * whose last outcome was a failure. Defaults to 1.
+   * The floor every proxy starts at and can be pushed back down to. Defaults to 1.
    *
-   * Health is evaluated at acquire time, so without this a proxy can be handed
-   * to N jobs before the first of them reports anything — which is how a dead
-   * IP absorbed 30 requests inside a 45 s run despite a 3-failure threshold.
-   * Probation bounds the exposure to roughly `maxConsecutiveFailures`
-   * requests, and only for proxies that are actually suspect.
+   * Health is evaluated at acquire time, so without a floor a proxy can be
+   * handed to N jobs before the first of them reports anything — which is how a
+   * dead IP absorbed 30 requests inside a 45 s run despite a 3-failure
+   * threshold. A proxy that has never succeeded never leaves this floor, which
+   * bounds its exposure to roughly `maxConsecutiveFailures` requests.
    */
   probationConcurrency?: number | undefined;
+  /**
+   * One lease in this many is reserved for a proxy that has never succeeded.
+   * `0` disables exploration entirely. Defaults to 5.
+   *
+   * Without it, a proxy needs a success to be preferred but is scheduled last,
+   * so it never gets the traffic that would earn one — and an 800-proxy pool
+   * behaves like the two-proxy pool that happened to succeed first.
+   */
+  explorationPeriod?: number | undefined;
   /**
    * Notified on every health transition, so a run can keep a record of when a
    * proxy went bad and when it came back. Never called for `healthy ⇄
@@ -87,6 +113,16 @@ interface ProxyEntry {
   blockKind: ProxyBlockKind | null;
   /** Jobs currently holding a lease on this proxy. */
   inFlight: number;
+  /**
+   * Concurrent slots this proxy has earned, before the configured ceiling.
+   *
+   * Doubles on a success and halves on any non-success, floored at
+   * `probationConcurrency`. Kept as state rather than derived from the counters
+   * because what matters is the *order* outcomes arrived in: 8 successes then 2
+   * failures and 2 failures then 8 successes are the same totals and very
+   * different proxies.
+   */
+  trustedSlots: number;
   /** Wall-clock time of the last lease. Reported; not used for ordering. */
   lastUsedAt: number | null;
   firstUsedAt: number | null;
@@ -109,8 +145,14 @@ interface ProxyEntry {
 /**
  * Single-process proxy rotation with health tracking.
  *
- * Rotation is least-loaded then least-recently-used, which spreads load evenly
- * and keeps any one IP from being hammered.
+ * Rotation is two-tiered. Proxies that have succeeded at least once are chosen
+ * by *normalised* load — `inFlight / capacity`, so traffic fills proxies in
+ * proportion to what they have earned — then least-recently-used. One lease in
+ * `explorationPeriod` is reserved for a proxy that has never succeeded,
+ * cheapest-first by request count. The reserved share is what stops the pool
+ * collapsing onto whichever two proxies happened to work first: without it a
+ * proxy needs a success to be preferred but is scheduled last, so it can never
+ * earn one, and adding proxies adds no capacity at all.
  *
  * Health has three levels, because the three ways a proxy goes wrong need
  * different answers:
@@ -121,11 +163,14 @@ interface ProxyEntry {
  *                        since no amount of waiting moves an IP to another
  *                        jurisdiction
  *
- * Capacity is bounded twice over. `maxConcurrentPerProxy` caps a proven proxy;
- * a proxy that has never succeeded, or whose last outcome was a failure, is on
- * probation and capped far lower — health is checked when a lease is handed
- * out, so without that bound a proxy can be given to many jobs before the
- * first one reports back. Waiting for a slot is bounded by the caller's abort
+ * Capacity is earned rather than switched on. Every proxy starts at
+ * `probationConcurrency`, doubles its slots on each success up to
+ * `maxConcurrentPerProxy`, and halves them on each non-success. That keeps the
+ * bound that matters — a proxy that has never worked is still handed exactly
+ * one job at a time, because health is only checked when a lease goes out —
+ * without letting a single failure erase a proxy's whole record, which is what
+ * made pool capacity equal to the number of usable proxies rather than to
+ * `proxies × limit`. Waiting for a slot is bounded by the caller's abort
  * signal, never indefinite.
  *
  * Everything an operator needs to read the pool back — the state each proxy is
@@ -142,6 +187,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
   private readonly cooldownMs: number;
   private readonly maxConcurrentPerProxy: number;
   private readonly probationConcurrency: number;
+  private readonly explorationPeriod: number;
   private readonly onEvent: ProxyEventListener | null;
   private readonly logger: Logger;
   private readonly now: () => number;
@@ -157,6 +203,15 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
    * than no label at all.
    */
   private labelSequence = 0;
+  /**
+   * Leases granted to established proxies since the last exploration.
+   *
+   * Only advanced when an established proxy was actually available, so the
+   * warm-up — where nothing has succeeded yet and every lease necessarily goes
+   * to an unproven proxy — does not bank a burst of exploration to spend the
+   * moment the first proxy succeeds.
+   */
+  private exploreCredit = 0;
   private poolExhaustedCount = 0;
   private sourceStatsProvider: (() => ProxySourceStats) | null = null;
 
@@ -166,6 +221,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
     this.cooldownMs = options.cooldownMs ?? 60_000;
     this.maxConcurrentPerProxy = options.maxConcurrentPerProxy ?? 0;
     this.probationConcurrency = Math.max(1, options.probationConcurrency ?? 1);
+    this.explorationPeriod = Math.max(0, options.explorationPeriod ?? DEFAULT_EXPLORATION_PERIOD);
     this.onEvent = options.onEvent ?? null;
     this.logger = options.logger ?? nullLogger;
     this.add(options.targets, CONFIG_SOURCE);
@@ -204,6 +260,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
         cooldownUntil: null,
         blockKind: null,
         inFlight: 0,
+        trustedSlots: this.probationConcurrency,
         lastUsedAt: null,
         firstUsedAt: null,
         lastSuccessAt: null,
@@ -302,26 +359,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
 
       const free = healthy.filter((entry) => this.hasCapacity(entry));
       if (free.length > 0) {
-        // Proven proxies first, then least-loaded, then least-recently-used.
-        //
-        // Load ordering matters as soon as requests are genuinely concurrent:
-        // several acquisitions can land in the same millisecond, and a pure LRU
-        // tie then keeps returning the same proxy, quietly hammering one IP.
-        //
-        // The proven tier sits above it because a suspect proxy holding one
-        // slow request looks *idle* between attempts, so load ordering alone
-        // steers the batch straight back into it. At the start of a run nothing
-        // is proven yet, so the tier is flat and load still spreads evenly —
-        // it only ever demotes a proxy that has actually failed us.
-        const chosen = free.reduce((best, entry) => {
-          if (this.isProven(entry) !== this.isProven(best)) {
-            return this.isProven(entry) ? entry : best;
-          }
-          if (entry.inFlight !== best.inFlight) {
-            return entry.inFlight < best.inFlight ? entry : best;
-          }
-          return entry.lastUsedSeq < best.lastUsedSeq ? entry : best;
-        });
+        const chosen = this.select(free);
         chosen.inFlight += 1;
         chosen.lastUsedAt = now;
         chosen.firstUsedAt ??= now;
@@ -353,6 +391,10 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
       entry.consecutiveFailures = 0;
       entry.consecutiveUnsuitable = 0;
       entry.lastSuccessAt = now;
+      // Credited even for a straggler reporting in during a cooldown: the
+      // request did work, and unlike clearing the cooldown below, trusting the
+      // proxy with another slot cannot let it back into rotation early.
+      this.earnTrust(entry);
 
       // A straggler must not un-bench a proxy. Health is only evaluated when a
       // lease is handed out, so jobs leased *before* the bench are still in
@@ -382,6 +424,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
         entry.failures += 1;
         entry.consecutiveFailures += 1;
         entry.lastFailureAt = this.now();
+        this.loseTrust(entry);
         this.recordReason(entry, reason, errorCode);
 
         if (entry.consecutiveFailures >= this.maxConsecutiveFailures) {
@@ -409,6 +452,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
         entry.unsuitable += 1;
         entry.consecutiveUnsuitable += 1;
         entry.lastFailureAt = this.now();
+        this.loseTrust(entry);
         this.recordReason(entry, reason, errorCode);
 
         // One 451 may just be a restricted URL. Several in a row with nothing
@@ -443,6 +487,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
         entry.cooldownUntil = this.now() + this.cooldownMs;
         entry.blockKind = 'detected_block';
         entry.lastFailureAt = this.now();
+        this.loseTrust(entry);
         this.recordReason(entry, reason, errorCode);
         this.logger.warn({ proxy_id: entry.id, reason: reason ?? null }, 'proxy marked blocked');
       },
@@ -583,6 +628,11 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
       // it had just cleared, which is a one-strike policy wearing a
       // three-strike name — and it never expired on its own, because a proxy
       // that cannot reach the threshold again is a proxy nothing routes to.
+      //
+      // `trustedSlots` is deliberately not restored with it: the failures that
+      // earned the cooldown have already halved it back to the floor, and a
+      // proxy comes back having to re-earn its concurrency rather than being
+      // handed eight slots the moment the clock says it may try again.
       entry.consecutiveFailures = 0;
       this.emit(entry, from, this.healthOf(entry, now), entry.lastReason, entry.lastErrorCode);
     }
@@ -637,19 +687,96 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
   }
 
   /**
+   * Chooses the proxy for the next lease from those with a free slot.
+   *
+   * Two tiers, split on whether the proxy has ever succeeded. The established
+   * tier serves most leases; a fixed share is reserved for the unproven one so
+   * that a proxy can actually earn the success it needs to be preferred.
+   *
+   * The reservation is only spent when there was something to spend it on: if
+   * the established tier is empty — the whole of a run's warm-up — or every
+   * member of it is full, the unproven tier serves the lease for free. That
+   * keeps the share a bound on *deliberate* exploration rather than an
+   * accounting of every lease an unproven proxy happens to get.
+   */
+  private select(free: readonly ProxyEntry[]): ProxyEntry {
+    const established = free.filter((entry) => entry.successes > 0);
+    const unproven = free.filter((entry) => entry.successes === 0);
+
+    if (unproven.length === 0) return this.pickEstablished(established);
+    if (established.length === 0) return pickUnproven(unproven);
+
+    if (this.explorationPeriod > 0 && this.exploreCredit >= this.explorationPeriod - 1) {
+      this.exploreCredit = 0;
+      return pickUnproven(unproven);
+    }
+    this.exploreCredit += 1;
+    return this.pickEstablished(established);
+  }
+
+  /**
+   * Least-loaded then least-recently-used, with load measured as a *fraction*
+   * of the proxy's own capacity.
+   *
+   * Normalising is what makes the preference for a good proxy real but bounded:
+   * an eight-slot proxy holding two jobs is a quarter full and outranks a
+   * two-slot proxy holding one, so traffic fills proxies in proportion to what
+   * they have earned rather than levelling every proxy at the same raw count.
+   * It also settles the case the old strict tier existed for — a suspect proxy
+   * on one slot holding one slow request reads as completely full, so load
+   * ordering cannot steer the batch back into it between attempts.
+   *
+   * LRU breaks the tie because `Date.now()` cannot: many leases land in the
+   * same millisecond once requests run concurrently, and a wall-clock tie would
+   * keep returning the same proxy.
+   */
+  private pickEstablished(entries: readonly ProxyEntry[]): ProxyEntry {
+    return entries.reduce((best, entry) => {
+      const load = entry.inFlight / this.capacityOf(entry);
+      const bestLoad = best.inFlight / this.capacityOf(best);
+      if (Math.abs(load - bestLoad) > LOAD_EPSILON) return load < bestLoad ? entry : best;
+      return entry.lastUsedSeq < best.lastUsedSeq ? entry : best;
+    });
+  }
+
+  /**
    * How many jobs this proxy may hold right now.
    *
-   * A proxy is trusted with the full limit only once it has actually worked
-   * and has no unresolved failure. Everything else — never used, or failing
-   * since its last success — is on probation, which is what keeps a dead IP
-   * from being handed out tens of times before the first outcome lands. The
-   * gate is per proxy, so healthy IPs keep their full concurrency and nothing
-   * serializes across the pool.
+   * Capacity is earned, not switched on: `trustedSlots` doubles with each
+   * success and halves with each failure, so it tracks demonstrated reliability
+   * rather than the single most recent outcome. Keying it on the last outcome
+   * meant any one failure dropped an otherwise excellent proxy to the floor,
+   * and — since real proxies fail intermittently — nearly everything sat at the
+   * floor nearly always, making pool capacity equal to the number of usable
+   * proxies rather than to `proxies × limit`.
+   *
+   * With no limit configured there is no budget to ration, so the only bound
+   * that still earns its keep is the one on proxies that have never worked:
+   * they stay at the floor, everything else is unbounded.
    */
   private capacityOf(entry: ProxyEntry): number {
-    const limit =
+    if (this.maxConcurrentPerProxy <= 0) {
+      return entry.successes > 0 ? Number.POSITIVE_INFINITY : this.probationConcurrency;
+    }
+    return Math.min(this.maxConcurrentPerProxy, entry.trustedSlots);
+  }
+
+  /** A success doubles the slots the proxy is trusted with, up to the ceiling. */
+  private earnTrust(entry: ProxyEntry): void {
+    const ceiling =
       this.maxConcurrentPerProxy <= 0 ? Number.POSITIVE_INFINITY : this.maxConcurrentPerProxy;
-    return this.isProven(entry) ? limit : Math.min(limit, this.probationConcurrency);
+    entry.trustedSlots = Math.min(ceiling, entry.trustedSlots * 2);
+  }
+
+  /**
+   * A non-success halves them, never below the floor.
+   *
+   * Halving rather than collapsing is the point: a proxy with a good record
+   * still carries most of it after one bad request, and only a run of failures
+   * walks it back down — by which point the cooldown threshold has it anyway.
+   */
+  private loseTrust(entry: ProxyEntry): void {
+    entry.trustedSlots = Math.max(this.probationConcurrency, Math.floor(entry.trustedSlots / 2));
   }
 
   /** Has worked at least once, and has nothing unresolved against it since. */
@@ -675,6 +802,23 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
       signal?.addEventListener('abort', wake, { once: true });
     });
   }
+}
+
+/**
+ * The least-tried unproven proxy, then least-recently-used.
+ *
+ * Fewest requests first is what bounds the wait for a *newly admitted* proxy:
+ * with zero requests it is always the next one explored, so admission to first
+ * traffic takes about one exploration period rather than however long it takes
+ * every established proxy to fill up. It also spends the exploration budget on
+ * the least-known proxy rather than re-testing one that has already had its
+ * chances — those are the ones the failure threshold is busy retiring.
+ */
+function pickUnproven(entries: readonly ProxyEntry[]): ProxyEntry {
+  return entries.reduce((best, entry) => {
+    if (entry.requests !== best.requests) return entry.requests < best.requests ? entry : best;
+    return entry.lastUsedSeq < best.lastUsedSeq ? entry : best;
+  });
 }
 
 /** Stable, non-reversible, and short enough to read in a table. */

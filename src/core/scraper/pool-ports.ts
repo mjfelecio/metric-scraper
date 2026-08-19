@@ -29,7 +29,15 @@ export const PROXY_STATES = [
    * never as the `from` of a transition.
    */
   'untested',
-  /** Usable, capped low: never succeeded, or failing since its last success. */
+  /**
+   * Usable, with an unresolved failure against it: never succeeded, or failing
+   * since its last success.
+   *
+   * Says nothing on its own about how much work it may take — capacity is
+   * earned per proxy and reported in `capacity`. A proxy with a long good
+   * record still holds several slots here; one that has never succeeded holds
+   * exactly one.
+   */
   'probation',
   /** Proven and usable, but every slot it has is taken right now. */
   'saturated',
@@ -88,7 +96,10 @@ export interface ProxyHealth {
   inUse: boolean;
   /** Jobs holding a lease right now. `inUse` is this being non-zero. */
   inFlight: number;
-  /** Jobs it may hold right now, given its health. `null` means unlimited. */
+  /**
+   * Jobs it may hold right now: the concurrency it has earned, capped by the
+   * configured per-proxy limit. `null` means unlimited.
+   */
   capacity: number | null;
   /** Epoch ms of the first lease ever taken on it; `null` if never used. */
   firstUsedAt: number | null;
@@ -118,7 +129,12 @@ export interface ProxyPoolStats {
   saturated: number;
   /** Leases held across the whole pool. The denominator for load skew. */
   totalInFlight: number;
-  /** Sum of per-proxy capacity for usable proxies. `null` when unlimited. */
+  /**
+   * Sum of per-proxy capacity for usable proxies. `null` when unlimited.
+   *
+   * The pool's *actual* ceiling, not `proxies × limit`: capacity is earned, so
+   * this is what a configured `SCRAPER_CONCURRENCY` is really competing for.
+   */
   capacity: number | null;
   /**
    * Times `acquire` found nothing usable and threw.

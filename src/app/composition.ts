@@ -233,9 +233,10 @@ export function createProxyPool(
       {
         proxies: targets.length,
         max_concurrent_per_proxy: config.proxy.maxConcurrentPerProxy,
-        // The ceiling on simultaneous proxied requests. Below the configured
+        // The ceiling on simultaneous proxied requests, reached only once every
+        // proxy has earned its full concurrency. Below the configured
         // concurrency, this — not the queue — is what the run is bounded by.
-        capacity:
+        max_capacity:
           config.proxy.maxConcurrentPerProxy === 0
             ? null
             : targets.length * config.proxy.maxConcurrentPerProxy,
@@ -248,6 +249,7 @@ export function createProxyPool(
     cooldownMs: config.proxy.cooldownMs,
     maxConcurrentPerProxy: config.proxy.maxConcurrentPerProxy,
     probationConcurrency: config.proxy.probationConcurrency,
+    explorationPeriod: config.proxy.explorationPeriod,
     logger,
     ...(onProxyEvent === undefined ? {} : { onEvent: onProxyEvent }),
   });
