@@ -500,6 +500,12 @@ raise), and a missing token, an over-cap URL count or a bad Actor id **refuse** 
 than falling back to running anyway. See
 [`docs/apify-tiktok-comparison.md`](docs/apify-tiktok-comparison.md).
 
+Two Actors have adapters: `clockworks/tiktok-scraper` (TikTok's web payload, the
+control) and `novi/tiktok-scraper-ultimate` (TikTok's mobile `aweme` payload, the
+candidate for less-rounded view counts). Select with `--actor`; an Actor without a
+registered adapter is refused rather than charged for. See
+[docs/apify-tiktok-comparison.md](docs/apify-tiktok-comparison.md).
+
 ## 7. Running the web UI
 
 ```bash

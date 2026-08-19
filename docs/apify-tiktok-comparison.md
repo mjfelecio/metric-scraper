@@ -120,19 +120,22 @@ artifact payload at all.
 
 ### Options
 
-| Flag                      | Default                     | Hard ceiling |
-| ------------------------- | --------------------------- | ------------ |
-| `--execute`               | off (dry run)               | —            |
-| `--actor <id>`            | `clockworks/tiktok-scraper` | —            |
-| `--max-charge-usd <usd>`  | `0.25`                      | `$5`         |
-| `--max-urls <n>`          | `5`                         | `25`         |
-| `--local-timeout-ms <ms>` | `15000`                     | —            |
-| `--apify-timeout-ms <ms>` | `120000`                    | —            |
-| `--output-dir <dir>`      | `./output/comparisons`      | —            |
+| Flag                      | Default                     | Hard ceiling    |
+| ------------------------- | --------------------------- | --------------- |
+| `--execute`               | off (dry run)               | —               |
+| `--actor <id>`            | `clockworks/tiktok-scraper` | registered only |
+| `--max-charge-usd <usd>`  | `0.25`                      | `$5`            |
+| `--max-urls <n>`          | `5`                         | `25`            |
+| `--local-timeout-ms <ms>` | `15000`                     | —               |
+| `--apify-timeout-ms <ms>` | `120000`                    | —               |
+| `--output-dir <dir>`      | `./output/comparisons`      | —               |
 
 The hard ceilings are in code and unreachable by any flag. `--max-charge-usd 250`
 is one slipped keystroke from `2.50`, so it is refused rather than honoured.
 `APIFY_ACTOR_ID` is also read from the environment when `--actor` is absent.
+`--actor` accepts only an Actor that has a registered adapter — today
+`clockworks/tiktok-scraper` (the control) and `novi/tiktok-scraper-ultimate`
+(the candidate). Anything else is refused before a request is made; see §7.
 
 ## 4. What it produces
 
@@ -244,6 +247,72 @@ failed row that carried a code but no recognised message would otherwise be read
 as a _successful_ row whose metrics all happened to be null — inflating the
 count of videos Apify handled and disguising a source failure as "Apify reported
 nothing for this metric".
+
+### The two Actor families, and why the second one exists
+
+The two supported Actors are not two vendors selling the same data. They read
+different TikTok surfaces, and that — not scraper quality — is what decides
+whether a view count is rounded.
+
+|                | `clockworks/tiktok-scraper`               | `novi/tiktok-scraper-ultimate`                          |
+| -------------- | ----------------------------------------- | ------------------------------------------------------- |
+| Payload family | TikTok **web**                            | TikTok **mobile** (`aweme`)                             |
+| Field shape    | `playCount`, `authorMeta`, `webVideoUrl`  | `statistics.play_count`, `author.unique_id`, `aweme_id` |
+| Input          | `postURLs` + many paid add-ons to disable | `startUrls` + `maxItems`, no add-ons at all             |
+| Price          | per result                                | from $0.28 / 1,000 videos                               |
+
+TikTok rounds `playCount` server-side above some threshold across its whole web
+API family — the behaviour reported in `davidteather/TikTok-Api#950`, where the
+web API returned 4,300,000 for a video an independent counter showed as
+4,291,312. Our own scraper reads that same rounded number off `/embed/v2/`
+(`itemInfos.playCount`), because the exact-count endpoint it also calls,
+`/player/api/v1/items`, returns `digg_count`, `comment_count` and `share_count`
+but **no** play count. Views are the one metric with no exact source in our
+current path.
+
+So Clockworks is expected to return the number we already have. It is kept as
+the **control**, not the candidate. `novi/tiktok-scraper-ultimate` is the
+candidate because the mobile payload is the surface unrounded view counts are
+believed to come from. Believed, not established — the adapter exists to test
+the claim, and a more granular number is still not a proof of an exact one.
+
+### Choosing an Actor is now a hard error, not a silent one
+
+`--actor` used to change only the API request path while the Clockworks adapter
+stayed hardcoded. Pointing it at another vendor would have sent Clockworks field
+names — which Apify **ignores silently** rather than rejecting — and then parsed
+a snake_case dataset with a camelCase reader. The run would start, the charge
+would land, every metric would come back null, and nothing in the output would
+say why.
+
+`adapterFor()` in `adapter-registry.ts` now resolves the id to its adapter and
+throws on anything unregistered, naming what is supported. Both `owner/name` and
+the `owner~name` request-path spelling resolve to the same adapter.
+
+### What the Novi adapter deliberately does not do
+
+It sends exactly two fields, `startUrls` and `maxItems`, and nothing else:
+
+- `startUrls` is a list of **plain strings**, per the published `stringList`
+  editor — not the `[{ url }]` request objects most Apify Actors take. Wrapping
+  them would be dropped in silence: a paid run against an empty URL list.
+- `maxItems` has a schema minimum of 20, so it cannot cap a four-URL smoke test.
+  What actually bounds spend is the number of URLs submitted and the
+  platform-level `maxTotalChargeUsd`.
+- This Actor publishes **no** download, comment, subtitle or AI options, so
+  there is nothing to switch off. No reassuring `shouldDownloadVideos: false`
+  lines are invented for the artifact — an unknown field is dropped without
+  error, so it would look like protection while being nothing of the kind.
+- The search-mode fields (`keywords`, `dateRange`, `location`, `sortType`) are
+  left unset. Submitting URLs and a search query together is how a four-video
+  benchmark becomes a thousand-result bill.
+
+Failure rows matter here because the Actor warns that **a 404 URL is still
+charged**, while documenting no error shape. Three signals are checked: a
+non-zero `status_code` (TikTok's mobile API marks success with `0`), the generic
+Apify error spellings, and structural emptiness — a row with neither an id nor a
+`statistics` block. Without that last check a charged 404 would read as a
+success whose metrics all happened to be null.
 
 ## 8. Tests
 
