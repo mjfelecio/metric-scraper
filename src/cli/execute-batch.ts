@@ -60,9 +60,14 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
 
   const sink = new JsonlFileSink({ filePath: paths.snapshots });
   const proxyEvents = new ProxyEventLog({ filePath: paths.proxyEvents, logger });
-  const proxySupply = createProxySupply(config, logger, (event) => {
-    proxyEvents.record(event);
-  });
+  const proxySupply = createProxySupply(
+    config,
+    logger,
+    (event) => {
+      proxyEvents.record(event);
+    },
+    options.overrides?.concurrency ?? config.concurrency,
+  );
   await proxySupply.source?.start();
 
   const built = await buildRunner({

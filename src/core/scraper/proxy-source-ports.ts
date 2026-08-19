@@ -74,8 +74,13 @@ export interface ProxySourceStats {
   lastRefreshError: string | null;
   probeSuccesses: number;
   probeFailures: number;
-  /** Target the manager is replenishing towards. */
-  desiredActive: number;
+  /**
+   * Usable capacity the manager is replenishing towards, in concurrent slots.
+   *
+   * Slots rather than proxies, so it is directly comparable with the run's
+   * configured concurrency instead of meaning something several times smaller.
+   */
+  targetCapacity: number;
 }
 
 /**

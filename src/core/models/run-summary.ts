@@ -99,7 +99,8 @@ export const ProxySourceSummarySchema = z.object({
   last_refresh_error: z.string().nullable(),
   probe_successes: z.number().int().nonnegative(),
   probe_failures: z.number().int().nonnegative(),
-  desired_active: z.number().int().nonnegative(),
+  /** Usable capacity the supply aims at, in concurrent slots. */
+  target_capacity: z.number().int().nonnegative(),
 });
 export type ProxySourceSummary = z.infer<typeof ProxySourceSummarySchema>;
 

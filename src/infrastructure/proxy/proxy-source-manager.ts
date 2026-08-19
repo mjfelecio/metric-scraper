@@ -31,10 +31,23 @@ export interface ProxySourceManagerOptions {
   probe: ProxyProbe;
   /** The pool's membership surface. Never its leasing surface. */
   roster: ProxyRoster;
-  /** Usable proxies to aim for. Replenishment stops once this is met. */
-  desiredActive?: number | undefined;
-  /** `start` blocks until this many are admitted, not until `desiredActive`. */
-  minHealthy?: number | undefined;
+  /**
+   * Usable *capacity* to aim for, in concurrent slots. Replenishment stops once
+   * the pool can serve this many simultaneous requests.
+   *
+   * Slots, not proxies, because slots are what a run consumes: the caller sets
+   * this from `SCRAPER_CONCURRENCY`, and the two are then denominated in the
+   * same unit and cannot silently disagree. Counting proxies instead meant a
+   * roster of dead entries could satisfy a target it had no way to serve.
+   */
+  targetCapacity?: number | undefined;
+  /**
+   * Capacity `start` blocks for, rather than the full `targetCapacity`.
+   *
+   * Doubles as the eviction floor: the roster is never reaped below this many
+   * entries that could still come back. See `reap`.
+   */
+  minCapacity?: number | undefined;
   /** Simultaneous probes. Bounds the load validation puts on our own host. */
   validateConcurrency?: number | undefined;
   refreshIntervalMs?: number | undefined;
@@ -74,8 +87,8 @@ export class ProxySourceManager {
   private readonly source: ProxySource;
   private readonly probe: ProxyProbe;
   private readonly roster: ProxyRoster;
-  private readonly desiredActive: number;
-  private readonly minHealthy: number;
+  private readonly targetCapacity: number;
+  private readonly minCapacity: number;
   private readonly validateConcurrency: number;
   private readonly refreshIntervalMs: number;
   private readonly replenishIntervalMs: number;
@@ -106,8 +119,8 @@ export class ProxySourceManager {
     this.source = options.source;
     this.probe = options.probe;
     this.roster = options.roster;
-    this.desiredActive = Math.max(1, options.desiredActive ?? 20);
-    this.minHealthy = Math.max(1, Math.min(options.minHealthy ?? 5, this.desiredActive));
+    this.targetCapacity = Math.max(1, options.targetCapacity ?? 10);
+    this.minCapacity = Math.max(1, Math.min(options.minCapacity ?? 5, this.targetCapacity));
     this.validateConcurrency = Math.max(1, options.validateConcurrency ?? 10);
     this.refreshIntervalMs = Math.max(0, options.refreshIntervalMs ?? 900_000);
     this.replenishIntervalMs = Math.max(100, options.replenishIntervalMs ?? 2_000);
@@ -119,9 +132,9 @@ export class ProxySourceManager {
   }
 
   /**
-   * Fills the pool to `minHealthy`, then keeps it topped up in the background.
+   * Fills the pool to `minCapacity`, then keeps it topped up in the background.
    *
-   * Waiting for `desiredActive` here would hold a run behind a target the list
+   * Waiting for `targetCapacity` here would hold a run behind a target the list
    * may simply not be able to meet — free proxies fail validation far more
    * often than they pass. The floor is what scraping actually needs to begin;
    * the target is approached while it runs.
@@ -133,15 +146,15 @@ export class ProxySourceManager {
 
     await this.refreshOnce();
     for (let round = 0; round < MAX_BOOTSTRAP_ROUNDS; round += 1) {
-      if (this.usableCount() >= this.minHealthy || this.pending.length === 0) break;
-      await this.replenishOnce(this.minHealthy);
+      if (this.usableCapacity() >= this.minCapacity || this.pending.length === 0) break;
+      await this.replenishOnce(this.minCapacity);
     }
 
-    const usable = this.usableCount();
-    if (usable < this.minHealthy) {
+    const capacity = this.usableCapacity();
+    if (capacity < this.minCapacity) {
       this.logger.warn(
-        { source: this.source.name, usable, min_healthy: this.minHealthy },
-        'proxy source could not reach the minimum healthy pool size; starting anyway',
+        { source: this.source.name, capacity, min_capacity: this.minCapacity },
+        'proxy source could not reach the minimum usable capacity; starting anyway',
       );
     }
 
@@ -197,52 +210,60 @@ export class ProxySourceManager {
   }
 
   /**
-   * Brings the roster back up to strength, validating only what is missing.
+   * Brings usable capacity back up to strength, validating only what is missing.
    *
-   * Evicting first matters: a proxy that never worked and has already burned
-   * its failure budget is occupying a slot a fresh candidate could use, and
-   * waiting out its cooldown buys nothing when there are hundreds more waiting.
+   * Admission runs *before* eviction, so a replacement is already on the roster
+   * before anything leaves it — a swap rather than a drop and a later refill.
+   * Reaping first is what let eviction outrun the replenish tick and empty the
+   * roster outright, and it bought nothing: a hopeless proxy is by definition
+   * cooling or retired, so it contributes no capacity and cannot mask a deficit
+   * whichever order the two run in.
    */
-  async replenishOnce(target: number = this.desiredActive): Promise<void> {
+  async replenishOnce(target: number = this.targetCapacity): Promise<void> {
     if (this.replenishing) return;
     this.replenishing = true;
     try {
+      // One admitted proxy is worth at least one slot, so the capacity deficit
+      // is an upper bound on how many candidates are worth probing this tick.
+      const deficit = target - this.usableCapacity();
+      if (deficit > 0) await this.admit(this.harvest(deficit));
       this.reap();
-
-      const deficit = target - this.usableCount();
-      if (deficit <= 0) return;
-
-      const batch = this.harvest(deficit);
-      if (batch.length === 0) return;
-
-      const admitted: ProxyTarget[] = [];
-      await this.forEachLimited(batch, async (record) => {
-        const result = await this.probe.probe(record.target, this.aborter?.signal);
-        if (result.ok) {
-          this.probeSuccesses += 1;
-          record.state = 'admitted';
-          admitted.push(record.target);
-        } else {
-          this.probeFailures += 1;
-          this.reject(record, 'probe_failed');
-        }
-      });
-
-      if (admitted.length > 0) {
-        const added = this.roster.add(admitted, this.source.name);
-        this.logger.info(
-          {
-            source: this.source.name,
-            admitted: added,
-            probed: batch.length,
-            usable: this.usableCount(),
-          },
-          'admitted validated proxies into the pool',
-        );
-      }
     } finally {
       this.replenishing = false;
     }
+  }
+
+  /** Probes a harvested batch and adds whatever passes to the roster. */
+  private async admit(batch: readonly CandidateRecord[]): Promise<void> {
+    if (batch.length === 0) return;
+
+    const admitted: ProxyTarget[] = [];
+    await this.forEachLimited(batch, async (record) => {
+      const result = await this.probe.probe(record.target, this.aborter?.signal);
+      if (result.ok) {
+        this.probeSuccesses += 1;
+        record.state = 'admitted';
+        admitted.push(record.target);
+      } else {
+        this.probeFailures += 1;
+        this.reject(record, 'probe_failed');
+      }
+    });
+
+    if (admitted.length === 0) return;
+
+    // `add` skips ids the pool already holds, so a candidate that is somehow
+    // offered twice cannot become two entries with two separate health records.
+    const added = this.roster.add(admitted, this.source.name);
+    this.logger.info(
+      {
+        source: this.source.name,
+        admitted: added,
+        probed: batch.length,
+        capacity: this.usableCapacity(),
+      },
+      'admitted validated proxies into the pool',
+    );
   }
 
   getStats(): ProxySourceStats {
@@ -272,7 +293,7 @@ export class ProxySourceManager {
       lastRefreshError: this.lastRefreshError,
       probeSuccesses: this.probeSuccesses,
       probeFailures: this.probeFailures,
-      desiredActive: this.desiredActive,
+      targetCapacity: this.targetCapacity,
     };
   }
 
@@ -333,20 +354,40 @@ export class ProxySourceManager {
   }
 
   /**
-   * Removes source-supplied entries that are not worth a slot.
+   * Removes source-supplied entries that are not worth a slot, but never the
+   * last of them.
    *
-   * The rule is deliberately narrow: only a proxy that has *never* succeeded
+   * The rule is narrow to begin with: only a proxy that has *never* succeeded
    * and has already been benched. Anything that ever worked keeps its place and
    * serves its cooldown like any other proxy, and configured entries are never
    * touched at all — the static list has to keep behaving exactly as before.
+   *
+   * On top of that sits a floor, because eviction with no floor is how the
+   * roster reached zero and took the whole run with it. The two cases differ in
+   * whether anything is being given up:
+   *
+   * - **retired** — the exit node is in the wrong jurisdiction and will never
+   *   serve again. Keeping it protects nothing, so it always goes.
+   * - **cooling** — it comes back when the cooldown expires. That is the only
+   *   path back once the candidate list is exhausted, so the roster keeps at
+   *   least `minCapacity` entries that could still return.
+   *
+   * The floor counts entries rather than slots, because entries are what
+   * eviction removes; a proxy at the probation floor is worth one slot, so the
+   * two units coincide exactly where this rule binds.
    */
   private reap(): void {
-    for (const health of this.roster.getStats().perProxy) {
+    const roster = this.roster.getStats().perProxy;
+    let viable = roster.filter((health) => !health.retired).length;
+
+    for (const health of roster) {
       if (health.source === CONFIG_SOURCE) continue;
       if (!isHopeless(health)) continue;
+      if (!health.retired && viable <= this.minCapacity) continue;
       // `evict` refuses while leases are outstanding; those jobs still owe an
       // outcome, so we simply try again on the next tick.
       if (!this.roster.evict(health.id)) continue;
+      if (!health.retired) viable -= 1;
 
       const record = this.candidates.get(health.id);
       if (record !== undefined) {
@@ -364,8 +405,26 @@ export class ProxySourceManager {
     record.rejection = reason;
   }
 
-  private usableCount(): number {
-    return this.roster.getStats().available;
+  /**
+   * Concurrent slots the pool can actually serve right now.
+   *
+   * `ProxyPoolStats.capacity` is already exactly this — the sum of earned
+   * per-proxy capacity over entries that are neither retired nor cooling — so
+   * this reads the pool's own number rather than keeping a second one. It is
+   * what makes candidate quantity and usable capacity different quantities: a
+   * proxy that has never succeeded contributes the probation floor, not the
+   * ceiling, and a benched one contributes nothing at all.
+   *
+   * Counting `available` instead is what let 19 dead-but-unbenched proxies
+   * report a pool at full strength while 817 candidates went unvalidated.
+   */
+  private usableCapacity(): number {
+    const stats = this.roster.getStats();
+    // `null` means no per-proxy limit is configured, so a single working proxy
+    // can take unbounded work and slots stop being a meaningful unit. Falling
+    // back to usable proxies keeps the deficit finite; the composition root
+    // warns that a capacity target wants `PROXY_MAX_CONCURRENT` set.
+    return stats.capacity ?? stats.available;
   }
 
   /** Bounded-concurrency map. Small and local; a queue library would be more. */

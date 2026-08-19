@@ -392,9 +392,14 @@ export class RunService {
         context: { run_id: state.runId },
         logger: this.logger,
       });
-      const proxySupply = createProxySupply(this.config, this.logger, (event) => {
-        proxyEvents.record(event);
-      });
+      const proxySupply = createProxySupply(
+        this.config,
+        this.logger,
+        (event) => {
+          proxyEvents.record(event);
+        },
+        request.concurrency,
+      );
       await proxySupply.source?.start();
 
       const built = await buildRunner({

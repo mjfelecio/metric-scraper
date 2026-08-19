@@ -35,12 +35,26 @@ const MAX_REASON_LENGTH = 200;
 const DEFAULT_EXPLORATION_PERIOD = 5;
 
 /**
+ * How long `acquire` will wait for capacity to come back before failing.
+ *
+ * Sized against the thing that actually restores it: a candidate source
+ * replenishes on a 2 s tick and validates with a 5 s probe timeout, so a few
+ * seconds covers a tick and the admission that follows it. Long enough to turn
+ * a burst of evictions into latency; short enough that a pool with nothing left
+ * to give still fails the attempt rather than stalling the run.
+ */
+const DEFAULT_ACQUIRE_WAIT_MS = 5_000;
+
+/**
  * Normalised loads closer than this count as equal, so LRU decides.
  *
  * `inFlight / capacity` is a ratio of small integers, but it is still floating
  * point, and an exact `!==` would let representation noise pick a proxy.
  */
 const LOAD_EPSILON = 1e-9;
+
+/** Cancels a pending timer. Returned by `setTimer` so callers cannot leak one. */
+type CancelTimer = () => void;
 
 export interface InMemoryProxyPoolOptions {
   targets: readonly ProxyTarget[];
@@ -75,6 +89,33 @@ export interface InMemoryProxyPoolOptions {
    * behaves like the two-proxy pool that happened to succeed first.
    */
   explorationPeriod?: number | undefined;
+  /**
+   * Refuse to hand out a direct connection, even with an empty roster.
+   *
+   * An empty roster normally means "no proxies configured, go direct", which is
+   * the default for local development. That reading is wrong for a pool a
+   * dynamic source fills: there, empty means the roster has been evicted down to
+   * nothing, and answering `null` would put the origin IP on the wire at exactly
+   * the moment the pool is least healthy. Set whenever a source is attached.
+   */
+  requireProxy?: boolean | undefined;
+  /**
+   * How long `acquire` waits for capacity to come back before failing.
+   *
+   * `0` fails at once, which is what the pool did before a dynamic source could
+   * restore capacity within seconds. Waiting is bounded by this *and* by the
+   * caller's abort signal, and only happens while recovery is actually
+   * plausible — see `acquire`.
+   */
+  acquireWaitMs?: number | undefined;
+  /**
+   * Schedules a callback, returning its own canceller. Defaults to `setTimeout`.
+   *
+   * Injected for the same reason `now` is: a test that has to wait out a real
+   * timer to observe the waiting path is a slow test that reports flakes as
+   * failures.
+   */
+  setTimer?: ((fn: () => void, ms: number) => CancelTimer) | undefined;
   /**
    * Notified on every health transition, so a run can keep a record of when a
    * proxy went bad and when it came back. Never called for `healthy ⇄
@@ -188,6 +229,9 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
   private readonly maxConcurrentPerProxy: number;
   private readonly probationConcurrency: number;
   private readonly explorationPeriod: number;
+  private readonly requireProxy: boolean;
+  private readonly acquireWaitMs: number;
+  private readonly setTimer: (fn: () => void, ms: number) => CancelTimer;
   private readonly onEvent: ProxyEventListener | null;
   private readonly logger: Logger;
   private readonly now: () => number;
@@ -222,6 +266,9 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
     this.maxConcurrentPerProxy = options.maxConcurrentPerProxy ?? 0;
     this.probationConcurrency = Math.max(1, options.probationConcurrency ?? 1);
     this.explorationPeriod = Math.max(0, options.explorationPeriod ?? DEFAULT_EXPLORATION_PERIOD);
+    this.requireProxy = options.requireProxy ?? false;
+    this.acquireWaitMs = Math.max(0, options.acquireWaitMs ?? DEFAULT_ACQUIRE_WAIT_MS);
+    this.setTimer = options.setTimer ?? defaultSetTimer;
     this.onEvent = options.onEvent ?? null;
     this.logger = options.logger ?? nullLogger;
     this.add(options.targets, CONFIG_SOURCE);
@@ -328,10 +375,30 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
     return this.entries.length;
   }
 
+  /**
+   * Leases a proxy, waiting for one only while waiting can actually help.
+   *
+   * The three ways there is nothing to hand out need three different answers,
+   * and collapsing them is what turned a burst of evictions into a whole-run
+   * outage:
+   *
+   * - **nothing configured** — go direct, unless `requireProxy` says this pool
+   *   is fed by a source and an empty roster means "evicted to nothing" rather
+   *   than "none wanted". Answering `null` there would put the origin IP on the
+   *   wire at the worst possible moment.
+   * - **temporarily out** — a cooldown expires inside the wait budget, or a
+   *   source still holds candidates it could admit. Recovery is seconds away,
+   *   so the attempt waits and costs latency instead of failing a job.
+   * - **nothing left** — every proxy retired, no supply behind them. No amount
+   *   of waiting produces a proxy, so this fails immediately, exactly as before.
+   *
+   * Silently falling back to a direct connection is never one of the answers.
+   * Waiting is bounded by `acquireWaitMs` and by the caller's signal, and the
+   * error raised when the budget runs out is the same retryable one as before,
+   * so the retry policy's backoff still absorbs a genuinely benched pool.
+   */
   async acquire(signal?: AbortSignal): Promise<ProxyLease | null> {
-    if (this.entries.length === 0) {
-      return null;
-    }
+    const deadline = this.now() + this.acquireWaitMs;
 
     for (;;) {
       if (signal?.aborted === true) {
@@ -342,21 +409,10 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
       // Expired cooldowns are noticed here rather than by a timer, so a proxy
       // coming back is recorded at the first moment it could matter.
       this.refresh(now);
+
+      if (this.entries.length === 0 && !this.requireProxy) return null;
+
       const healthy = this.entries.filter((entry) => this.isUsable(entry, now));
-
-      if (healthy.length === 0) {
-        // Every proxy is cooling down. Failing loudly is better than silently
-        // going direct, which would expose the origin IP. Waiting would not
-        // help either: a cooldown outlasts a sensible request timeout, so the
-        // retry policy's backoff is the right place to absorb this.
-        this.poolExhaustedCount += 1;
-        throw new ScrapeError({
-          code: 'proxy_error',
-          message: `all ${this.entries.length} configured proxies are blocked or cooling down`,
-          retryable: true,
-        });
-      }
-
       const free = healthy.filter((entry) => this.hasCapacity(entry));
       if (free.length > 0) {
         const chosen = this.select(free);
@@ -368,9 +424,67 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
         return { id: chosen.id, target: chosen.target };
       }
 
-      // Healthy proxies exist but all are at their concurrency limit.
-      await this.waitForRelease(signal);
+      if (healthy.length > 0) {
+        // Usable proxies exist but all are at their concurrency limit. A lease
+        // is outstanding and will come back, so this wait needs no deadline
+        // beyond the caller's own.
+        await this.waitForCapacity(signal, null);
+        continue;
+      }
+
+      const budget = deadline - now;
+      const recoverAt = this.earliestEligibleAt(now);
+      const waitForCooldown = recoverAt !== null && recoverAt - now <= budget;
+      const waitForSupply = this.supplyPending();
+
+      if (budget <= 0 || (!waitForCooldown && !waitForSupply)) {
+        this.poolExhaustedCount += 1;
+        throw new ScrapeError({
+          code: 'proxy_error',
+          message:
+            this.entries.length === 0
+              ? 'the proxy pool is empty and its source has no candidates left to admit'
+              : `all ${this.entries.length} configured proxies are blocked or cooling down`,
+          retryable: true,
+        });
+      }
+
+      // Wake for whichever comes first: a cooldown we decided to sit out, or
+      // the end of the budget. An admission or a release wakes us sooner.
+      await this.waitForCapacity(
+        signal,
+        waitForCooldown ? Math.min(budget, recoverAt - now) : budget,
+      );
     }
+  }
+
+  /**
+   * When the first benched proxy is due back, or `null` if none ever is.
+   *
+   * Retired proxies are skipped: a jurisdiction block does not expire, so they
+   * are the difference between "wait, this comes back" and "nothing here will".
+   */
+  private earliestEligibleAt(now: number): number | null {
+    let earliest: number | null = null;
+    for (const entry of this.entries) {
+      if (entry.retired || entry.cooldownUntil === null || entry.cooldownUntil <= now) continue;
+      if (earliest === null || entry.cooldownUntil < earliest) earliest = entry.cooldownUntil;
+    }
+    return earliest;
+  }
+
+  /**
+   * Whether a source could still admit a proxy this pool does not have yet.
+   *
+   * Read from the source's own published counters rather than from a second
+   * copy of them: the manager already publishes `candidates` and `validating`
+   * through `setSourceStatsProvider`, and those are exactly the states that mean
+   * "more capacity may arrive shortly".
+   */
+  private supplyPending(): boolean {
+    const stats = this.sourceStatsProvider?.();
+    if (stats === undefined || stats === null) return false;
+    return stats.candidates > 0 || stats.validating > 0;
   }
 
   release(lease: ProxyLease): void {
@@ -792,16 +906,49 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
     for (const wake of waiting) wake();
   }
 
-  private waitForRelease(signal?: AbortSignal): Promise<void> {
+  /**
+   * Parks until something could have changed, then lets the caller re-check.
+   *
+   * Woken by a release, by an admission, by the abort signal, or — when
+   * `timeoutMs` is set — by the clock, which is what lets `acquire` sit out a
+   * cooldown or a replenish tick without a busy loop. Every path settles once
+   * and cleans up both the timer and the listener; a waiter that resolved twice
+   * would take a slot out from under whoever else was woken.
+   */
+  private waitForCapacity(
+    signal: AbortSignal | undefined,
+    timeoutMs: number | null,
+  ): Promise<void> {
     return new Promise<void>((resolve) => {
+      let settled = false;
+      let cancelTimer: CancelTimer | null = null;
+
       const wake = (): void => {
+        if (settled) return;
+        settled = true;
+        cancelTimer?.();
         signal?.removeEventListener('abort', wake);
         resolve();
       };
+
       this.waiters.push(wake);
       signal?.addEventListener('abort', wake, { once: true });
+      if (timeoutMs !== null) cancelTimer = this.setTimer(wake, Math.max(0, timeoutMs));
     });
   }
+}
+
+/**
+ * `setTimeout`, deliberately without `unref`.
+ *
+ * A pending acquire-wait is a job blocked on this timer for its answer, and the
+ * replenish loop that could unblock it is itself unref'd — so letting the
+ * process exit here would end a run mid-flight with nothing written. The wait is
+ * bounded by `acquireWaitMs`, which bounds how long this can hold the loop open.
+ */
+function defaultSetTimer(fn: () => void, ms: number): CancelTimer {
+  const timer = setTimeout(fn, ms);
+  return () => clearTimeout(timer);
 }
 
 /**

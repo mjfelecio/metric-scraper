@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { loadConfig, redactConfig } from '../../src/config/env.js';
+import { loadConfig, redactConfig, resolveTargetCapacity } from '../../src/config/env.js';
 
 function load(env: Record<string, string | undefined>) {
   return loadConfig({ env, dotenv: false });
@@ -103,6 +103,50 @@ describe('loadConfig', () => {
   });
 });
 
+describe('loadConfig proxy supply', () => {
+  it('defaults the supply target to following SCRAPER_CONCURRENCY', () => {
+    const config = load({ SCRAPER_CONCURRENCY: '40' });
+
+    // `0` is not "no target": it is "whatever the run is actually going to
+    // use", which is the only setting under which the two cannot drift apart.
+    expect(config.proxy.source.targetCapacity).toBe(0);
+    expect(resolveTargetCapacity(config, 40)).toBe(40);
+    expect(config.proxy.source.minCapacity).toBe(5);
+    expect(config.proxy.acquireWaitMs).toBe(5_000);
+  });
+
+  it('lets an explicit target capacity win over the concurrency', () => {
+    const config = load({ SCRAPER_CONCURRENCY: '10', PROXY_SOURCE_TARGET_CAPACITY: '64' });
+
+    expect(resolveTargetCapacity(config, 10)).toBe(64);
+  });
+
+  it('follows the concurrency a run was actually started with', () => {
+    const config = load({ SCRAPER_CONCURRENCY: '10' });
+
+    // A run started at `--concurrency 100` needs a pool sized for 100, not for
+    // whatever the config file happened to say.
+    expect(resolveTargetCapacity(config, 100)).toBe(100);
+  });
+
+  it('refuses the settings it replaced rather than reading them in a new unit', () => {
+    // These were denominated in proxies; their replacements are slots, so the
+    // same number means something several times larger. Reading it silently is
+    // the exact unit error this pair of settings caused to begin with.
+    expect(() => load({ PROXY_SOURCE_DESIRED_ACTIVE: '20' })).toThrow(
+      /PROXY_SOURCE_DESIRED_ACTIVE .*PROXY_SOURCE_TARGET_CAPACITY/,
+    );
+    expect(() => load({ PROXY_SOURCE_MIN_HEALTHY: '5' })).toThrow(
+      /PROXY_SOURCE_MIN_HEALTHY .*PROXY_SOURCE_MIN_CAPACITY/,
+    );
+  });
+
+  it('ignores a retired setting that is present but empty', () => {
+    // An empty value is how every other setting in this file says "unset".
+    expect(() => load({ PROXY_SOURCE_DESIRED_ACTIVE: '' })).not.toThrow();
+  });
+});
+
 describe('redactConfig', () => {
   it('never exposes proxy credentials', () => {
     const config = load({
@@ -114,5 +158,17 @@ describe('redactConfig', () => {
     expect(redacted).not.toContain('secret');
     expect(redacted).not.toContain('proxy-a.example.net');
     expect(redactConfig(config)['proxy']).toEqual({ configured: 2, source: null });
+  });
+
+  it('reports the supply target it resolved, not the raw setting', () => {
+    const config = load({
+      PROXY_SOURCE_URL: 'https://example.net/proxies.txt',
+      SCRAPER_CONCURRENCY: '32',
+    });
+
+    expect(redactConfig(config)['proxy']).toEqual({
+      configured: 0,
+      source: { target_capacity: 32 },
+    });
   });
 });
