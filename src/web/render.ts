@@ -3,7 +3,7 @@ import { summarizeFailureConcentration } from '../core/metrics/proxy-insights.js
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type ScrapeStatus } from '../core/models/status.js';
 import { type ProxyHealth, type ProxyState } from '../core/scraper/pool-ports.js';
-import { type ProxySourceStats } from '../core/scraper/proxy-source-ports.js';
+import { type ProxyProbeStage, type ProxySourceStats } from '../core/scraper/proxy-source-ports.js';
 import { formatDuration } from '../core/schedule/duration.js';
 
 import { isRunActive, type AppState } from './state.js';
@@ -357,13 +357,36 @@ function proxySourceLine(source: ProxySourceStats): string {
       ${source.admitted} admitted,
       ${source.rejected} rejected,
       target ${source.targetCapacity} slots.
-      Probes: ${source.probeSuccesses} passed / ${source.probeFailures} failed.
+      Probes: ${source.probeSuccesses} passed / ${source.probeFailures} failed
+      (${probeStageBreakdown(source)}).
+      Admitted ${source.admittedTotal}, tried ${source.admittedTried},
+      of which ${source.admittedProven} ever succeeded${
+        source.admissionToFirstSuccessRate === null
+          ? ''
+          : ` — ${(source.admissionToFirstSuccessRate * 100).toFixed(0)}%`
+      }.
       ${
         source.lastRefreshError === null
           ? ''
           : `Last refresh failed: ${escapeHtml(source.lastRefreshError)}.`
       }
     </p>`;
+}
+
+/**
+ * Which layer is doing the rejecting, in the order a probe meets them.
+ *
+ * Named rather than numbered because the names are the diagnosis: a run
+ * failing mostly at `tunnel` is being fed hosts that are not proxies, and one
+ * failing at `tls` is being intercepted. Empty stages are dropped so the line
+ * stays short on a healthy run.
+ */
+function probeStageBreakdown(source: ProxySourceStats): string {
+  const stages: readonly ProxyProbeStage[] = ['connect', 'tunnel', 'tls', 'response'];
+  const parts = stages
+    .filter((stage) => source.probeFailuresByStage[stage] > 0)
+    .map((stage) => `${stage} ${source.probeFailuresByStage[stage]}`);
+  return parts.length === 0 ? 'no failures' : parts.join(', ');
 }
 
 function proxyRow(proxy: ProxyHealth, now: number): string {

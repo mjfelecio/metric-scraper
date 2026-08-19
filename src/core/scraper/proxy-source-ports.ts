@@ -17,21 +17,42 @@ export type CandidateState = 'candidate' | 'validating' | 'admitted' | 'rejected
 /** Why a candidate will never be tried again during this process. */
 export type RejectionReason = 'probe_failed' | 'evicted' | 'retired' | 'pool_full';
 
+/**
+ * How far a probe got before it stopped. `null` on a pass.
+ *
+ * Kept as a first-class field rather than folded into `reason` because the
+ * stage is the diagnosis: `tunnel` says the host is a web server rather than a
+ * proxy, `tls` says it is intercepting our traffic, and `response` says it is
+ * rewriting it. A free list contains all three, and a single failure counter
+ * cannot tell an operator which one it is drowning in.
+ */
+export type ProxyProbeStage = 'connect' | 'tunnel' | 'tls' | 'response';
+
 export interface ProxyProbeResult {
   ok: boolean;
   /** How long the probe took, for reporting. */
   durationMs: number;
   /** Redacted, short. `null` when the probe passed. */
   reason: string | null;
+  /** The stage that failed. `null` when the probe passed. */
+  stage: ProxyProbeStage | null;
 }
 
 /**
- * Cheap reachability check, run before a candidate is allowed into the pool.
+ * Proof that a candidate can carry our traffic, run before it joins the pool.
  *
- * Deliberately transport-level and target-agnostic: it answers "is anything
- * listening" and nothing more. Whether a proxy is *useful* for TikTok or
- * Instagram is decided by the pool's probation tier on real traffic, which is
- * what keeps validation from becoming a second source of upstream load.
+ * The property to establish is the one the scrapers actually depend on: within
+ * the production latency budget, the proxy opens a CONNECT tunnel to an
+ * arbitrary TLS origin, forwards a handshake that validates against the public
+ * trust store, and returns the origin's own response unmodified. Everything
+ * below that — a host merely accepting a TCP connection — is not evidence:
+ * measured against a live ProxyScrape list, 76% of the candidates that pass a
+ * TCP connect cannot complete a single HTTPS request.
+ *
+ * What it deliberately does *not* establish is whether TikTok or Instagram will
+ * serve this exit node. That is target policy, it changes minute to minute, and
+ * it is settled by the pool's probation tier on real jobs — which costs nothing
+ * extra, because those jobs were going to run anyway.
  */
 export interface ProxyProbe {
   probe(target: ProxyTarget, signal?: AbortSignal): Promise<ProxyProbeResult>;
@@ -74,6 +95,35 @@ export interface ProxySourceStats {
   lastRefreshError: string | null;
   probeSuccesses: number;
   probeFailures: number;
+  /**
+   * Probe failures split by the stage that rejected them.
+   *
+   * The whole point of a layered probe is that the layers are distinguishable:
+   * a list that fails mostly at `connect` is stale, one that fails mostly at
+   * `tunnel` is full of web servers, and one failing at `tls` is being
+   * intercepted. Same total, three different operator responses.
+   */
+  probeFailuresByStage: Readonly<Record<ProxyProbeStage, number>>;
+  /**
+   * Candidates ever admitted, cumulative.
+   *
+   * Distinct from `admitted`, which is a live gauge that drops again when a
+   * proxy is evicted. Only a cumulative count can denominate the rate below.
+   */
+  admittedTotal: number;
+  /** Of those, how many the pool ever actually leased. */
+  admittedTried: number;
+  /** Of those tried, how many went on to record at least one real success. */
+  admittedProven: number;
+  /**
+   * `admittedProven / admittedTried`, or `null` before anything was tried.
+   *
+   * The number the validation strategy is answerable to. Denominated in
+   * admissions that were *given a chance*, not in admissions: a proxy the run
+   * never needed says nothing about the probe either way, and counting it as a
+   * failure would make the rate fall as the pool got healthier.
+   */
+  admissionToFirstSuccessRate: number | null;
   /**
    * Usable capacity the manager is replenishing towards, in concurrent slots.
    *

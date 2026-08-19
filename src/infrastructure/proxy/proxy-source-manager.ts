@@ -5,6 +5,7 @@ import {
   CONFIG_SOURCE,
   type CandidateState,
   type ProxyProbe,
+  type ProxyProbeStage,
   type ProxyRoster,
   type ProxySource,
   type ProxySourceStats,
@@ -66,6 +67,19 @@ interface CandidateRecord {
   readonly firstSeenAt: number;
   lastSeenAt: number;
   rejection: RejectionReason | null;
+  /** The stage that rejected it, when the rejection came from a probe. */
+  probeStage: ProxyProbeStage | null;
+  /**
+   * Whether the pool ever leased it, and whether it ever worked.
+   *
+   * Sticky, and kept on the candidate rather than read off the pool, because
+   * the pool forgets an evicted proxy entirely — and every proxy it evicts is
+   * one that never succeeded. Reading the rate off the roster would therefore
+   * delete exactly the failures it is meant to count, and a pool churning hard
+   * would report a rate approaching 1 while achieving very little.
+   */
+  everTried: boolean;
+  everSucceeded: boolean;
 }
 
 /**
@@ -114,6 +128,13 @@ export class ProxySourceManager {
   private lastRefreshError: string | null = null;
   private probeSuccesses = 0;
   private probeFailures = 0;
+  private readonly probeFailuresByStage: Record<ProxyProbeStage, number> = {
+    connect: 0,
+    tunnel: 0,
+    tls: 0,
+    response: 0,
+  };
+  private admittedTotal = 0;
 
   constructor(options: ProxySourceManagerOptions) {
     this.source = options.source;
@@ -242,11 +263,13 @@ export class ProxySourceManager {
       const result = await this.probe.probe(record.target, this.aborter?.signal);
       if (result.ok) {
         this.probeSuccesses += 1;
+        this.admittedTotal += 1;
         record.state = 'admitted';
         admitted.push(record.target);
       } else {
         this.probeFailures += 1;
-        this.reject(record, 'probe_failed');
+        if (result.stage !== null) this.probeFailuresByStage[result.stage] += 1;
+        this.reject(record, 'probe_failed', result.stage);
       }
     });
 
@@ -271,11 +294,15 @@ export class ProxySourceManager {
     let validating = 0;
     let admitted = 0;
     let rejected = 0;
+    let admittedTried = 0;
+    let admittedProven = 0;
     for (const record of this.candidates.values()) {
       if (record.state === 'candidate') candidates += 1;
       else if (record.state === 'validating') validating += 1;
       else if (record.state === 'admitted') admitted += 1;
       else rejected += 1;
+      if (record.everTried) admittedTried += 1;
+      if (record.everSucceeded) admittedProven += 1;
     }
 
     return {
@@ -293,6 +320,11 @@ export class ProxySourceManager {
       lastRefreshError: this.lastRefreshError,
       probeSuccesses: this.probeSuccesses,
       probeFailures: this.probeFailures,
+      probeFailuresByStage: { ...this.probeFailuresByStage },
+      admittedTotal: this.admittedTotal,
+      admittedTried,
+      admittedProven,
+      admissionToFirstSuccessRate: admittedTried === 0 ? null : admittedProven / admittedTried,
       targetCapacity: this.targetCapacity,
     };
   }
@@ -326,6 +358,9 @@ export class ProxySourceManager {
         firstSeenAt: now,
         lastSeenAt: now,
         rejection: null,
+        probeStage: null,
+        everTried: false,
+        everSucceeded: false,
       });
       this.pending.push(id);
       added += 1;
@@ -378,6 +413,7 @@ export class ProxySourceManager {
    */
   private reap(): void {
     const roster = this.roster.getStats().perProxy;
+    this.observeSuccesses(roster);
     let viable = roster.filter((health) => !health.retired).length;
 
     for (const health of roster) {
@@ -400,9 +436,34 @@ export class ProxySourceManager {
     }
   }
 
-  private reject(record: CandidateRecord, reason: RejectionReason): void {
+  private reject(
+    record: CandidateRecord,
+    reason: RejectionReason,
+    probeStage: ProxyProbeStage | null = null,
+  ): void {
     record.state = 'rejected';
     record.rejection = reason;
+    record.probeStage = probeStage;
+  }
+
+  /**
+   * Marks candidates the pool has since seen succeed.
+   *
+   * Runs on the replenish tick, and once more on `stop`, because the pool's own
+   * record of a proxy disappears when it is evicted — and eviction is exactly
+   * what happens to the proxies this rate is trying to count. Reading it here
+   * rather than inside `getStats` is not a style choice: the pool publishes
+   * these stats *through* `getStats`, so asking it for them from there would
+   * recurse.
+   */
+  private observeSuccesses(roster: readonly ProxyHealth[]): void {
+    for (const health of roster) {
+      if (health.requests === 0) continue;
+      const record = this.candidates.get(health.id);
+      if (record === undefined) continue;
+      record.everTried = true;
+      if (health.successes > 0) record.everSucceeded = true;
+    }
   }
 
   /**

@@ -101,6 +101,27 @@ describe('loadConfig', () => {
     const config = load({ SCRAPER_REQUEST_TIMEOUT_MS: '15000', PROXY_CONNECT_TIMEOUT_MS: '3000' });
     expect(config.proxy.connectTimeoutMs).toBe(3_000);
   });
+
+  it('rejects a validation budget that leaves nothing after the connect phase', () => {
+    // Validation spends the connect budget reaching the proxy and still owes a
+    // tunnel, a handshake and a round trip. Configure it at or below the
+    // connect budget and every candidate fails at the next stage, so the pool
+    // starves while the counters insist the probe is working.
+    expect(() =>
+      load({ PROXY_CONNECT_TIMEOUT_MS: '3000', PROXY_SOURCE_VALIDATE_TIMEOUT_MS: '3000' }),
+    ).toThrow(/PROXY_SOURCE_VALIDATE_TIMEOUT_MS/);
+    expect(() =>
+      load({ PROXY_CONNECT_TIMEOUT_MS: '3000', PROXY_SOURCE_VALIDATE_TIMEOUT_MS: '2000' }),
+    ).toThrow(/PROXY_SOURCE_VALIDATE_TIMEOUT_MS/);
+  });
+
+  it('accepts a validation budget with room for the stages after connect', () => {
+    const config = load({
+      PROXY_CONNECT_TIMEOUT_MS: '3000',
+      PROXY_SOURCE_VALIDATE_TIMEOUT_MS: '5000',
+    });
+    expect(config.proxy.source.validateTimeoutMs).toBe(5_000);
+  });
 });
 
 describe('loadConfig proxy supply', () => {

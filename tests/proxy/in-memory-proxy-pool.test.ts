@@ -140,6 +140,11 @@ function sourceStats(overrides: Partial<ProxySourceStats> = {}): ProxySourceStat
     lastRefreshError: null,
     probeSuccesses: 0,
     probeFailures: 0,
+    probeFailuresByStage: { connect: 0, tunnel: 0, tls: 0, response: 0 },
+    admittedTotal: 0,
+    admittedTried: 0,
+    admittedProven: 0,
+    admissionToFirstSuccessRate: null,
     targetCapacity: 10,
     ...overrides,
   };

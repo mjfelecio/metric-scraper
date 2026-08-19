@@ -4,6 +4,7 @@ import { type ProxyTarget } from '../../src/core/scraper/lease-ports.js';
 import {
   type ProxyProbe,
   type ProxyProbeResult,
+  type ProxyProbeStage,
   type ProxySource,
   type ProxySourceFetchResult,
 } from '../../src/core/scraper/proxy-source-ports.js';
@@ -49,7 +50,11 @@ class FakeProbe implements ProxyProbe {
   readonly probed: string[] = [];
   inFlight = 0;
   maxInFlight = 0;
-  constructor(private readonly passes: (target: ProxyTarget) => boolean) {}
+  constructor(
+    private readonly passes: (target: ProxyTarget) => boolean,
+    /** Which layer a rejection is attributed to, when a test cares. */
+    private readonly failAt: (target: ProxyTarget) => ProxyProbeStage = () => 'connect',
+  ) {}
 
   async probe(target: ProxyTarget): Promise<ProxyProbeResult> {
     this.probed.push(`${target.host}:${target.port}`);
@@ -58,7 +63,9 @@ class FakeProbe implements ProxyProbe {
     await Promise.resolve();
     this.inFlight -= 1;
     const ok = this.passes(target);
-    return { ok, durationMs: 1, reason: ok ? null : 'ECONNREFUSED' };
+    if (ok) return { ok, durationMs: 1, reason: null, stage: null };
+    const stage = this.failAt(target);
+    return { ok, durationMs: 1, reason: 'ECONNREFUSED', stage };
   }
 }
 
@@ -78,6 +85,7 @@ function build(options: {
   validateConcurrency?: number | undefined;
   configured?: string[] | undefined;
   maxConcurrentPerProxy?: number | undefined;
+  failAt?: ((target: ProxyTarget) => ProxyProbeStage) | undefined;
 }) {
   const pool = new InMemoryProxyPool({
     targets: (options.configured ?? []).map(parseProxyEntry),
@@ -87,7 +95,7 @@ function build(options: {
     acquireWaitMs: 0,
   });
   const source = new FakeSource(options.list);
-  const probe = new FakeProbe(options.passes ?? (() => true));
+  const probe = new FakeProbe(options.passes ?? (() => true), options.failAt);
   const manager = new ProxySourceManager({
     source,
     probe,
@@ -630,5 +638,98 @@ describe('ProxySourceManager and the rotation model', () => {
     expect(served).toContain(fresh.id);
     const after = pool.getStats().perProxy.find((proxy) => proxy.id === fresh.id)!;
     expect(after.capacity).toBe(2);
+  });
+
+  describe('reporting what validation actually bought', () => {
+    it('splits probe failures by the layer that rejected them', async () => {
+      // One counter cannot tell a stale list from a list of web servers, and
+      // the two call for opposite responses — refresh, or change source.
+      const { manager } = build({
+        list: targets(6),
+        passes: () => false,
+        targetCapacity: 6,
+        failAt: (target) => (target.host === '10.0.0.1' ? 'tls' : 'tunnel'),
+      });
+
+      await manager.refreshOnce();
+      await manager.replenishOnce();
+
+      const stats = manager.getStats();
+      expect(stats.probeFailures).toBe(6);
+      expect(stats.probeFailuresByStage).toEqual({
+        connect: 0,
+        tunnel: 5,
+        tls: 1,
+        response: 0,
+      });
+    });
+
+    it('reports no admission rate at all before anything has been admitted', async () => {
+      const { manager } = build({ list: targets(3), passes: () => false, targetCapacity: 3 });
+
+      await manager.refreshOnce();
+      await manager.replenishOnce();
+
+      expect(manager.getStats()).toMatchObject({
+        admittedTotal: 0,
+        admittedTried: 0,
+        admittedProven: 0,
+        admissionToFirstSuccessRate: null,
+      });
+    });
+
+    it('measures successes against admissions that were actually tried', async () => {
+      // Denominating on admissions instead would mean a run that needed only
+      // one of four proxies reported a 25% success rate for a probe that was
+      // right every time.
+      const { pool, manager } = build({ list: targets(4), targetCapacity: 4 });
+
+      await manager.refreshOnce();
+      await manager.replenishOnce();
+      expect(manager.getStats().admittedTotal).toBe(4);
+
+      const lease = (await pool.acquire())!;
+      pool.reportSuccess(lease);
+      pool.release(lease);
+      // The flags are set on the replenish tick, which is where the pool is read.
+      await manager.replenishOnce();
+
+      expect(manager.getStats()).toMatchObject({
+        admittedTotal: 4,
+        admittedTried: 1,
+        admittedProven: 1,
+        admissionToFirstSuccessRate: 1,
+      });
+    });
+
+    it('keeps evicted proxies in the denominator, so the rate cannot flatter itself', async () => {
+      // The pool forgets an evicted entry entirely, and every entry it evicts
+      // is one that never worked. Deriving the rate from the roster would
+      // therefore delete exactly the failures it is meant to count, and a pool
+      // churning hard would report a rate approaching 1 while achieving little.
+      const { pool, manager } = build({
+        list: targets(3),
+        targetCapacity: 3,
+        minCapacity: 1,
+      });
+
+      await manager.refreshOnce();
+      await manager.replenishOnce();
+      expect(manager.getStats().admittedTotal).toBe(3);
+
+      const doomed = pool.getStats().perProxy[0]!.id;
+      for (let i = 0; i < 12; i += 1) {
+        const lease = await pool.acquire();
+        if (lease === null) break;
+        if (lease.id === doomed) pool.reportFailure(lease, 'ECONNRESET', 'network_error');
+        else pool.reportSuccess(lease);
+        pool.release(lease);
+      }
+      await manager.replenishOnce();
+
+      expect(pool.getStats().perProxy.some((proxy) => proxy.id === doomed)).toBe(false);
+      expect(manager.getStats().admittedTotal).toBe(3);
+      expect(manager.getStats().admittedProven).toBeLessThan(3);
+    });
   });
 });
