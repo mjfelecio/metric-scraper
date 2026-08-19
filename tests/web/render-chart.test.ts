@@ -3,91 +3,14 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { type ThroughputSample } from '../../src/core/metrics/throughput-timeline.js';
 import { createInitialState, type AppState } from '../../src/web/state.js';
 
-/**
- * Minimal DOM stand-in.
- *
- * The dashboard renders with `innerHTML` against a fixed set of element ids
- * (there is no framework), so a map of fake nodes is enough to drive a real
- * render and inspect what comes out.
- */
-interface FakeElement {
-  id: string;
-  innerHTML: string;
-  textContent: string;
-  className: string;
-  checked: boolean;
-  disabled: boolean;
-  style: Record<string, string>;
-  dataset: Record<string, string>;
-  classList: {
-    add: (name: string) => void;
-    remove: (name: string) => void;
-    toggle: (name: string, force?: boolean) => void;
-    contains: (name: string) => boolean;
-  };
-}
-
-const elements = new Map<string, FakeElement>();
-
-function makeElement(id: string): FakeElement {
-  const classes = new Set<string>();
-  return {
-    id,
-    innerHTML: '',
-    textContent: '',
-    className: '',
-    checked: false,
-    disabled: false,
-    style: {},
-    dataset: {},
-    classList: {
-      add: (name) => classes.add(name),
-      remove: (name) => classes.delete(name),
-      toggle: (name, force) => {
-        const on = force ?? !classes.has(name);
-        if (on) classes.add(name);
-        else classes.delete(name);
-      },
-      contains: (name) => classes.has(name),
-    },
-  };
-}
-
-/**
- * `instanceof` checks in `renderControls` need these to exist. Nothing is ever
- * an instance of them, so those branches simply skip — the chart is what these
- * tests are about.
- */
-const DOM_GLOBALS = [
-  'HTMLInputElement',
-  'HTMLTextAreaElement',
-  'HTMLSelectElement',
-  'HTMLButtonElement',
-] as const;
+import { elements, installFakeDom, uninstallFakeDom } from './fake-dom.js';
 
 beforeEach(() => {
-  elements.clear();
-  for (const name of DOM_GLOBALS) {
-    (globalThis as unknown as Record<string, unknown>)[name] = class {};
-  }
-  (globalThis as unknown as { document: unknown }).document = {
-    getElementById: (id: string): FakeElement => {
-      let node = elements.get(id);
-      if (node === undefined) {
-        node = makeElement(id);
-        elements.set(id, node);
-      }
-      return node;
-    },
-    querySelectorAll: (): FakeElement[] => [],
-  };
+  installFakeDom();
 });
 
 afterEach(() => {
-  delete (globalThis as unknown as { document?: unknown }).document;
-  for (const name of DOM_GLOBALS) {
-    delete (globalThis as unknown as Record<string, unknown>)[name];
-  }
+  uninstallFakeDom();
 });
 
 function sample(
@@ -190,5 +113,52 @@ describe('throughput chart', () => {
     expect(stats).toContain('Held &gt;= target');
     expect(stats).toContain('3s');
     expect(stats).toContain('Peak');
+  });
+});
+
+describe('recent results', () => {
+  function result(url: string, scrapedAt: string, status: 'ok' | 'error' = 'ok') {
+    return {
+      url,
+      platform: 'tiktok' as const,
+      status,
+      latencyMs: 412,
+      error: status === 'ok' ? null : 'http_error: boom',
+      scrapedAt,
+      attempts: 1,
+    };
+  }
+
+  it('lists a row per result, newest first, for a continuous session', async () => {
+    const { render } = await import('../../src/web/render.js');
+
+    // The same URL scraped on three successive cycles: the table must show all
+    // three, not collapse them.
+    render({
+      ...createInitialState(),
+      status: 'running',
+      continuous: true,
+      recentResults: [
+        result('https://www.tiktok.com/@a/video/1', '2026-08-19T16:42:18.000Z'),
+        result('https://www.tiktok.com/@a/video/1', '2026-08-19T16:41:18.000Z'),
+        result('https://www.tiktok.com/@a/video/1', '2026-08-19T16:40:18.000Z', 'error'),
+      ],
+    });
+
+    const html = elements.get('results')?.innerHTML ?? '';
+    expect(html.match(/<tr>/g)).toHaveLength(4); // header row + three results
+    // A timestamp per row, so repeated scrapes of one URL are distinguishable.
+    expect(html).toContain('2026-08-19T16:42:18.000Z');
+    expect(html).toContain('2026-08-19T16:40:18.000Z');
+    // A failed cycle is still a result.
+    expect(html).toContain('http_error: boom');
+  });
+
+  it('prompts for the first result rather than showing an empty table', async () => {
+    const { render } = await import('../../src/web/render.js');
+
+    render({ ...createInitialState(), status: 'running', continuous: true });
+
+    expect(elements.get('results')?.innerHTML).toContain('Waiting for the first result');
   });
 });

@@ -1,6 +1,7 @@
 import {
   type CycleProgressDto,
   type InputReportDto,
+  type MetricPointDto,
   type RecentResultDto,
   type RunDefaultsDto,
   type RunErrorDto,
@@ -13,6 +14,7 @@ import { type RunSummary } from '../core/models/run-summary.js';
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type CycleSummary, type SessionSummary } from '../core/models/session-summary.js';
 import { type RunProgress } from '../core/runner/types.js';
+import { type MetricKey } from './metric-format.js';
 import { type ProxyPoolStats } from '../core/scraper/pool-ports.js';
 
 export type InputMethod = 'paste' | 'file';
@@ -57,6 +59,10 @@ export interface AppState {
   timeline: ThroughputSample[];
   timelineCursor: number;
   cycles: CycleSummary[];
+  /** Live metric history; only ever non-empty for a single-URL session. */
+  metricSeries: MetricPointDto[];
+  /** Which series the metric chart is showing. Purely a view concern. */
+  metric: MetricKey;
   sessionSummary: SessionSummary | null;
   stalled: boolean;
 }
@@ -92,6 +98,8 @@ export function createInitialState(): AppState {
     timeline: [],
     timelineCursor: 0,
     cycles: [],
+    metricSeries: [],
+    metric: 'views',
     sessionSummary: null,
     stalled: false,
   };

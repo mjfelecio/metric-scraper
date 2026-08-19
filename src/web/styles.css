@@ -15,6 +15,14 @@
     @apply border-sky-500 bg-sky-500/10 text-sky-300;
   }
 
+  .metric-tab-btn {
+    @apply text-slate-400 transition hover:border-slate-500 hover:text-slate-200;
+  }
+
+  .metric-tab-btn[data-active='true'] {
+    @apply border-sky-500 bg-sky-500/10 text-sky-300;
+  }
+
   .stat-card {
     @apply rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2.5;
   }
@@ -36,4 +44,22 @@
 #results::-webkit-scrollbar-thumb {
   border-radius: 9999px;
   background-color: var(--color-slate-700);
+}
+
+/*
+ * Point tooltips are pure CSS.
+ *
+ * `render()` rewrites the chart's innerHTML on every poll, so a JS hover
+ * listener would have to be re-bound each tick; a `:hover` rule survives the
+ * replacement for free. Opacity is the only animated property in the panel —
+ * the line itself must never move on its own while an operator is reading it.
+ */
+.metric-point .metric-tip {
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+.metric-point:hover .metric-tip {
+  opacity: 1;
 }

@@ -16,7 +16,7 @@ import {
 } from '../core/models/session-summary.js';
 import { realSleep } from '../core/retry/sleep.js';
 import { buildSessionSummary } from '../core/runner/build-session-summary.js';
-import { type RunCounts, type RunProgress } from '../core/runner/types.js';
+import { type JobCompletedEvent, type RunCounts, type RunProgress } from '../core/runner/types.js';
 import {
   scheduleCycles,
   type CycleContext,
@@ -101,6 +101,14 @@ export interface RunSessionOptions {
   onProgress?: ((progress: SessionProgress) => void) | undefined;
   onCycleStart?: ((context: CycleContext) => void) | undefined;
   onCycleEnd?: ((cycle: CycleSummary) => void) | undefined;
+  /**
+   * Every finished URL, tagged with the cycle it belongs to.
+   *
+   * The session itself only needs counters, but the snapshot carries the actual
+   * scraped metrics and this is the one place they pass through — without this
+   * hook a caller would have to re-read the JSONL to see what was collected.
+   */
+  onResult?: ((event: JobCompletedEvent, context: CycleContext) => void) | undefined;
   now?: (() => number) | undefined;
   /**
    * Builds the runner for one cycle. Overridable for tests, mirroring
@@ -331,6 +339,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
             // ever be inflated by retry volume.
             retries += event.retries;
             latenciesMs.push(event.snapshot.latency_ms);
+            options.onResult?.(event, context);
           },
         });
 
