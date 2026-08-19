@@ -158,7 +158,7 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | `PROXY_SOURCE_TARGET_CAPACITY`      | `0`        | Usable capacity to aim for, in slots; `0` follows `SCRAPER_CONCURRENCY`              |
 | `PROXY_SOURCE_MIN_CAPACITY`         | `5`        | Startup floor, and the floor below which the roster is never evicted                 |
 | `PROXY_SOURCE_VALIDATE_CONCURRENCY` | `10`       | Simultaneous validation probes                                                       |
-| `PROXY_SOURCE_VALIDATE_TIMEOUT_MS`  | `5000`     | Per-probe TCP connect timeout                                                        |
+| `PROXY_SOURCE_VALIDATE_TIMEOUT_MS`  | `5000`     | Whole-probe budget; must exceed `PROXY_CONNECT_TIMEOUT_MS`                           |
 | `PROXY_SOURCE_MAX_CANDIDATES`       | `5000`     | Ceiling on remembered candidates                                                     |
 | `SESSION_STORE_PATH`                | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous                         |
 | `SESSION_MAX_FAILURES`              | `3`        | Consecutive failures before cooldown                                                 |
@@ -174,15 +174,44 @@ summaries) uses a credential-free proxy id like `http://proxy-a.example.net:8000
 
 **`PROXY_SOURCE_URL` layers a live candidate supply on top of `PROXY_POOL`, never
 instead of it.** With it set, a background source periodically fetches a list of
-candidate proxies, TCP-probes each one to confirm it is at least reachable, and feeds
-survivors into the same pool the static list uses — rotation, cooldown, probation and
-eviction all apply to them unchanged. A TCP probe answers "reachable", not "useful";
-whether a candidate is actually good at scraping the target platform is still decided
-by the existing health system on real jobs. Every proxy reports which origin admitted
-it (`source: "config"` for `PROXY_POOL` entries, or the source's name otherwise) in
-`ProxyHealth` and in run summaries — statically configured proxies are exempt from the
-source's own eviction, so they behave exactly as they did before this feature existed.
-Leave `PROXY_SOURCE_URL` empty to keep running on `PROXY_POOL` alone.
+candidate proxies, validates each one, and feeds survivors into the same pool the static
+list uses — rotation, cooldown, probation and eviction all apply to them unchanged. Every
+proxy reports which origin admitted it (`source: "config"` for `PROXY_POOL` entries, or
+the source's name otherwise) in `ProxyHealth` and in run summaries — statically
+configured proxies are exempt from the source's own eviction, so they behave exactly as
+they did before this feature existed. Leave `PROXY_SOURCE_URL` empty to keep running on
+`PROXY_POOL` alone.
+
+**A candidate is admitted only once it has carried a real HTTPS request.** The probe
+opens a CONNECT tunnel to a neutral endpoint (`www.gstatic.com/generate_204`), completes
+a TLS handshake validated against the public trust store, and requires the endpoint's own
+`204` back. Four things can fail and the run summary says which: `connect` (dead host),
+`tunnel` (not a proxy at all — a web server answering `CONNECT` with `400`), `tls` (a
+proxy intercepting our traffic with its own certificate) and `response` (a proxy
+rewriting it). The trust store is deliberately not relaxed: a proxy presenting its own
+certificate is one reading everything we send, which is a reason to reject it rather than
+a certificate problem to work around.
+
+This replaced a plain TCP connect probe, which was measured admitting proxies that could
+not carry a single request — 42% of a live ProxyScrape list accept a TCP connection and
+under a quarter of those complete an HTTPS round trip. The evidence, and the reasoning
+about what should and should not be validated before admission, is in
+[`docs/proxy-validation-measurement.md`](docs/proxy-validation-measurement.md); rerun it
+with `pnpm diagnose:proxy`. Validation generates **no traffic to TikTok or Instagram**.
+
+What the probe deliberately does not answer is whether a platform will serve a given exit
+node. That is target policy, it changes minute to minute, and it stays where it was: with
+the pool's health model on real jobs. Roughly two thirds of admitted proxies reach a
+platform on their first try, so admission is evidence, not a guarantee.
+
+**Known limitation: SOCKS candidates are accepted but cannot be used.** `PROXY_POOL` and
+the candidate parser both accept `socks4://` and `socks5://` (`proxy-config.ts`), but the
+undici transport supports only `http`/`https` and throws when handed anything else. That
+throw escapes `FetchHttpClient`'s error mapping, so the attempt is classified `unknown` →
+`neutral` and the proxy is never blamed, never cooled and never evicted. The canary probe
+keeps such candidates out of a dynamic pool — a SOCKS server does not answer an HTTP
+`CONNECT` — but a SOCKS entry written into `PROXY_POOL` by hand will still burn one job
+per lease. Keep `&protocol=http` on `PROXY_SOURCE_URL` and use `http`/`https` entries.
 
 **Supply is measured in slots, and eviction has a floor.** "Enough proxies" means the
 sum of _earned, currently-leasable_ capacity — `proxies.capacity` in the run summary,
