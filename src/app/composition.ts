@@ -18,7 +18,7 @@ import { InMemoryProxyPool, NullProxyPool } from '../infrastructure/proxy/in-mem
 import { parseProxyList } from '../infrastructure/proxy/proxy-config.js';
 import { ProxyScrapeSource } from '../infrastructure/proxy/proxyscrape-source.js';
 import { ProxySourceManager } from '../infrastructure/proxy/proxy-source-manager.js';
-import { TcpProxyProbe } from '../infrastructure/proxy/tcp-proxy-probe.js';
+import { HttpCanaryProxyProbe } from '../infrastructure/proxy/http-canary-proxy-probe.js';
 import {
   InMemorySessionPool,
   NullSessionPool,
@@ -204,7 +204,13 @@ export function createProxySupply(
 
   const source = new ProxySourceManager({
     source: new ProxyScrapeSource({ url: sourceUrl, http, logger }),
-    probe: new TcpProxyProbe({ timeoutMs: settings.validateTimeoutMs }),
+    // The probe gets production's own connect budget on purpose: certifying a
+    // proxy under a budget the real request will not grant it is how a probe
+    // ends up admitting candidates that fail on their very first job.
+    probe: new HttpCanaryProxyProbe({
+      timeoutMs: settings.validateTimeoutMs,
+      connectTimeoutMs: config.proxy.connectTimeoutMs,
+    }),
     roster: pool,
     targetCapacity,
     minCapacity: settings.minCapacity,

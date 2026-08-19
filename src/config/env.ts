@@ -235,6 +235,18 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     });
   }
 
+  // Candidate validation spends the same connect budget as a real request, then
+  // still has a tunnel, a handshake and a round trip to pay for. A total budget
+  // at or below the connect budget leaves nothing for any of it, so every
+  // candidate would fail at the stage after connect and the pool would starve.
+  if (parsed.data.proxy.source.validateTimeoutMs <= parsed.data.proxy.connectTimeoutMs) {
+    throw new ScrapeError({
+      code: 'config_error',
+      message:
+        'invalid configuration — PROXY_SOURCE_VALIDATE_TIMEOUT_MS must be greater than PROXY_CONNECT_TIMEOUT_MS',
+    });
+  }
+
   return parsed.data;
 }
 

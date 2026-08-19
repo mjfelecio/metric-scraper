@@ -68,6 +68,11 @@ function sourceRow(source: ProxySourceStats | null): ProxySourceSummary | null {
     last_refresh_error: source.lastRefreshError,
     probe_successes: source.probeSuccesses,
     probe_failures: source.probeFailures,
+    probe_failures_by_stage: { ...source.probeFailuresByStage },
+    admitted_total: source.admittedTotal,
+    admitted_tried: source.admittedTried,
+    admitted_proven: source.admittedProven,
+    admission_to_first_success_rate: source.admissionToFirstSuccessRate,
     target_capacity: source.targetCapacity,
   };
 }

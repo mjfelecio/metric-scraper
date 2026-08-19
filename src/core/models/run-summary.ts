@@ -99,6 +99,36 @@ export const ProxySourceSummarySchema = z.object({
   last_refresh_error: z.string().nullable(),
   probe_successes: z.number().int().nonnegative(),
   probe_failures: z.number().int().nonnegative(),
+  /**
+   * Probe failures split by the layer that rejected them.
+   *
+   * `connect` is a dead host, `tunnel` is a host that is not a proxy, `tls` is
+   * a proxy intercepting our traffic, `response` is one rewriting it. Reading a
+   * run back, this is what says whether the candidate list went stale or the
+   * probe is doing its job.
+   */
+  probe_failures_by_stage: z.object({
+    connect: z.number().int().nonnegative(),
+    tunnel: z.number().int().nonnegative(),
+    tls: z.number().int().nonnegative(),
+    response: z.number().int().nonnegative(),
+  }),
+  /** Candidates ever admitted. Cumulative, unlike the `admitted` gauge. */
+  admitted_total: z.number().int().nonnegative(),
+  /** Of those, how many the pool ever actually leased. */
+  admitted_tried: z.number().int().nonnegative(),
+  /** Of those tried, how many went on to record a real success. */
+  admitted_proven: z.number().int().nonnegative(),
+  /**
+   * `admitted_proven / admitted_tried`. `null` before anything was tried.
+   *
+   * The measured answer to "is our validation predictive", recorded per run so
+   * a change to the probe can be judged against evidence rather than intent.
+   * Note the denominator: a proxy the run never needed is not a failed
+   * admission, and counting it as one would make the rate fall as the pool got
+   * healthier.
+   */
+  admission_to_first_success_rate: z.number().min(0).max(1).nullable(),
   /** Usable capacity the supply aims at, in concurrent slots. */
   target_capacity: z.number().int().nonnegative(),
 });
