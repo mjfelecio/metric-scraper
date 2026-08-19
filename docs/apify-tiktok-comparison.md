@@ -60,7 +60,8 @@ DRY RUN — no Apify request was made and nothing was charged.
     …
 
   Actor input (redacted):
-    { "postURLs": [...], "shouldDownloadVideos": false, "commentsPerPost": 0, … }
+    { "postURLs": [...], "shouldDownloadVideos": false, "aiVideoDescription": false,
+      "downloadSubtitlesOptions": "NEVER_DOWNLOAD_SUBTITLES", "commentsPerPost": 0, … }
 ```
 
 Three things are worth reading every time:
@@ -71,9 +72,26 @@ Three things are worth reading every time:
   are collapsed by TikTok **video id**, not by string equality.
 - **charge cap** — the dollar ceiling, sent to Apify as `maxTotalChargeUsd` as
   well as enforced locally.
-- **Actor input** — every paid add-on set explicitly to `false`. Actor defaults
-  belong to the vendor and can change; a silently re-enabled video download is
-  visible here _before_ it is paid for.
+- **Actor input** — every paid add-on disabled explicitly. Actor defaults belong
+  to the vendor and can change; a silently re-enabled video download is visible
+  here _before_ it is paid for.
+
+Field names are taken from the Actor's published input schema rather than
+guessed, because Apify **ignores an unrecognised input field silently**. A
+misspelled flag therefore looks disabled in the dry-run output while doing
+nothing at all — the one failure mode here that costs money without ever raising
+an error. Two spellings are worth knowing:
+
+- subtitles are an enum, not a boolean: `downloadSubtitlesOptions` is set to
+  `NEVER_DOWNLOAD_SUBTITLES`, and transcription is the neighbouring
+  `DOWNLOAD_SUBTITLES_AND_TRANSCRIBE` value rather than a field of its own;
+- `aiVideoDescription` and `aiVideoSummary` are charged **per video-second** on
+  top of the per-result price. They default to `false`, which is precisely why
+  they are set explicitly — these are the two options that would actually hurt.
+
+If a future build renames a field, the dry-run output is where it shows up:
+compare the printed input against the Actor's current input schema before
+spending anything.
 
 ## 3. A paid run
 

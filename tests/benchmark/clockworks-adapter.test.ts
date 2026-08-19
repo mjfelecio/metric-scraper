@@ -64,20 +64,38 @@ describe('ClockworksTikTokAdapter.buildInput', () => {
     ]);
   });
 
+  /**
+   * Field names are checked against the Actor's published input schema, not
+   * guessed. A misspelled flag is silently ignored by Apify, which is the
+   * failure mode that costs money without ever raising an error.
+   */
   it('disables every paid add-on explicitly rather than trusting Actor defaults', () => {
     expect(input).toMatchObject({
       scrapeRelatedVideos: false,
+      scrapeRelatedSearchWords: false,
       scrapeAdditionalAuthorMeta: false,
       shouldDownloadVideos: false,
       shouldDownloadCovers: false,
       shouldDownloadAvatars: false,
       shouldDownloadMusicCovers: false,
       shouldDownloadSlideshowImages: false,
-      shouldDownloadSubtitles: false,
-      shouldTranscribeVideos: false,
       commentsPerPost: 0,
-      repliesPerComment: 0,
+      topLevelCommentsPerPost: 0,
+      maxRepliesPerComment: 0,
     });
+  });
+
+  it('turns subtitles off through the enum the Actor actually has', () => {
+    expect(input.downloadSubtitlesOptions).toBe('NEVER_DOWNLOAD_SUBTITLES');
+    // Transcription is a value of that enum, not a field. Naming it as a
+    // boolean would look disabled while doing nothing at all.
+    expect(input).not.toHaveProperty('shouldTranscribeVideos');
+    expect(input).not.toHaveProperty('shouldDownloadSubtitles');
+  });
+
+  it('disables the per-video-second AI extras, the costliest options here', () => {
+    expect(input.aiVideoDescription).toBe(false);
+    expect(input.aiVideoSummary).toBe(false);
   });
 
   it('issues no discovery query of any kind', () => {
@@ -88,7 +106,14 @@ describe('ClockworksTikTokAdapter.buildInput', () => {
 
   it('records the feature flags for the report without the URL list', () => {
     const flags = adapter.describeFeatureFlags(input);
-    expect(flags).toMatchObject({ shouldDownloadVideos: false, commentsPerPost: 0 });
+    expect(flags).toMatchObject({
+      shouldDownloadVideos: false,
+      commentsPerPost: 0,
+      // The enum must survive into the record, or the artifact cannot prove
+      // which subtitle setting the paid run actually used.
+      downloadSubtitlesOptions: 'NEVER_DOWNLOAD_SUBTITLES',
+      aiVideoDescription: false,
+    });
     expect(flags).not.toHaveProperty('postURLs');
   });
 });

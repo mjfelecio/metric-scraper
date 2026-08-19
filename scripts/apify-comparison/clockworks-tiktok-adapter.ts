@@ -15,12 +15,18 @@ export class ClockworksTikTokAdapter implements ActorAdapter {
   /**
    * The minimum viable Actor input: direct post URLs and nothing else.
    *
-   * Every `shouldDownload*` flag is set explicitly to `false` rather than left
-   * to the Actor's defaults. Defaults are the vendor's to change, and on a
-   * per-result pricing model a silently re-enabled media download is both a
-   * bandwidth bill and a pile of binary data this benchmark has no use for.
-   * Setting a flag the Actor does not have costs nothing; failing to set one it
-   * does have costs money.
+   * Every add-on is disabled explicitly rather than left to the Actor's
+   * defaults. Defaults are the vendor's to change, and on a per-result pricing
+   * model a silently re-enabled media download is both a bandwidth bill and a
+   * pile of binary data this benchmark has no use for.
+   *
+   * Every field name here is taken from the Actor's published input schema, and
+   * that verification is not optional busywork — Apify **ignores an unknown
+   * input field silently**. A misspelled flag is therefore worse than a missing
+   * one: it reads as "disabled" in the dry-run output while doing nothing, so
+   * the safety review passes and the charge still lands. An earlier draft of
+   * this file carried three such names (`shouldDownloadSubtitles`,
+   * `shouldTranscribeVideos`, `repliesPerComment`), none of which exist.
    */
   buildInput(targets: readonly BenchmarkTarget[]): Record<string, unknown> {
     return {
@@ -34,6 +40,7 @@ export class ClockworksTikTokAdapter implements ActorAdapter {
       profiles: [],
 
       scrapeRelatedVideos: false,
+      scrapeRelatedSearchWords: false,
       scrapeAdditionalAuthorMeta: false,
 
       shouldDownloadVideos: false,
@@ -42,21 +49,41 @@ export class ClockworksTikTokAdapter implements ActorAdapter {
       shouldDownloadMusicCovers: false,
       shouldDownloadSlideshowImages: false,
 
-      shouldDownloadSubtitles: false,
-      shouldTranscribeVideos: false,
+      // Subtitles are an enum, not a boolean, and transcription is one of its
+      // values rather than a field of its own. `NEVER_DOWNLOAD_SUBTITLES` is
+      // the documented "off", and DOWNLOAD_SUBTITLES_AND_TRANSCRIBE is the
+      // expensive neighbour it must not drift into.
+      downloadSubtitlesOptions: 'NEVER_DOWNLOAD_SUBTITLES',
 
-      // Comments and their replies are separately priced on most TikTok Actors
-      // and are not part of the question being asked.
+      // The two most expensive options on this Actor: both are charged per
+      // video-second on top of the per-result price. They default to false,
+      // which is exactly why they are set here — a default is the vendor's to
+      // change, and these are the ones that would hurt.
+      aiVideoDescription: false,
+      aiVideoSummary: false,
+
+      // Comments and their replies are separately priced and are not part of
+      // the question being asked.
       commentsPerPost: 0,
-      repliesPerComment: 0,
+      topLevelCommentsPerPost: 0,
+      maxRepliesPerComment: 0,
     };
   }
 
+  /**
+   * Every setting except the URL list, for the reproducibility record.
+   *
+   * Strings count: the subtitle setting is an enum whose expensive value sits
+   * one keystroke from its cheap one, so recording only booleans and numbers
+   * would drop the single most important flag from the artifact.
+   */
   describeFeatureFlags(input: Record<string, unknown>): Record<string, unknown> {
     const flags: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(input)) {
       if (key === 'postURLs') continue;
-      if (typeof value === 'boolean' || typeof value === 'number') flags[key] = value;
+      if (typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
+        flags[key] = value;
+      }
     }
     return flags;
   }
