@@ -494,6 +494,28 @@ Tick **Continuous** to run a session instead, with the same three knobs as the C
 cycles — without it a fifteen-minute interval makes a healthy dashboard look hung — plus a
 **throughput graph** and a session-summary download.
 
+When a continuous session runs against **exactly one URL**, a **metric history** panel
+appears: a live line chart of that video's views, likes, comments or shares across cycles,
+one point per completed cycle, on a timestamp axis. It exists to make unusual movement
+visible by eye — a sudden jump, a plateau, or one metric moving while the others do not —
+and it deliberately makes no judgement of its own: there is no bot score and no anomaly
+classifier, only the numbers and their changes.
+
+Axis labels abbreviate (`153.2K`), but hovering a point shows the cycle number, the
+timestamp, the **exact integer the scraper returned** (`153,247`) and the change since the
+previous cycle (`+8,420`). That distinction matters: TikTok quantizes public view counts
+at higher values, and the chart must show what was actually collected rather than round it
+further. A cycle whose scrape failed is drawn as a break in the line rather than dropped,
+so an outage cannot be mistaken for a flat metric, and the next cycle's change is measured
+against the last cycle that had a value.
+
+It reads the snapshot the runner already produced and the poll already carries — the same
+row that goes to the JSONL — so there is one source of truth for the numbers, no second
+transport and no extra request. The chart redraws only when a cycle actually completes,
+and its markers are capped, so a session left running overnight costs no more per poll
+than one that started a minute ago. Multi-URL sessions and one-shot runs never accumulate
+or ship the series at all.
+
 When proxies are configured, a **proxy pool** panel appears: usable / cooling / retired
 counts, live capacity and how many jobs are in flight on how many proxies, then one row
 per proxy with its state, in-flight load, request tallies, and a cooldown countdown for

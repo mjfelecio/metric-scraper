@@ -78,6 +78,27 @@ export interface InputReportDto {
   issues: InputIssue[];
 }
 
+/**
+ * One completed cycle's engagement metrics for a single-URL continuous session.
+ *
+ * Built from the `MetricSnapshot` the runner already produced — the same object
+ * that was written to the JSONL — so the dashboard and the output file can never
+ * disagree. Counts are the platform's exact integers: any abbreviation is a
+ * presentation concern and happens in the browser.
+ */
+export interface MetricPointDto {
+  /** 1-based, matching `CycleSummary.cycle`. */
+  cycle: number;
+  /** ISO timestamp of the scrape, falling back to when the cycle finished. */
+  at: string;
+  /** Drives the gap rendering: a non-`ok` cycle has null counts by definition. */
+  status: ScrapeStatus;
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+  shares: number | null;
+}
+
 export interface RunStateDto {
   runId: string;
   state: RunState;
@@ -110,6 +131,13 @@ export interface RunStateDto {
   /** Total samples ever produced, so the client can ask for only what is new. */
   timelineCursor: number;
   cycles: CycleSummary[];
+  /**
+   * One point per completed cycle, oldest first.
+   *
+   * Only accumulated when the session's input parsed to exactly one URL; empty
+   * for every other run, so a multi-URL session pays nothing for this.
+   */
+  metricSeries: MetricPointDto[];
   sessionSummary: SessionSummary | null;
   /** Work was in flight but nothing completed for an unreasonably long time. */
   stalled: boolean;

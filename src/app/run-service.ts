@@ -10,6 +10,8 @@ import { isFatalInputIssue, type ParsedInput } from '../core/models/input.js';
 import { type Platform } from '../core/models/platform.js';
 import { type RunSummary } from '../core/models/run-summary.js';
 import { type CycleSummary } from '../core/models/session-summary.js';
+import { type JobCompletedEvent } from '../core/runner/types.js';
+import { type MetricSnapshot } from '../core/models/snapshot.js';
 import { JsonlFileSink } from '../infrastructure/output/jsonl-file-sink.js';
 import { ProxyEventLog } from '../infrastructure/output/proxy-event-log.js';
 import {
@@ -20,6 +22,7 @@ import {
 import { createDefaultUrlNormalizerRegistry } from '../platforms/index.js';
 
 import { buildRunner, createProxySupply } from './composition.js';
+import { appendMetricPoint } from './metric-series.js';
 import { runSession, type SessionProgress } from './scrape-session.js';
 import {
   type RecentResultDto,
@@ -191,6 +194,7 @@ export class RunService {
         timeline: [],
         timelineCursor: 0,
         cycles: [],
+        metricSeries: [],
         sessionSummary: null,
         stalled: false,
       },
@@ -264,6 +268,14 @@ export class RunService {
       state.platform = platform;
       state.state = 'running';
 
+      // The metric time series is a single-video view by construction: with two
+      // URLs in the batch there is no one series to plot. Gating here means a
+      // multi-URL session never accumulates or ships a byte of it.
+      const trackMetrics = parsed.records.length === 1;
+      // Held between the result landing and its cycle ending, so the point is
+      // emitted by cycle completion rather than by the result itself.
+      let pendingSnapshot: MetricSnapshot | null = null;
+
       const summary = await runSession({
         sessionId: state.runId,
         records: parsed.records,
@@ -311,9 +323,19 @@ export class RunService {
             throughputPerMinute: progress.requestsPerMinute,
           };
         },
+        onResult: (event): void => {
+          this.pushRecentResult(state, event);
+          if (trackMetrics) pendingSnapshot = event.snapshot;
+        },
         onCycleEnd: (cycle: CycleSummary) => {
           state.cycles.push(cycle);
           if (cycle.summary !== null) state.summary = cycle.summary;
+          if (trackMetrics) {
+            appendMetricPoint(state.metricSeries, cycle, pendingSnapshot);
+            // Cleared so the next cycle cannot re-emit this cycle's snapshot:
+            // exactly one point per completed cycle, never a duplicate.
+            pendingSnapshot = null;
+          }
         },
       });
 
@@ -440,19 +462,7 @@ export class RunService {
           sampleProxies();
         },
         onResult: (event) => {
-          const entry: RecentResultDto = {
-            url: event.snapshot.url,
-            platform: event.snapshot.platform,
-            status: event.snapshot.status,
-            latencyMs: event.snapshot.latency_ms,
-            error: event.snapshot.error,
-            scrapedAt: event.snapshot.scraped_at,
-            attempts: event.attempts,
-          };
-          state.recentResults.unshift(entry);
-          if (state.recentResults.length > RECENT_RESULTS_LIMIT) {
-            state.recentResults.length = RECENT_RESULTS_LIMIT;
-          }
+          this.pushRecentResult(state, event);
         },
       });
 
@@ -485,6 +495,29 @@ export class RunService {
         { run_id: state.runId, error_code: scrapeError.code, message: scrapeError.message },
         'run failed',
       );
+    }
+  }
+
+  /**
+   * Records one finished URL for the dashboard's results table.
+   *
+   * Newest first and capped: this is a live window, not a log — the JSONL on
+   * disk is the complete record. Shared by both the one-shot and the continuous
+   * path so a session's results table cannot drift from a run's.
+   */
+  private pushRecentResult(state: RunStateDto, event: JobCompletedEvent): void {
+    const entry: RecentResultDto = {
+      url: event.snapshot.url,
+      platform: event.snapshot.platform,
+      status: event.snapshot.status,
+      latencyMs: event.snapshot.latency_ms,
+      error: event.snapshot.error,
+      scrapedAt: event.snapshot.scraped_at,
+      attempts: event.attempts,
+    };
+    state.recentResults.unshift(entry);
+    if (state.recentResults.length > RECENT_RESULTS_LIMIT) {
+      state.recentResults.length = RECENT_RESULTS_LIMIT;
     }
   }
 

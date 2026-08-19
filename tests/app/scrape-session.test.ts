@@ -168,6 +168,30 @@ describe('runSession', () => {
     expect(summary.schedule.stop_reason).toBe('max_cycles');
   });
 
+  it('forwards every result with the cycle it belongs to', async () => {
+    const seen: { cycle: number; url: string; views: number | null }[] = [];
+
+    const summary = await session({
+      onResult: (event, context) => {
+        seen.push({
+          cycle: context.cycle,
+          url: event.snapshot.url,
+          views: event.snapshot.views,
+        });
+      },
+    });
+
+    // Three cycles over a two-URL batch: one event per finished URL, each
+    // carrying the snapshot the runner already wrote out.
+    expect(seen).toHaveLength(6);
+    expect(seen.map((entry) => entry.cycle).sort()).toEqual([1, 1, 2, 2, 3, 3]);
+    expect(seen.every((entry) => entry.views === 1)).toBe(true);
+
+    // The counters the session already kept are untouched by the new hook.
+    expect(summary.totals.requests).toBe(6);
+    expect(summary.totals.successes).toBe(6);
+  });
+
   it('counts retries apart from requests so throughput cannot be inflated', async () => {
     // Fails once per URL, then succeeds: 2 URLs x 3 cycles = 6 requests, 6 retries.
     const flaky = new ScriptedScraper((_url, attempt) =>
