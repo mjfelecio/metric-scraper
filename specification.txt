@@ -1,0 +1,93 @@
+# Spec: TikTok + Instagram Metrics Scraper (v1)
+
+## 1. Purpose
+
+We pay creators based on the views their videos earn. Because view counts get botted, we need to track engagement metrics **repeatedly over time** for each video, not just once at payout. This spec covers the data-collection layer only.
+
+**v1 goal:** prove that the scraper works correctly and holds up under volume. Scheduling, database design, and bot-detection logic are out of scope and will be built later on top of this.
+
+## 2. Scope
+
+Two independent scrapers with an identical interface:
+
+- `tiktok` — TikTok video URLs
+- `instagram` — Instagram Reels / video post URLs
+
+YouTube is not in scope (free official API already covers it).
+
+## 3. Data Acquisition Constraints
+
+- Must use **self-hosted / unofficial scraping with a rotating proxy pool**.
+- **No third-party paid scraping APIs** (Apify, EnsembleData, Bright Data's scraping products, etc.). Per-request pricing does not work at our volume. Proxies are the only recurring cost we will carry.
+- Proxy pool, concurrency, and any credentials must be configurable via env vars / config file — never hardcoded.
+- If a platform requires session cookies or logged-in tokens, the scraper must support a **pool of sessions with rotation** and degrade gracefully when one is blocked. Document account/session burn rate observed during testing.
+
+## 4. Input
+
+- A batch of video URLs (newline-delimited file or JSON array) passed to the scraper.
+- Must accept mixed URL formats (short links, `vm.tiktok.com` redirects, `/reel/`, `/p/`, with and without query params) and normalize them.
+
+## 5. Output
+
+Append-only **JSONL** file (one object per request), written to disk so we can inspect results after a run. No database required.
+
+Critical: repeated scrapes of the same URL must produce **new rows, not overwrites**. Every row is a point-in-time snapshot — this is the time-series data we will later graph to detect botting.
+
+### Required fields per row
+
+| Field | Notes |
+|---|---|
+| `platform` | `tiktok` \| `instagram` |
+| `video_id` | Platform-native ID, stable across scrapes |
+| `url` | Normalized canonical URL |
+| `scraped_at` | UTC, ISO 8601 |
+| `views` | Public view/play count |
+| `likes` | |
+| `comments` | Count only — we do not need comment text |
+| `shares` | TikTok: required. Instagram: capture if the endpoint exposes a reshare/share count, otherwise `null` |
+| `saves` | Capture if available, otherwise `null` |
+| `author_handle` | |
+| `author_follower_count` | Capture if available in the same response, otherwise `null` |
+| `posted_at` | Original upload timestamp, UTC |
+| `status` | `ok` \| `not_found` \| `private` \| `rate_limited` \| `error` |
+| `error` | Message/code when `status != ok` |
+| `latency_ms` | |
+
+**Accuracy:** all counts must match what is publicly displayed on the post at scrape time. Do not return rounded/abbreviated values (`1.2M`) — return integers.
+
+**Failures are rows, not silent drops.** A deleted, private, or failed video must still emit a row with the appropriate `status`.
+
+## 6. Throughput Requirement
+- Must sustain **500 requests/minute** (~8.3 req/sec) for at least **10 continuous minutes** (5,000+ requests) per platform.
+- Must be horizontally scalable — concurrency and worker count configurable, not fixed.
+- Must handle rate limiting with exponential backoff + retry (retries counted separately from successful requests when measuring throughput).
+- Must not crash or silently stall on partial failures. A long run finishes and reports.
+
+## 7. Run Summary
+
+At the end of every run, print and write a summary containing:
+
+- Total requests, successes, failures (broken down by `status`)
+- Success rate %
+- Actual sustained throughput (req/min)
+- Latency p50 / p95 / max
+- Proxy pool stats: requests per proxy, proxies banned/failed during run
+
+## 8. Acceptance Criteria
+
+The developer supplies their own test data. Requirements:
+
+1. **Minimum 100 TikTok URLs and 100 Instagram URLs**, with real variation: high-view and low-view posts, old and recent posts, large and small accounts, plus a few deliberately deleted/private URLs to confirm error handling.
+2. Demonstrate a **500 req/min run sustained for 10+ minutes** on each platform, with the run summary as evidence.
+3. **≥95% success rate** on valid, live URLs across that run.
+4. **Spot-check accuracy:** for 10 randomly chosen videos per platform, scraped numbers match the live post (manual verification), screenshots or side-by-side included.
+5. Scraping the same 20 URLs **three times in one run** produces 60 distinct rows with distinct `scraped_at` values.
+
+## 9. Deliverables
+
+- Source repo with README covering setup, config, env vars, and how to run a batch
+- Config file / env template for proxies, concurrency, and sessions
+- The test dataset used
+- Sample output JSONL + run summaries from the acceptance runs
+- A short written note on: which endpoints/methods were used, observed rate limits and block behavior, estimated proxy bandwidth per 1,000 requests, and known fragility (what is most likely to break when the platform changes)
+
