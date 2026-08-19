@@ -254,11 +254,44 @@ Bearer auth carries no leak, each terminal run status is handled, 401/402/429/5x
 behave as intended, malformed metrics stay `null`, and secrets are scrubbed from
 artifacts on disk.
 
-## 9. After the smoke test
+## 9. The local baseline, and what the smoke test will actually decide
 
-The four-URL set is a smoke test — too small to generalise from, and it contains
-no 1M+ post, the band where public rounding is coarsest and where a paid source
-would have to earn its keep. A real answer needs 12–20 URLs spanning below 10K,
-10K–999,999 and 1M+, across ordinary videos and photo posts.
+Our own scraper was run against the four smoke URLs first. This costs nothing,
+involves no Apify, and is worth doing before any paid run — if our half were
+broken, the report would be four rows of "local failed" and the money would buy
+nothing. Reproduce with `pnpm cli tiktok data/examples/tiktok-apify-smoke.txt`.
+
+Measured 2026-08-19, 4/4 succeeded:
+
+| Video                 |     Views |     Likes | Comments | Shares | Band | View resolution |
+| --------------------- | --------: | --------: | -------: | -----: | ---- | --------------: |
+| `7668862416435907873` |     1,554 |       359 |        5 |     13 | <10K |               1 |
+| `7623071715257634068` |       760 |        43 |        1 |      0 | <10K |              10 |
+| `7643585712641559841` | 3,000,000 |   696,646 |    1,540 | 33,375 | 1M+  |         100,000 |
+| `7670640507646741793` | 8,900,000 | 1,709,320 |    4,849 | 46,690 | 1M+  |         100,000 |
+
+The 1M+ pair is what makes the smoke test worth running. Both report views on a
+clean 100,000 step while their likes, comments and shares on the very same post
+are unit-precise — so the coarseness is specific to views, not a property of
+these particular numbers. That is the local half of the question answered for
+free; whether Apify resolves those two any finer is the half that costs $0.25.
+
+Two predictions, written down before spending so the result cannot be
+rationalised afterwards:
+
+- if Apify also returns exactly 3,000,000 and 8,900,000, it is reading the same
+  public rounded value and buys no view precision;
+- if it returns something like 3,041,882, it carries lower-order detail we do
+  not — still not proof of exactness, but grounds for a larger experiment.
+
+Separately: our scraper reports `saves` as `null` for all four because it does
+not collect `collectCount`. Apify's `collectCount` would be a real completeness
+gain regardless of how the view question resolves.
+
+## 10. After the smoke test
+
+The four-URL set covers <10K and 1M+ but **not** the 10K–999,999 middle band,
+and four posts is far too few to generalise from either way. A real answer needs
+12–20 URLs spanning all three bands, across ordinary videos and photo posts.
 
 **That run costs money and needs explicit approval before it is started.**

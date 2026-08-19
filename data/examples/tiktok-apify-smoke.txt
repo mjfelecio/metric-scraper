@@ -4,6 +4,34 @@
 # paid run uses, at a $0.25 ceiling. The last two entries are the same post
 # reached through two URL forms and must be billed once — that collapse is the
 # thing to check in the dry-run output before spending anything.
+#
+# What our own scraper reads for these four (measured 2026-08-19, free, no
+# Apify involved — reproduce with `pnpm cli tiktok <this file>`):
+#
+#   7668862416435907873      1,554 views   <10K       unit resolution
+#   7623071715257634068        760 views   <10K       unit resolution
+#   7643585712641559841  3,000,000 views   1M+        100,000 resolution
+#   7670640507646741793  8,900,000 views   1M+        100,000 resolution
+#
+# The set covers <10K and 1M+ but NOT the 10K–999,999 middle band, which is the
+# gap the larger 12–20 URL set has to fill.
+#
+# The 1M+ pair is what makes this worth running at all. Both report views on a
+# clean 100,000 step while their likes (696,646 / 1,709,320), comments and
+# shares are unit-precise on the very same post — so the rounding is specific
+# to views rather than these being round numbers. That is the local half of the
+# question; whether Apify resolves those two any finer is the paid half.
+#
+# Two predictions worth writing down before spending, so the result cannot be
+# rationalised afterwards:
+#   - if Apify also returns 3,000,000 and 8,900,000, it is reading the same
+#     public rounded value and buys us no view precision;
+#   - if it returns something like 3,041,882, it has lower-order detail we do
+#     not — still not proof of exactness, but grounds for a bigger experiment.
+#
+# Our scraper reports `saves` as null for all four (it does not collect
+# collectCount), so Apify's collectCount would be a genuine completeness gain
+# independent of the view question.
 https://www.tiktok.com/@emrys8473/video/7643585712641559841
 https://www.tiktok.com/@emrys8473/video/7668862416435907873
 https://www.tiktok.com/@lyndon.films/video/7670640507646741793
