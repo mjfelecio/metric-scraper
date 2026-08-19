@@ -1,6 +1,11 @@
 import { type ProxyUsageView } from '../metrics/metrics-collector.js';
-import { type ProxySummary, type ProxyUsage } from '../models/run-summary.js';
+import {
+  type ProxySourceSummary,
+  type ProxySummary,
+  type ProxyUsage,
+} from '../models/run-summary.js';
 import { type ProxyHealth, type ProxyPoolStats } from '../scraper/pool-ports.js';
+import { type ProxySourceStats } from '../scraper/proxy-source-ports.js';
 
 /**
  * Joins what the pool knows (state, timestamps, why it benched something) with
@@ -41,7 +46,29 @@ export function buildProxySummary(
     capacity: stats.capacity,
     pool_exhausted: stats.poolExhaustedCount,
     total_failures: stats.totalFailures,
+    source: sourceRow(stats.source),
     per_proxy: perProxy,
+  };
+}
+
+function sourceRow(source: ProxySourceStats | null): ProxySourceSummary | null {
+  if (source === null) return null;
+  return {
+    name: source.name,
+    candidates: source.candidates,
+    validating: source.validating,
+    admitted: source.admitted,
+    rejected: source.rejected,
+    fetched: source.fetched,
+    malformed: source.malformed,
+    duplicates: source.duplicates,
+    refreshes: source.refreshes,
+    refresh_failures: source.refreshFailures,
+    last_refresh_at: iso(source.lastRefreshAt),
+    last_refresh_error: source.lastRefreshError,
+    probe_successes: source.probeSuccesses,
+    probe_failures: source.probeFailures,
+    desired_active: source.desiredActive,
   };
 }
 
@@ -87,6 +114,7 @@ function toRow(health: ProxyHealth, usage: ProxyUsageView | undefined): ProxyUsa
   return {
     proxy_id: health.id,
     label: health.label,
+    source: health.source,
     state: health.state,
     block_kind: health.blockKind,
     // The pool's own counters are the fallback: a cycle's metrics start empty,
@@ -118,6 +146,8 @@ function unknownHealth(id: string): ProxyHealth {
   return {
     id,
     label: '?',
+    source: 'unknown',
+    admittedAt: 0,
     state: 'untested',
     blockKind: null,
     requests: 0,

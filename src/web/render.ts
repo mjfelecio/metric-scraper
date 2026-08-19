@@ -3,6 +3,7 @@ import { summarizeFailureConcentration } from '../core/metrics/proxy-insights.js
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type ScrapeStatus } from '../core/models/status.js';
 import { type ProxyHealth, type ProxyState } from '../core/scraper/pool-ports.js';
+import { type ProxySourceStats } from '../core/scraper/proxy-source-ports.js';
 import { formatDuration } from '../core/schedule/duration.js';
 
 import { isRunActive, type AppState } from './state.js';
@@ -264,7 +265,10 @@ function renderProxyPanel(state: AppState): void {
   const panel = el('proxy-panel');
   const pool = state.proxies;
 
-  if (pool === null || pool.configured === 0) {
+  // A dynamically sourced pool is briefly empty while the first candidates are
+  // being validated, and hiding the panel exactly then would hide the thing the
+  // operator most wants to watch.
+  if (pool === null || (pool.configured === 0 && pool.source === null)) {
     panel.classList.add('hidden');
     panel.innerHTML = '';
     return;
@@ -303,6 +307,7 @@ function renderProxyPanel(state: AppState): void {
            </p>`
         : ''
     }
+    ${pool.source === null ? '' : proxySourceLine(pool.source)}
     ${
       concentration.concentrated
         ? `<p class="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
@@ -332,11 +337,45 @@ function renderProxyPanel(state: AppState): void {
     </div>`;
 }
 
+/**
+ * Where the pool's capacity is coming from.
+ *
+ * Sits above the per-proxy table because with a live source the interesting
+ * question moves up a level: not "is p7 healthy" but "is the supply keeping up
+ * with what the pool is burning".
+ */
+function proxySourceLine(source: ProxySourceStats): string {
+  const failed = source.refreshFailures > 0;
+  return `<p class="mt-3 rounded border ${
+    failed
+      ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+      : 'border-slate-800 bg-slate-950/40 text-slate-400'
+  } px-3 py-2 text-xs">
+      <span class="font-semibold">Source: ${escapeHtml(source.name)}</span>
+      — ${source.candidates.toLocaleString()} candidate(s),
+      ${source.validating} validating,
+      ${source.admitted} admitted,
+      ${source.rejected} rejected,
+      target ${source.desiredActive} active.
+      Probes: ${source.probeSuccesses} passed / ${source.probeFailures} failed.
+      ${
+        source.lastRefreshError === null
+          ? ''
+          : `Last refresh failed: ${escapeHtml(source.lastRefreshError)}.`
+      }
+    </p>`;
+}
+
 function proxyRow(proxy: ProxyHealth, now: number): string {
   return `<tr class="border-t border-slate-800/70">
       <td class="py-1.5 pr-3">
         <span class="text-slate-300">${escapeHtml(proxy.label)}</span>
         <span class="text-slate-500">${escapeHtml(proxy.id)}</span>
+        ${
+          proxy.source === 'config'
+            ? ''
+            : `<span class="ml-1 rounded bg-slate-800 px-1 text-[10px] text-slate-400">${escapeHtml(proxy.source)}</span>`
+        }
       </td>
       <td class="py-1.5 pr-3">
         <span class="rounded px-1.5 py-0.5 text-[11px] ${PROXY_STATE_STYLES[proxy.state]}">

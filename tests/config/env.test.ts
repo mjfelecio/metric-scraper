@@ -72,6 +72,14 @@ describe('loadConfig', () => {
     );
   });
 
+  it('reserves one lease in five for unproven proxies by default', () => {
+    expect(load({}).proxy.explorationPeriod).toBe(5);
+    expect(load({ PROXY_EXPLORATION_PERIOD: '10' }).proxy.explorationPeriod).toBe(10);
+    // Zero is the switch-off value, not a validation error: it restores strict
+    // preference for proxies that have already worked.
+    expect(load({ PROXY_EXPLORATION_PERIOD: '0' }).proxy.explorationPeriod).toBe(0);
+  });
+
   it('defaults the proxy connect timeout to 3000ms', () => {
     expect(load({}).proxy.connectTimeoutMs).toBe(3_000);
   });
@@ -105,6 +113,6 @@ describe('redactConfig', () => {
 
     expect(redacted).not.toContain('secret');
     expect(redacted).not.toContain('proxy-a.example.net');
-    expect(redactConfig(config)['proxy']).toEqual({ configured: 2 });
+    expect(redactConfig(config)['proxy']).toEqual({ configured: 2, source: null });
   });
 });

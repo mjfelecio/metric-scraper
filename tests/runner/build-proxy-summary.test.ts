@@ -12,6 +12,8 @@ function health(overrides: Partial<ProxyHealth> = {}): ProxyHealth {
   return {
     id: 'http://gate-a.example.net:8000',
     label: 'p1',
+    source: 'config',
+    admittedAt: 0,
     state: 'healthy',
     blockKind: null,
     requests: 0,
@@ -54,6 +56,7 @@ function stats(perProxy: ProxyHealth[], overrides: Partial<ProxyPoolStats> = {})
     poolExhaustedCount: 0,
     totalRequests: perProxy.reduce((total, entry) => total + entry.requests, 0),
     totalFailures: perProxy.reduce((total, entry) => total + entry.failures, 0),
+    source: null,
     perProxy,
     ...overrides,
   };
@@ -148,6 +151,7 @@ describe('mergeProxyUsage', () => {
     return {
       proxy_id: 'http://a:8000',
       label: 'p1',
+      source: 'config',
       state: 'healthy',
       block_kind: null,
       requests: 10,

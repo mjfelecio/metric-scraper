@@ -48,22 +48,32 @@ export const AppConfigSchema = z.object({
     maxConsecutiveFailures: z.number().int().min(1),
     cooldownMs: z.number().int().min(0),
     /**
-     * Jobs that may share one proxy at a time. `0` = unlimited.
+     * The most jobs any one proxy may hold at a time. `0` = unlimited.
      *
-     * Pool capacity is `proxies × limit`, so this is both what makes adding a
-     * proxy add capacity and what stops one IP absorbing a whole batch before
-     * its failures are reported. Raise it if concurrency exceeds that product.
+     * A ceiling rather than an allocation: a proxy doubles its slots with each
+     * success up to this, and halves them with each failure. `proxies × limit`
+     * is the pool's maximum capacity; what has actually been earned is reported
+     * as `proxies.capacity` in the run summary, and that is the number to
+     * compare a configured concurrency against.
      */
     maxConcurrentPerProxy: z.number().int().min(0),
     /**
-     * In-flight requests allowed on a proxy that has not proved itself yet, or
-     * whose last outcome was a failure.
+     * The floor every proxy starts at and can be pushed back down to.
      *
      * Health is only evaluated when a lease is handed out, so this is what
      * bounds how many jobs a dead IP can absorb before its first failure is
-     * reported back.
+     * reported back. A proxy that has never succeeded never leaves it.
      */
     probationConcurrency: z.number().int().min(1),
+    /**
+     * One lease in this many is reserved for a proxy that has never succeeded.
+     * `0` disables exploration.
+     *
+     * Without a reserved share, a proxy needs a success to be preferred but is
+     * scheduled last, so it never gets the traffic that would earn one — and a
+     * large pool behaves like whichever two proxies happened to work first.
+     */
+    explorationPeriod: z.number().int().min(0),
     /**
      * Undici's own connect-phase timeout for each proxy's dispatcher. Without
      * this, undici defaults to 10s before giving up on a dead proxy — well past
@@ -71,6 +81,25 @@ export const AppConfigSchema = z.object({
      * before `requestTimeoutMs` ever gets a chance to.
      */
     connectTimeoutMs: z.number().int().min(1),
+
+    /**
+     * A live supply of candidate proxies, on top of (never instead of) `pool`.
+     *
+     * An empty `url` disables the whole feature, matching how `PROXY_POOL` and
+     * `SESSION_STORE_PATH` are switched off. Candidates are validated and fed
+     * into the same pool the static list uses; nothing here decides health.
+     */
+    source: z.object({
+      url: z.string(),
+      refreshIntervalMs: z.number().int().min(0),
+      /** Usable proxies to aim for. Compare against `SCRAPER_CONCURRENCY`. */
+      desiredActive: z.number().int().min(1),
+      /** Startup waits for this many, not for `desiredActive`. */
+      minHealthy: z.number().int().min(1),
+      validateConcurrency: z.number().int().min(1),
+      validateTimeoutMs: z.number().int().min(1),
+      maxCandidates: z.number().int().min(1),
+    }),
   }),
 
   session: z.object({
@@ -141,7 +170,17 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
       cooldownMs: int(env, 'PROXY_COOLDOWN_MS', 60_000),
       maxConcurrentPerProxy: int(env, 'PROXY_MAX_CONCURRENT', 8),
       probationConcurrency: int(env, 'PROXY_PROBATION_CONCURRENT', 1),
+      explorationPeriod: int(env, 'PROXY_EXPLORATION_PERIOD', 5),
       connectTimeoutMs: int(env, 'PROXY_CONNECT_TIMEOUT_MS', 3_000),
+      source: {
+        url: str(env.PROXY_SOURCE_URL) ?? '',
+        refreshIntervalMs: int(env, 'PROXY_SOURCE_REFRESH_MS', 900_000),
+        desiredActive: int(env, 'PROXY_SOURCE_DESIRED_ACTIVE', 20),
+        minHealthy: int(env, 'PROXY_SOURCE_MIN_HEALTHY', 5),
+        validateConcurrency: int(env, 'PROXY_SOURCE_VALIDATE_CONCURRENCY', 10),
+        validateTimeoutMs: int(env, 'PROXY_SOURCE_VALIDATE_TIMEOUT_MS', 5_000),
+        maxCandidates: int(env, 'PROXY_SOURCE_MAX_CANDIDATES', 5_000),
+      },
     },
 
     session: {
@@ -202,7 +241,15 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
     requestTimeoutMs: config.requestTimeoutMs,
     retry: config.retry,
     outputDir: config.outputDir,
-    proxy: { configured: proxyCount },
+    proxy: {
+      configured: proxyCount,
+      // The URL itself stays out: it is operator-supplied and may one day carry
+      // an API key, and nothing downstream needs to read it back.
+      source:
+        config.proxy.source.url === ''
+          ? null
+          : { desired_active: config.proxy.source.desiredActive },
+    },
     session: { configured: config.session.storePath !== null },
     instagram: { ...config.instagram },
   };

@@ -19,7 +19,7 @@ import {
 } from '../infrastructure/output/run-paths.js';
 import { createDefaultUrlNormalizerRegistry } from '../platforms/index.js';
 
-import { buildRunner } from './composition.js';
+import { buildRunner, createProxySupply } from './composition.js';
 import { runSession, type SessionProgress } from './scrape-session.js';
 import {
   type RecentResultDto,
@@ -392,14 +392,17 @@ export class RunService {
         context: { run_id: state.runId },
         logger: this.logger,
       });
+      const proxySupply = createProxySupply(this.config, this.logger, (event) => {
+        proxyEvents.record(event);
+      });
+      await proxySupply.source?.start();
+
       const built = await buildRunner({
         config: this.config,
         logger: this.logger,
         sink,
         overrides: { concurrency: request.concurrency, targetRpm: request.targetRpm },
-        onProxyEvent: (event) => {
-          proxyEvents.record(event);
-        },
+        proxyPool: proxySupply.pool,
       });
 
       state.state = 'running';
@@ -450,6 +453,7 @@ export class RunService {
 
       proxiesSampledAt = 0;
       sampleProxies();
+      proxySupply.source?.stop();
       await proxyEvents.close();
       await this.persistSummary(paths.summary, result.summary);
 

@@ -148,9 +148,17 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | `PROXY_POOL`                  | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct           |
 | `PROXY_MAX_FAILURES`          | `3`        | Consecutive failures before cooldown                                                 |
 | `PROXY_COOLDOWN_MS`           | `60000`    | How long a failed/blocked proxy is benched                                           |
-| `PROXY_MAX_CONCURRENT`        | `8`        | Jobs sharing one proxy at a time; `0` = unlimited                                    |
-| `PROXY_PROBATION_CONCURRENT`  | `1`        | Jobs on a proxy that has not succeeded yet, or whose last outcome failed             |
+| `PROXY_MAX_CONCURRENT`        | `8`        | Ceiling on jobs sharing one proxy; earned, not granted. `0` = unlimited              |
+| `PROXY_PROBATION_CONCURRENT`  | `1`        | Floor every proxy starts at; a proxy that has never succeeded never leaves it        |
+| `PROXY_EXPLORATION_PERIOD`    | `5`        | One lease in this many is reserved for an unproven proxy; `0` = off                  |
 | `PROXY_CONNECT_TIMEOUT_MS`    | `3000`     | Undici connect-phase timeout per proxy; must be < `SCRAPER_REQUEST_TIMEOUT_MS`       |
+| `PROXY_SOURCE_URL`            | _(empty)_  | ProxyScrape-style text endpoint for candidate proxies. Empty = feature off           |
+| `PROXY_SOURCE_REFRESH_MS`     | `900000`   | How often the candidate list is refetched                                            |
+| `PROXY_SOURCE_DESIRED_ACTIVE` | `20`       | Usable proxies to aim for; compare against `SCRAPER_CONCURRENCY`                     |
+| `PROXY_SOURCE_MIN_HEALTHY`    | `5`        | Startup blocks until this many are admitted, not until `PROXY_SOURCE_DESIRED_ACTIVE` |
+| `PROXY_SOURCE_VALIDATE_CONCURRENCY` | `10` | Simultaneous validation probes                                                       |
+| `PROXY_SOURCE_VALIDATE_TIMEOUT_MS`  | `5000` | Per-probe TCP connect timeout                                                        |
+| `PROXY_SOURCE_MAX_CANDIDATES` | `5000`     | Ceiling on remembered candidates                                                     |
 | `SESSION_STORE_PATH`          | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous                         |
 | `SESSION_MAX_FAILURES`        | `3`        | Consecutive failures before cooldown                                                 |
 | `SESSION_COOLDOWN_MS`         | `300000`   | How long a blocked session is benched                                                |
@@ -162,6 +170,18 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 **Credentials never live in source.** Proxy credentials are read from `PROXY_POOL` and
 kept inside the in-memory `ProxyTarget`; everything user-facing (logs, metrics, run
 summaries) uses a credential-free proxy id like `http://proxy-a.example.net:8000`.
+
+**`PROXY_SOURCE_URL` layers a live candidate supply on top of `PROXY_POOL`, never
+instead of it.** With it set, a background source periodically fetches a list of
+candidate proxies, TCP-probes each one to confirm it is at least reachable, and feeds
+survivors into the same pool the static list uses — rotation, cooldown, probation and
+eviction all apply to them unchanged. A TCP probe answers "reachable", not "useful";
+whether a candidate is actually good at scraping the target platform is still decided
+by the existing health system on real jobs. Every proxy reports which origin admitted
+it (`source: "config"` for `PROXY_POOL` entries, or the source's name otherwise) in
+`ProxyHealth` and in run summaries — statically configured proxies are exempt from the
+source's own eviction, so they behave exactly as they did before this feature existed.
+Leave `PROXY_SOURCE_URL` empty to keep running on `PROXY_POOL` alone.
 
 ### 5.1 Concurrency, rate, and backpressure
 
@@ -208,12 +228,36 @@ made to wait, so memory is bounded by `maxQueueSize` rather than by input size.
 A full queue is not a run failure — dropping work would be a poor trade in a
 system whose output feeds payouts.
 
-**Proxy capacity is `proxies x PROXY_MAX_CONCURRENT`.** Set to `0`, leases are
-shared without limit and the global `concurrency` is the only bound, so adding
-proxies spreads the same work over more IPs without raising throughput — and one
-dead IP can absorb a whole batch. With the limit set (default `8`), a larger pool
-genuinely scales. If `SCRAPER_CONCURRENCY` exceeds `proxies x limit`, the pool is
-the binding constraint; the surplus shows up as `waits.proxy_acquire_ms`.
+**Proxy capacity is earned, and `proxies x PROXY_MAX_CONCURRENT` is only its
+ceiling.** Every proxy starts at `PROXY_PROBATION_CONCURRENT` (default `1`),
+doubles its slots on each success up to `PROXY_MAX_CONCURRENT`, and halves them
+on each failure. What the pool can actually serve right now is the sum of that,
+reported as `proxies.capacity` in the run summary — and *that* is the number to
+compare `SCRAPER_CONCURRENCY` against. If concurrency exceeds it, the pool is the
+binding constraint and the surplus shows up as `waits.proxy_acquire_ms`.
+
+The ramp exists because the earlier model was binary: full concurrency for a
+proxy whose last outcome was a success, one slot for everything else. Real
+proxies fail intermittently, so nearly every proxy carried a recent failure
+nearly always and pool capacity collapsed to *the number of usable proxies*. One
+measured run had 23 proxies, a configured concurrency of 100, and a real ceiling
+of 18 — with an 89%-success proxy throttled exactly as hard as a dead one.
+Halving rather than collapsing keeps a good record worth something; keeping the
+floor for proxies that have never succeeded keeps a dead IP to one job at a time.
+Set `PROXY_MAX_CONCURRENT=0` to opt out entirely: leases are then shared without
+limit, the global `concurrency` is the only bound, and only the never-succeeded
+floor still applies.
+
+**Rotation reserves a share of leases for unproven proxies.** Proxies that have
+succeeded at least once are chosen by *normalised* load (`inFlight / capacity`,
+so traffic fills proxies in proportion to what they have earned) then
+least-recently-used. One lease in `PROXY_EXPLORATION_PERIOD` goes instead to the
+least-tried proxy that has never succeeded. Without that reservation a proxy
+needs a success to be preferred but is scheduled last, so it can never earn one —
+which is what made "more proxies" stop meaning "more capacity" here, and would
+have neutralised the `PROXY_SOURCE_URL` supply layer entirely. The cost is
+bounded twice: at most one lease in `N`, and at most `PROXY_MAX_FAILURES`
+requests through any one bad proxy before it cools out of the eligible set.
 
 **Proxy health is one model, used in three places.** Every attempt is classified
 once — `classifyProxyOutcome` — and that single verdict drives rotation state and
@@ -521,6 +565,12 @@ One JSON object per line, appended, UTF-8, keys in a fixed order:
 Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, actual
 throughput, raw platform HTTP calls, latency p50/p95/max, status and error breakdowns,
 retry statistics, proxy statistics and session burn/health statistics.
+
+When `PROXY_SOURCE_URL` is configured, each per-proxy entry also carries a `source`
+field (`"config"` or the source's name), and the proxy summary as a whole carries a
+`source` block — candidates seen, validating, admitted, rejected, and the configured
+`desiredActive` target — so a source-fed run is auditable after the fact the same way
+the static pool always was.
 
 When proxies are configured, a run also writes `<name>.proxy-events.jsonl`: one row per
 proxy **health transition** — never per request — recording `from`/`to` state, the reason
