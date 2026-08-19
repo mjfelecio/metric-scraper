@@ -1,0 +1,11 @@
+# Smoke-test set for `pnpm compare:tiktok-apify`.
+#
+# Four unique posts, deliberately small: this is the set the first authorized
+# paid run uses, at a $0.25 ceiling. The last two entries are the same post
+# reached through two URL forms and must be billed once — that collapse is the
+# thing to check in the dry-run output before spending anything.
+https://www.tiktok.com/@emrys8473/video/7643585712641559841
+https://www.tiktok.com/@emrys8473/video/7668862416435907873
+https://www.tiktok.com/@lyndon.films/video/7670640507646741793
+https://www.tiktok.com/@rides.withme/photo/7623071715257634068
+https://www.tiktok.com/@rides.withme/photo/7623071715257634068?is_from_webapp=1&sender_device=pc

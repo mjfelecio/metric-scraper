@@ -15,6 +15,7 @@
     "dev:web": "vite",
     "cli": "tsx src/cli/index.ts",
     "diagnose:proxy": "tsx scripts/proxy-validation-diagnostic.ts",
+    "compare:tiktok-apify": "tsx scripts/compare-tiktok-apify.ts",
     "build": "pnpm run build:server && pnpm run build:web",
     "build:server": "tsc -p tsconfig.build.json",
     "build:web": "vite build",
