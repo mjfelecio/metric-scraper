@@ -105,6 +105,6 @@ describe('redactConfig', () => {
 
     expect(redacted).not.toContain('secret');
     expect(redacted).not.toContain('proxy-a.example.net');
-    expect(redactConfig(config)['proxy']).toEqual({ configured: 2 });
+    expect(redactConfig(config)['proxy']).toEqual({ configured: 2, source: null });
   });
 });

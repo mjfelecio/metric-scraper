@@ -71,6 +71,25 @@ export const AppConfigSchema = z.object({
      * before `requestTimeoutMs` ever gets a chance to.
      */
     connectTimeoutMs: z.number().int().min(1),
+
+    /**
+     * A live supply of candidate proxies, on top of (never instead of) `pool`.
+     *
+     * An empty `url` disables the whole feature, matching how `PROXY_POOL` and
+     * `SESSION_STORE_PATH` are switched off. Candidates are validated and fed
+     * into the same pool the static list uses; nothing here decides health.
+     */
+    source: z.object({
+      url: z.string(),
+      refreshIntervalMs: z.number().int().min(0),
+      /** Usable proxies to aim for. Compare against `SCRAPER_CONCURRENCY`. */
+      desiredActive: z.number().int().min(1),
+      /** Startup waits for this many, not for `desiredActive`. */
+      minHealthy: z.number().int().min(1),
+      validateConcurrency: z.number().int().min(1),
+      validateTimeoutMs: z.number().int().min(1),
+      maxCandidates: z.number().int().min(1),
+    }),
   }),
 
   session: z.object({
@@ -142,6 +161,15 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
       maxConcurrentPerProxy: int(env, 'PROXY_MAX_CONCURRENT', 8),
       probationConcurrency: int(env, 'PROXY_PROBATION_CONCURRENT', 1),
       connectTimeoutMs: int(env, 'PROXY_CONNECT_TIMEOUT_MS', 3_000),
+      source: {
+        url: str(env.PROXY_SOURCE_URL) ?? '',
+        refreshIntervalMs: int(env, 'PROXY_SOURCE_REFRESH_MS', 900_000),
+        desiredActive: int(env, 'PROXY_SOURCE_DESIRED_ACTIVE', 20),
+        minHealthy: int(env, 'PROXY_SOURCE_MIN_HEALTHY', 5),
+        validateConcurrency: int(env, 'PROXY_SOURCE_VALIDATE_CONCURRENCY', 10),
+        validateTimeoutMs: int(env, 'PROXY_SOURCE_VALIDATE_TIMEOUT_MS', 5_000),
+        maxCandidates: int(env, 'PROXY_SOURCE_MAX_CANDIDATES', 5_000),
+      },
     },
 
     session: {
@@ -202,7 +230,15 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
     requestTimeoutMs: config.requestTimeoutMs,
     retry: config.retry,
     outputDir: config.outputDir,
-    proxy: { configured: proxyCount },
+    proxy: {
+      configured: proxyCount,
+      // The URL itself stays out: it is operator-supplied and may one day carry
+      // an API key, and nothing downstream needs to read it back.
+      source:
+        config.proxy.source.url === ''
+          ? null
+          : { desired_active: config.proxy.source.desiredActive },
+    },
     session: { configured: config.session.storePath !== null },
     instagram: { ...config.instagram },
   };

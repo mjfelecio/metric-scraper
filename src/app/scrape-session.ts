@@ -32,7 +32,7 @@ import {
 
 import {
   buildRunner,
-  createProxyPool,
+  createProxySupply,
   createSessionPool,
   type BuiltRunner,
   type RunnerOverrides,
@@ -159,9 +159,13 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     context: { session_id: sessionId },
     logger: sessionLogger,
   });
-  const proxyPool = createProxyPool(config, sessionLogger, (event) => {
+  const proxySupply = createProxySupply(config, sessionLogger, (event) => {
     proxyEvents.record(event);
   });
+  const proxyPool = proxySupply.pool;
+  // Stocked before the first cycle so it does not start against an empty pool,
+  // then topped up in the background for the rest of the session.
+  await proxySupply.source?.start();
   const sessionPool = await createSessionPool(config, sessionLogger);
 
   const concurrency = options.overrides?.concurrency ?? config.concurrency;
@@ -430,6 +434,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     rowsWritten,
   });
 
+  proxySupply.source?.stop();
   await proxyEvents.close();
 
   if (options.persistSummary !== false) {

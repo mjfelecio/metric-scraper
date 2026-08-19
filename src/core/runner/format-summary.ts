@@ -147,7 +147,7 @@ export function formatRunSummary(summary: RunSummary): string {
 
   lines.push('');
   lines.push('Proxies');
-  if (summary.proxies.configured === 0) {
+  if (summary.proxies.configured === 0 && summary.proxies.source === null) {
     lines.push('  none configured (direct connection)');
   } else {
     const proxies = summary.proxies;
@@ -163,6 +163,27 @@ export function formatRunSummary(summary: RunSummary): string {
         `${proxies.capacity === null ? '' : ` (capacity ${num(proxies.capacity)})`}`,
     );
     lines.push(`  ${pad('failures')}${num(proxies.total_failures)}`);
+    if (proxies.source !== null) {
+      const source = proxies.source;
+      // The supply is its own story: a pool short of its target because the
+      // candidates ran out reads very differently from one short because the
+      // proxies keep failing.
+      lines.push(
+        `  ${pad('source')}${source.name} — ${num(source.admitted)} admitted, ` +
+          `${num(source.candidates)} waiting, ${num(source.rejected)} rejected ` +
+          `(target ${num(source.desired_active)} active)`,
+      );
+      lines.push(
+        `  ${pad('validation')}${num(source.probe_successes)} passed / ` +
+          `${num(source.probe_failures)} failed`,
+      );
+      if (source.refresh_failures > 0) {
+        lines.push(
+          `  ${pad('source refresh')}${num(source.refresh_failures)} failure(s)` +
+            `${source.last_refresh_error === null ? '' : ` — ${source.last_refresh_error}`}`,
+        );
+      }
+    }
     if (proxies.pool_exhausted > 0) {
       // The pool, not the platform, was the limit. Worth saying outright: it is
       // otherwise indistinguishable from an upstream slowdown.

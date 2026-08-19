@@ -56,6 +56,7 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
       capacity: null,
       pool_exhausted: 0,
       total_failures: 0,
+      source: null,
       per_proxy: [],
     },
     sessions: { configured: 0, used: 0, blocked: 0, total_failures: 0, per_session: [] },
@@ -232,6 +233,8 @@ describe('buildSessionSummary proxies', () => {
     return {
       id: 'http://a:8000',
       label: 'p1',
+      source: 'config',
+      admittedAt: 0,
       state: 'cooling',
       blockKind: 'consecutive_failures',
       requests: 15,
@@ -273,6 +276,7 @@ describe('buildSessionSummary proxies', () => {
       poolExhaustedCount: 2,
       totalRequests: 15,
       totalFailures: 4,
+      source: null,
       perProxy,
     };
   }
@@ -293,10 +297,12 @@ describe('buildSessionSummary proxies', () => {
           capacity: 1,
           pool_exhausted: 0,
           total_failures: failures,
+          source: null,
           per_proxy: [
             {
               proxy_id: 'http://a:8000',
               label: 'p1',
+              source: 'config',
               state: 'healthy',
               block_kind: null,
               requests: 5,

@@ -274,16 +274,50 @@ describe('InMemoryProxyPool health', () => {
     await expect(proxies.acquire()).rejects.toThrow(/blocked or cooling down/);
   });
 
-  it('clears a cooldown once the proxy succeeds again', async () => {
-    const { pool: proxies } = pool({ names: ['a'], maxConsecutiveFailures: 1 });
+  it('records a success during a cooldown without cutting the cooldown short', async () => {
+    const { pool: proxies, advance } = pool({
+      names: ['a'],
+      maxConsecutiveFailures: 1,
+      cooldownMs: 60_000,
+    });
 
     const lease = await proxies.acquire();
     proxies.reportFailure(lease!, 'timeout');
     expect(proxies.getStats().perProxy[0]?.cooldownUntil).not.toBeNull();
 
+    // A job leased before the bench is still in flight, and reports back after
+    // it. Crediting the success is right; letting it un-bench the proxy is not
+    // — that turned a 60 s cooldown into a few hundred milliseconds and
+    // cancelled detected blocks outright.
     proxies.reportSuccess(lease!);
-    expect(proxies.getStats().perProxy[0]?.cooldownUntil).toBeNull();
+    expect(proxies.getStats().perProxy[0]?.successes).toBe(1);
     expect(proxies.getStats().perProxy[0]?.consecutiveFailures).toBe(0);
+    expect(proxies.getStats().perProxy[0]?.cooldownUntil).not.toBeNull();
+    expect(proxies.getStats().perProxy[0]?.state).toBe('cooling');
+
+    advance(60_000);
+    expect(proxies.getStats().perProxy[0]?.cooldownUntil).toBeNull();
+  });
+
+  it('gives a proxy a fresh failure budget once its cooldown is served', async () => {
+    const { pool: proxies, advance } = pool({
+      names: ['a'],
+      maxConsecutiveFailures: 2,
+      cooldownMs: 60_000,
+    });
+
+    const lease = (await proxies.acquire())!;
+    proxies.reportFailure(lease, 'timeout');
+    proxies.reportFailure(lease, 'timeout');
+    expect(proxies.getStats().perProxy[0]?.state).toBe('cooling');
+
+    advance(60_000);
+    // Carrying the counter over left the proxy one failure from a threshold it
+    // had just served in full — a one-strike policy wearing a three-strike name.
+    expect(proxies.getStats().perProxy[0]?.consecutiveFailures).toBe(0);
+
+    proxies.reportFailure(lease, 'timeout');
+    expect(proxies.getStats().perProxy[0]?.state).not.toBe('cooling');
   });
 
   it('retires a proxy whose exit node keeps coming back unsuitable', async () => {
@@ -399,9 +433,9 @@ describe('InMemoryProxyPool observability', () => {
     expect(stateOf(proxies, first.id)).toBe('cooling');
 
     advance(1);
-    // Back in rotation, but not yet trusted: it has failures against it since
-    // its last success.
-    expect(stateOf(proxies, first.id)).toBe('probation');
+    // A served cooldown clears the failure counter, so a proxy that had already
+    // proved itself comes back trusted rather than one failure from the bench.
+    expect(stateOf(proxies, first.id)).toBe('healthy');
 
     // A proxy stops being `untested` the moment it is leased rather than when
     // the first outcome lands, so the first transition is out of probation.
@@ -409,7 +443,7 @@ describe('InMemoryProxyPool observability', () => {
       'probation->healthy',
       'healthy->probation',
       'probation->cooling',
-      'cooling->probation',
+      'cooling->healthy',
     ]);
   });
 
@@ -533,3 +567,92 @@ describe('InMemoryProxyPool observability', () => {
 function stateOf(instance: InMemoryProxyPool, id: string): string | undefined {
   return instance.getStats().perProxy.find((entry) => entry.id === id)?.state;
 }
+
+describe('InMemoryProxyPool roster', () => {
+  it('adds proxies while the pool is running and wakes anything waiting for capacity', async () => {
+    const { pool: proxies } = pool({ names: ['a'], maxConcurrentPerProxy: 1 });
+
+    const held = (await proxies.acquire())!;
+    proxies.reportSuccess(held);
+
+    // The pool is full, so this cannot resolve until capacity appears.
+    let settled = false;
+    const waiting = proxies.acquire().then((lease) => {
+      settled = true;
+      return lease;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    expect(proxies.add([target('b')], 'fake')).toBe(1);
+    const lease = await waiting;
+
+    expect(lease?.id).toBe('http://b.example.net:8000');
+    expect(proxies.getStats().configured).toBe(2);
+  });
+
+  it('ignores an id it already holds instead of resetting that proxy', async () => {
+    const { pool: proxies } = pool({ names: ['a'] });
+
+    const lease = (await proxies.acquire())!;
+    proxies.reportFailure(lease, 'boom', 'network_error');
+    proxies.release(lease);
+
+    // A source that lists the same proxy on every refresh must not be able to
+    // wipe its history simply by naming it again.
+    expect(proxies.add([target('a')], 'fake')).toBe(0);
+    expect(proxies.getStats().configured).toBe(1);
+    expect(proxies.getStats().perProxy[0]?.consecutiveFailures).toBe(1);
+    expect(proxies.getStats().perProxy[0]?.source).toBe('config');
+  });
+
+  it('keeps two entries on one host:port apart when their credentials differ', () => {
+    const { pool: proxies } = pool({ names: [], targets: [] });
+    const base = target('gate');
+
+    expect(proxies.add([{ ...base, username: 'one', url: 'http://one:p@gate.example.net:8000' }])).toBe(1);
+    expect(proxies.add([{ ...base, username: 'two', url: 'http://two:p@gate.example.net:8000' }])).toBe(1);
+
+    const ids = proxies.getStats().perProxy.map((proxy) => proxy.id);
+    expect(new Set(ids).size).toBe(2);
+    // The credential never reaches the id, only a digest of the full URL.
+    for (const id of ids) expect(id).not.toContain('p@');
+  });
+
+  it('evicts an idle proxy but refuses one that still owes an outcome', async () => {
+    const { pool: proxies } = pool({ names: ['a', 'b'] });
+
+    const lease = (await proxies.acquire())!;
+    // The job still holds the target and will report against it; dropping the
+    // entry underneath it would silently discard that outcome.
+    expect(proxies.evict(lease.id)).toBe(false);
+
+    proxies.release(lease);
+    expect(proxies.evict(lease.id)).toBe(true);
+    expect(proxies.getStats().configured).toBe(1);
+    expect(proxies.evict(lease.id)).toBe(false);
+  });
+
+  it('never reuses a label after churn', () => {
+    const { pool: proxies } = pool({ names: ['a'] });
+
+    proxies.add([target('b')], 'fake');
+    proxies.evict('http://a.example.net:8000');
+    proxies.add([target('c')], 'fake');
+
+    const labels = proxies.getStats().perProxy.map((proxy) => proxy.label);
+    // Indices are reused as proxies come and go; a label that silently changes
+    // meaning is worse than no label at all.
+    expect(labels).toEqual(['p2', 'p3']);
+  });
+
+  it('records where each proxy came from', () => {
+    const { pool: proxies } = pool({ names: ['a'] });
+    proxies.add([target('b')], 'proxyscrape');
+
+    const bySource = Object.fromEntries(
+      proxies.getStats().perProxy.map((proxy) => [proxy.label, proxy.source]),
+    );
+    expect(bySource).toEqual({ p1: 'config', p2: 'proxyscrape' });
+  });
+});

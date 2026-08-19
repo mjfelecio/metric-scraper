@@ -151,6 +151,13 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | `PROXY_MAX_CONCURRENT`        | `8`        | Jobs sharing one proxy at a time; `0` = unlimited                                    |
 | `PROXY_PROBATION_CONCURRENT`  | `1`        | Jobs on a proxy that has not succeeded yet, or whose last outcome failed             |
 | `PROXY_CONNECT_TIMEOUT_MS`    | `3000`     | Undici connect-phase timeout per proxy; must be < `SCRAPER_REQUEST_TIMEOUT_MS`       |
+| `PROXY_SOURCE_URL`            | _(empty)_  | ProxyScrape-style text endpoint for candidate proxies. Empty = feature off           |
+| `PROXY_SOURCE_REFRESH_MS`     | `900000`   | How often the candidate list is refetched                                            |
+| `PROXY_SOURCE_DESIRED_ACTIVE` | `20`       | Usable proxies to aim for; compare against `SCRAPER_CONCURRENCY`                     |
+| `PROXY_SOURCE_MIN_HEALTHY`    | `5`        | Startup blocks until this many are admitted, not until `PROXY_SOURCE_DESIRED_ACTIVE` |
+| `PROXY_SOURCE_VALIDATE_CONCURRENCY` | `10` | Simultaneous validation probes                                                       |
+| `PROXY_SOURCE_VALIDATE_TIMEOUT_MS`  | `5000` | Per-probe TCP connect timeout                                                        |
+| `PROXY_SOURCE_MAX_CANDIDATES` | `5000`     | Ceiling on remembered candidates                                                     |
 | `SESSION_STORE_PATH`          | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous                         |
 | `SESSION_MAX_FAILURES`        | `3`        | Consecutive failures before cooldown                                                 |
 | `SESSION_COOLDOWN_MS`         | `300000`   | How long a blocked session is benched                                                |
@@ -162,6 +169,18 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 **Credentials never live in source.** Proxy credentials are read from `PROXY_POOL` and
 kept inside the in-memory `ProxyTarget`; everything user-facing (logs, metrics, run
 summaries) uses a credential-free proxy id like `http://proxy-a.example.net:8000`.
+
+**`PROXY_SOURCE_URL` layers a live candidate supply on top of `PROXY_POOL`, never
+instead of it.** With it set, a background source periodically fetches a list of
+candidate proxies, TCP-probes each one to confirm it is at least reachable, and feeds
+survivors into the same pool the static list uses — rotation, cooldown, probation and
+eviction all apply to them unchanged. A TCP probe answers "reachable", not "useful";
+whether a candidate is actually good at scraping the target platform is still decided
+by the existing health system on real jobs. Every proxy reports which origin admitted
+it (`source: "config"` for `PROXY_POOL` entries, or the source's name otherwise) in
+`ProxyHealth` and in run summaries — statically configured proxies are exempt from the
+source's own eviction, so they behave exactly as they did before this feature existed.
+Leave `PROXY_SOURCE_URL` empty to keep running on `PROXY_POOL` alone.
 
 ### 5.1 Concurrency, rate, and backpressure
 
@@ -521,6 +540,12 @@ One JSON object per line, appended, UTF-8, keys in a fixed order:
 Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, actual
 throughput, raw platform HTTP calls, latency p50/p95/max, status and error breakdowns,
 retry statistics, proxy statistics and session burn/health statistics.
+
+When `PROXY_SOURCE_URL` is configured, each per-proxy entry also carries a `source`
+field (`"config"` or the source's name), and the proxy summary as a whole carries a
+`source` block — candidates seen, validating, admitted, rejected, and the configured
+`desiredActive` target — so a source-fed run is auditable after the fact the same way
+the static pool always was.
 
 When proxies are configured, a run also writes `<name>.proxy-events.jsonl`: one row per
 proxy **health transition** — never per request — recording `from`/`to` state, the reason

@@ -1,4 +1,4 @@
-import { buildRunner, type RunnerOverrides } from '../app/composition.js';
+import { buildRunner, createProxySupply, type RunnerOverrides } from '../app/composition.js';
 import { loadConfig, type AppConfig } from '../config/env.js';
 import { parseInput } from '../core/input/parse-input.js';
 import { ScrapeError } from '../core/models/errors.js';
@@ -60,14 +60,17 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
 
   const sink = new JsonlFileSink({ filePath: paths.snapshots });
   const proxyEvents = new ProxyEventLog({ filePath: paths.proxyEvents, logger });
+  const proxySupply = createProxySupply(config, logger, (event) => {
+    proxyEvents.record(event);
+  });
+  await proxySupply.source?.start();
+
   const built = await buildRunner({
     config,
     logger,
     sink,
     overrides: options.overrides,
-    onProxyEvent: (event) => {
-      proxyEvents.record(event);
-    },
+    proxyPool: proxySupply.pool,
   });
 
   const progress = new ProgressReporter({
@@ -91,6 +94,7 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
     onProgress: (update) => progress.update(update),
   });
   progress.done();
+  proxySupply.source?.stop();
   await proxyEvents.close();
 
   await writeRunSummary(paths.summary, result.summary);

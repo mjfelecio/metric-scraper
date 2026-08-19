@@ -12,6 +12,11 @@ import {
   type ProxyPoolStats,
   type ProxyState,
 } from '../../core/scraper/pool-ports.js';
+import {
+  CONFIG_SOURCE,
+  type ProxyRoster,
+  type ProxySourceStats,
+} from '../../core/scraper/proxy-source-ports.js';
 
 import { proxyId, redactEntry } from './proxy-config.js';
 
@@ -59,8 +64,12 @@ export interface InMemoryProxyPoolOptions {
 
 interface ProxyEntry {
   readonly id: string;
-  /** `p1`…`pN`, from configuration order. Short enough to scan a table by. */
+  /** `p1`…`pN`, in admission order. Short enough to scan a table by. */
   readonly label: string;
+  /** `config`, or the name of the source that supplied it. */
+  readonly source: string;
+  /** Epoch ms it joined the roster. */
+  readonly admittedAt: number;
   readonly target: ProxyTarget;
   requests: number;
   successes: number;
@@ -124,10 +133,11 @@ interface ProxyEntry {
  * same fields and published through `getStats`, so an observability view can
  * never disagree with what rotation actually did.
  */
-export class InMemoryProxyPool implements ProxyPool {
-  private readonly entries: ProxyEntry[];
+export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
+  /** Mutable: a dynamic source adds and evicts entries while the pool runs. */
+  private entries: ProxyEntry[] = [];
   /** Lookup by lease id. A linear scan ran on every report and every release. */
-  private readonly byId: Map<string, ProxyEntry>;
+  private readonly byId = new Map<string, ProxyEntry>();
   private readonly maxConsecutiveFailures: number;
   private readonly cooldownMs: number;
   private readonly maxConcurrentPerProxy: number;
@@ -139,7 +149,16 @@ export class InMemoryProxyPool implements ProxyPool {
   private waiters: (() => void)[] = [];
   /** Monotonic checkout counter backing LRU rotation. */
   private sequence = 0;
+  /**
+   * Monotonic label counter.
+   *
+   * Not an index into `entries`: with a dynamic roster, indices are reused as
+   * proxies come and go, and a label that silently changes meaning is worse
+   * than no label at all.
+   */
+  private labelSequence = 0;
   private poolExhaustedCount = 0;
+  private sourceStatsProvider: (() => ProxySourceStats) | null = null;
 
   constructor(options: InMemoryProxyPoolOptions) {
     this.now = options.now ?? (() => Date.now());
@@ -149,8 +168,103 @@ export class InMemoryProxyPool implements ProxyPool {
     this.probationConcurrency = Math.max(1, options.probationConcurrency ?? 1);
     this.onEvent = options.onEvent ?? null;
     this.logger = options.logger ?? nullLogger;
-    this.entries = assignIdentities(options.targets, this.logger);
-    this.byId = new Map(this.entries.map((entry) => [entry.id, entry]));
+    this.add(options.targets, CONFIG_SOURCE);
+  }
+
+  /**
+   * Adds entries the pool does not already hold, returning how many were new.
+   *
+   * Ids it already holds are skipped rather than replaced: a source that lists
+   * the same proxy on every refresh must not be able to reset that proxy's
+   * health simply by naming it again, which is the whole point of tracking
+   * identity across refreshes.
+   */
+  add(targets: readonly ProxyTarget[], source: string = CONFIG_SOURCE): number {
+    const now = this.now();
+    let added = 0;
+
+    for (const target of targets) {
+      const id = this.identify(target);
+      if (id === null) continue;
+
+      const entry: ProxyEntry = {
+        id,
+        label: `p${++this.labelSequence}`,
+        source,
+        admittedAt: now,
+        target,
+        requests: 0,
+        successes: 0,
+        failures: 0,
+        unsuitable: 0,
+        consecutiveFailures: 0,
+        consecutiveUnsuitable: 0,
+        blocked: false,
+        retired: false,
+        cooldownUntil: null,
+        blockKind: null,
+        inFlight: 0,
+        lastUsedAt: null,
+        firstUsedAt: null,
+        lastSuccessAt: null,
+        lastFailureAt: null,
+        unhealthySince: null,
+        lastReason: null,
+        lastErrorCode: null,
+        lastUsedSeq: 0,
+      };
+      this.entries.push(entry);
+      this.byId.set(id, entry);
+      added += 1;
+    }
+
+    // New capacity is only useful to jobs already blocked on a full pool.
+    if (added > 0) this.wakeWaiters();
+    return added;
+  }
+
+  /**
+   * Removes an entry from rotation for good.
+   *
+   * Refuses while leases are outstanding: those jobs still hold the target and
+   * will report an outcome against it, and dropping the entry underneath them
+   * would silently discard that outcome.
+   */
+  evict(id: string): boolean {
+    const entry = this.byId.get(id);
+    if (entry === undefined || entry.inFlight > 0) return false;
+
+    this.byId.delete(id);
+    this.entries = this.entries.filter((candidate) => candidate !== entry);
+    return true;
+  }
+
+  setSourceStatsProvider(provider: (() => ProxySourceStats) | null): void {
+    this.sourceStatsProvider = provider;
+  }
+
+  /**
+   * The id this target would take, or `null` if the pool already holds it.
+   *
+   * `proxyId` is credential-free, so two entries on one gateway host — the
+   * ordinary shape of a rotating residential pool, where the username carries
+   * the session — would otherwise collapse onto a single id and have their
+   * health merged. A short digest of the full URL separates them without
+   * putting any part of the credential in the id.
+   */
+  private identify(target: ProxyTarget): string | null {
+    const base = proxyId(target);
+    const existing = this.byId.get(base);
+    if (existing === undefined) return base;
+    if (existing.target.url === target.url) return null;
+
+    const suffixed = `${base}#${fingerprint(target.url)}`;
+    if (this.byId.has(suffixed)) return null;
+    this.logger.warn(
+      { proxy_id: base },
+      'multiple proxy entries share one host:port; ids are suffixed so their health stays separate',
+    );
+    return suffixed;
   }
 
   get size(): number {
@@ -234,11 +348,21 @@ export class InMemoryProxyPool implements ProxyPool {
     if (entry === undefined) return;
 
     this.transition(entry, () => {
+      const now = this.now();
       entry.successes += 1;
       entry.consecutiveFailures = 0;
       entry.consecutiveUnsuitable = 0;
+      entry.lastSuccessAt = now;
+
+      // A straggler must not un-bench a proxy. Health is only evaluated when a
+      // lease is handed out, so jobs leased *before* the bench are still in
+      // flight; letting one of them clear `cooldownUntil` on the way out meant
+      // a 60 s cooldown was served for a few hundred milliseconds, and a
+      // detected block was cancelled outright. The success is still recorded —
+      // it just does not shorten the sentence.
+      if (!this.isUsable(entry, now)) return;
+
       entry.cooldownUntil = null;
-      entry.lastSuccessAt = this.now();
       // A success is the end of whatever was wrong, so the diagnosis goes with
       // it: leaving the old reason behind makes a healthy proxy read as sick.
       entry.blockKind = null;
@@ -334,6 +458,8 @@ export class InMemoryProxyPool implements ProxyPool {
     const perProxy: ProxyHealth[] = this.entries.map((entry) => ({
       id: entry.id,
       label: entry.label,
+      source: entry.source,
+      admittedAt: entry.admittedAt,
       state: this.stateOf(entry, now),
       blockKind: entry.blockKind,
       requests: entry.requests,
@@ -381,6 +507,7 @@ export class InMemoryProxyPool implements ProxyPool {
       poolExhaustedCount: this.poolExhaustedCount,
       totalRequests: perProxy.reduce((total, proxy) => total + proxy.requests, 0),
       totalFailures: perProxy.reduce((total, proxy) => total + proxy.failures, 0),
+      source: this.sourceStatsProvider?.() ?? null,
       perProxy,
     };
   }
@@ -451,9 +578,12 @@ export class InMemoryProxyPool implements ProxyPool {
       entry.blocked = false;
       entry.blockKind = null;
       entry.unhealthySince = null;
-      // Back in rotation, but not yet trusted: it still has failures against it
-      // since its last success, so probation keeps its exposure small until it
-      // proves itself again.
+      // A served cooldown is the punishment in full, so the counter starts
+      // again. Carrying it over left the proxy one failure from the threshold
+      // it had just cleared, which is a one-strike policy wearing a
+      // three-strike name — and it never expired on its own, because a proxy
+      // that cannot reach the threshold again is a proxy nothing routes to.
+      entry.consecutiveFailures = 0;
       this.emit(entry, from, this.healthOf(entry, now), entry.lastReason, entry.lastErrorCode);
     }
   }
@@ -547,60 +677,6 @@ export class InMemoryProxyPool implements ProxyPool {
   }
 }
 
-/**
- * Builds the pool's entries, giving every one a label and a unique id.
- *
- * `proxyId` is deliberately credential-free, which means two entries on the
- * same gateway host — the ordinary shape of a rotating residential pool, where
- * the username carries the session — collapse onto one id. Every outcome would
- * then be attributed to whichever entry was found first, so one proxy's
- * failures could bench another's health. A short digest of the full URL
- * separates them without putting any part of the credential in the id.
- */
-function assignIdentities(targets: readonly ProxyTarget[], logger: Logger): ProxyEntry[] {
-  const counts = new Map<string, number>();
-  for (const target of targets) {
-    const id = proxyId(target);
-    counts.set(id, (counts.get(id) ?? 0) + 1);
-  }
-
-  return targets.map((target, index) => {
-    const base = proxyId(target);
-    const duplicated = (counts.get(base) ?? 0) > 1;
-    if (duplicated && index === targets.findIndex((other) => proxyId(other) === base)) {
-      logger.warn(
-        { proxy_id: base, entries: counts.get(base) },
-        'multiple proxy entries share one host:port; ids are suffixed so their health stays separate',
-      );
-    }
-
-    return {
-      id: duplicated ? `${base}#${fingerprint(target.url)}` : base,
-      label: `p${index + 1}`,
-      target,
-      requests: 0,
-      successes: 0,
-      failures: 0,
-      unsuitable: 0,
-      consecutiveFailures: 0,
-      consecutiveUnsuitable: 0,
-      blocked: false,
-      retired: false,
-      cooldownUntil: null,
-      blockKind: null,
-      inFlight: 0,
-      lastUsedAt: null,
-      firstUsedAt: null,
-      lastSuccessAt: null,
-      lastFailureAt: null,
-      unhealthySince: null,
-      lastReason: null,
-      lastErrorCode: null,
-      lastUsedSeq: 0,
-    };
-  });
-}
-
 /** Stable, non-reversible, and short enough to read in a table. */
 function fingerprint(url: string): string {
   return createHash('sha256').update(url).digest('hex').slice(0, 4);
@@ -638,6 +714,7 @@ export class NullProxyPool implements ProxyPool {
       poolExhaustedCount: 0,
       totalRequests: 0,
       totalFailures: 0,
+      source: null,
       perProxy: [],
     };
   }

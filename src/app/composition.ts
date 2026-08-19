@@ -16,6 +16,9 @@ import { FetchHttpClient } from '../infrastructure/http/fetch-http-client.js';
 import { RateLimitedHttpClient } from '../infrastructure/http/rate-limited-http-client.js';
 import { InMemoryProxyPool, NullProxyPool } from '../infrastructure/proxy/in-memory-proxy-pool.js';
 import { parseProxyList } from '../infrastructure/proxy/proxy-config.js';
+import { ProxyScrapeSource } from '../infrastructure/proxy/proxyscrape-source.js';
+import { ProxySourceManager } from '../infrastructure/proxy/proxy-source-manager.js';
+import { TcpProxyProbe } from '../infrastructure/proxy/tcp-proxy-probe.js';
 import {
   InMemorySessionPool,
   NullSessionPool,
@@ -155,29 +158,90 @@ export function createProxyAgentFactory(config: AppConfig): (target: ProxyTarget
   };
 }
 
+/**
+ * A pool plus, when configured, the service that keeps it stocked.
+ *
+ * Returned together because their lifetimes are the same: the manager holds
+ * timers and must be stopped wherever the pool stops being used.
+ */
+export interface ProxySupply {
+  pool: ProxyPool;
+  /** `null` unless `PROXY_SOURCE_URL` is set. */
+  source: ProxySourceManager | null;
+}
+
+/**
+ * Builds the proxy pool and, if a candidate source is configured, wires it in.
+ *
+ * The static `PROXY_POOL` list keeps working exactly as before: its entries are
+ * seeded first and marked `config`, which is what exempts them from the
+ * eviction the dynamic source applies to its own candidates.
+ */
+export function createProxySupply(
+  config: AppConfig,
+  logger: Logger,
+  onProxyEvent?: ProxyEventListener,
+): ProxySupply {
+  const sourceUrl = config.proxy.source.url;
+  const pool = createProxyPool(config, logger, onProxyEvent, sourceUrl !== '');
+  if (sourceUrl === '' || !(pool instanceof InMemoryProxyPool)) {
+    return { pool, source: null };
+  }
+
+  // Direct transport, deliberately: fetching the list of proxies through a
+  // proxy we are not yet sure works would make an empty pool unrecoverable.
+  const http = new FetchHttpClient({ defaultTimeoutMs: config.requestTimeoutMs });
+  const settings = config.proxy.source;
+
+  const source = new ProxySourceManager({
+    source: new ProxyScrapeSource({ url: sourceUrl, http, logger }),
+    probe: new TcpProxyProbe({ timeoutMs: settings.validateTimeoutMs }),
+    roster: pool,
+    desiredActive: settings.desiredActive,
+    minHealthy: settings.minHealthy,
+    validateConcurrency: settings.validateConcurrency,
+    refreshIntervalMs: settings.refreshIntervalMs,
+    maxCandidates: settings.maxCandidates,
+    logger,
+  });
+
+  logger.info(
+    {
+      desired_active: settings.desiredActive,
+      min_healthy: settings.minHealthy,
+      configured: pool.size,
+    },
+    'dynamic proxy source configured',
+  );
+  return { pool, source };
+}
+
 export function createProxyPool(
   config: AppConfig,
   logger: Logger,
   onProxyEvent?: ProxyEventListener,
+  /** Keep a real pool even with no static entries, so a source can fill it. */
+  allowEmpty = false,
 ): ProxyPool {
   const targets = parseProxyList(config.proxy.pool);
-  if (targets.length === 0) {
+  if (targets.length === 0 && !allowEmpty) {
     logger.debug('no proxies configured; requests will go out directly');
     return new NullProxyPool();
   }
-  logger.info(
-    {
-      proxies: targets.length,
-      max_concurrent_per_proxy: config.proxy.maxConcurrentPerProxy,
-      // The ceiling on simultaneous proxied requests. Below the configured
-      // concurrency, this — not the queue — is what the run is bounded by.
-      capacity:
-        config.proxy.maxConcurrentPerProxy === 0
-          ? null
-          : targets.length * config.proxy.maxConcurrentPerProxy,
-    },
-    'proxy pool configured',
-  );
+  if (targets.length > 0)
+    logger.info(
+      {
+        proxies: targets.length,
+        max_concurrent_per_proxy: config.proxy.maxConcurrentPerProxy,
+        // The ceiling on simultaneous proxied requests. Below the configured
+        // concurrency, this — not the queue — is what the run is bounded by.
+        capacity:
+          config.proxy.maxConcurrentPerProxy === 0
+            ? null
+            : targets.length * config.proxy.maxConcurrentPerProxy,
+      },
+      'proxy pool configured',
+    );
   return new InMemoryProxyPool({
     targets,
     maxConsecutiveFailures: config.proxy.maxConsecutiveFailures,
