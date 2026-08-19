@@ -111,7 +111,7 @@ export function formatSessionSummary(summary: SessionSummary): string {
   lines.push(`  ${pad('retried requests')}${num(summary.retries.retried_requests)}`);
   lines.push(`  ${pad('exhausted')}${num(summary.retries.exhausted_requests)}`);
 
-  if (summary.proxies.configured > 0) {
+  if (summary.proxies.configured > 0 || summary.proxies.source !== null) {
     const proxies = summary.proxies;
     lines.push('');
     lines.push('Proxies   (cumulative over the session; state as it stood at the end)');
@@ -120,6 +120,24 @@ export function formatSessionSummary(summary: SessionSummary): string {
     lines.push(`  ${pad('cooling at end')}${num(proxies.cooling)}`);
     lines.push(`  ${pad('retired')}${num(proxies.retired)}`);
     lines.push(`  ${pad('failures')}${num(proxies.total_failures)}`);
+    if (proxies.source !== null) {
+      const source = proxies.source;
+      lines.push(
+        `  ${pad('source')}${source.name} — ${num(source.admitted)} admitted, ` +
+          `${num(source.candidates)} waiting, ${num(source.rejected)} rejected ` +
+          `(target ${num(source.target_capacity)} slots)`,
+      );
+      lines.push(
+        `  ${pad('validation')}${num(source.probe_successes)} passed / ` +
+          `${num(source.probe_failures)} failed`,
+      );
+      if (source.refresh_failures > 0) {
+        lines.push(
+          `  ${pad('source refresh')}${num(source.refresh_failures)} failure(s)` +
+            `${source.last_refresh_error === null ? '' : ` — ${source.last_refresh_error}`}`,
+        );
+      }
+    }
     if (proxies.pool_exhausted > 0) {
       lines.push(
         `  ${pad('pool exhausted')}${num(proxies.pool_exhausted)} time(s) — every proxy was out at once`,

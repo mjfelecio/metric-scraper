@@ -2,6 +2,7 @@ import { type ScrapeErrorCode } from '../models/errors.js';
 import { type Platform } from '../models/platform.js';
 
 import { type ProxyLease, type SessionLease } from './lease-ports.js';
+import { type ProxySourceStats } from './proxy-source-ports.js';
 
 /**
  * What a proxy is doing right now, as one readable value.
@@ -28,7 +29,15 @@ export const PROXY_STATES = [
    * never as the `from` of a transition.
    */
   'untested',
-  /** Usable, capped low: never succeeded, or failing since its last success. */
+  /**
+   * Usable, with an unresolved failure against it: never succeeded, or failing
+   * since its last success.
+   *
+   * Says nothing on its own about how much work it may take — capacity is
+   * earned per proxy and reported in `capacity`. A proxy with a long good
+   * record still holds several slots here; one that has never succeeded holds
+   * exactly one.
+   */
   'probation',
   /** Proven and usable, but every slot it has is taken right now. */
   'saturated',
@@ -55,8 +64,16 @@ export function isUsableState(state: ProxyState): boolean {
 
 export interface ProxyHealth {
   id: string;
-  /** `p1`…`pN`, assigned from configuration order. Stable for the pool's life. */
+  /** `p1`…`pN`, assigned in admission order. Stable for the pool's life. */
   label: string;
+  /**
+   * Where this entry came from: `config` for a statically configured proxy, or
+   * the name of the source that supplied it. Config entries are never evicted.
+   */
+  source: string;
+  /** Epoch ms when it entered the roster. Differs from `firstUsedAt` for a
+   * proxy admitted but not yet leased. */
+  admittedAt: number;
   state: ProxyState;
   /** Set only while the proxy is out of rotation. */
   blockKind: ProxyBlockKind | null;
@@ -79,7 +96,10 @@ export interface ProxyHealth {
   inUse: boolean;
   /** Jobs holding a lease right now. `inUse` is this being non-zero. */
   inFlight: number;
-  /** Jobs it may hold right now, given its health. `null` means unlimited. */
+  /**
+   * Jobs it may hold right now: the concurrency it has earned, capped by the
+   * configured per-proxy limit. `null` means unlimited.
+   */
   capacity: number | null;
   /** Epoch ms of the first lease ever taken on it; `null` if never used. */
   firstUsedAt: number | null;
@@ -109,7 +129,12 @@ export interface ProxyPoolStats {
   saturated: number;
   /** Leases held across the whole pool. The denominator for load skew. */
   totalInFlight: number;
-  /** Sum of per-proxy capacity for usable proxies. `null` when unlimited. */
+  /**
+   * Sum of per-proxy capacity for usable proxies. `null` when unlimited.
+   *
+   * The pool's *actual* ceiling, not `proxies × limit`: capacity is earned, so
+   * this is what a configured `SCRAPER_CONCURRENCY` is really competing for.
+   */
   capacity: number | null;
   /**
    * Times `acquire` found nothing usable and threw.
@@ -121,6 +146,14 @@ export interface ProxyPoolStats {
   poolExhaustedCount: number;
   totalRequests: number;
   totalFailures: number;
+  /**
+   * Candidate-supply counters, when a dynamic source is configured.
+   *
+   * Published here rather than alongside so that one snapshot answers both
+   * "what is the pool doing" and "where is its capacity coming from" — the
+   * dashboard and the run summary already carry this object.
+   */
+  source: ProxySourceStats | null;
   perProxy: ProxyHealth[];
 }
 

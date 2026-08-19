@@ -1,9 +1,10 @@
-import { type AppConfig } from '../config/env.js';
+import { type AppConfig, resolveTargetCapacity } from '../config/env.js';
 import { ProxyAgent } from 'undici';
 import { type Logger } from '../core/logging/logger.js';
 import { MetricsCollector } from '../core/metrics/metrics-collector.js';
 import { type SnapshotSink } from '../core/output/snapshot-sink.js';
 import { RetryPolicy, type RetryPolicyOptions } from '../core/retry/retry-policy.js';
+import { type ProxyTarget } from '../core/scraper/lease-ports.js';
 import {
   type ProxyEventListener,
   type ProxyPool,
@@ -15,6 +16,9 @@ import { FetchHttpClient } from '../infrastructure/http/fetch-http-client.js';
 import { RateLimitedHttpClient } from '../infrastructure/http/rate-limited-http-client.js';
 import { InMemoryProxyPool, NullProxyPool } from '../infrastructure/proxy/in-memory-proxy-pool.js';
 import { parseProxyList } from '../infrastructure/proxy/proxy-config.js';
+import { ProxyScrapeSource } from '../infrastructure/proxy/proxyscrape-source.js';
+import { ProxySourceManager } from '../infrastructure/proxy/proxy-source-manager.js';
+import { HttpCanaryProxyProbe } from '../infrastructure/proxy/http-canary-proxy-probe.js';
 import {
   InMemorySessionPool,
   NullSessionPool,
@@ -80,23 +84,10 @@ export async function buildRunner(options: {
   const proxyPool = options.proxyPool ?? createProxyPool(config, logger, options.onProxyEvent);
   const sessionPool = options.sessionPool ?? (await createSessionPool(config, logger));
   const metrics = new MetricsCollector();
-  const proxyAgents = new Map<string, ProxyAgent>();
 
   const transport = new FetchHttpClient({
     defaultTimeoutMs: config.requestTimeoutMs,
-    dispatcherFactory: (target) => {
-      if (target.protocol !== 'http' && target.protocol !== 'https') {
-        throw new Error(
-          `proxy protocol ${target.protocol} is not supported by the fetch transport; use http or https`,
-        );
-      }
-      let agent = proxyAgents.get(target.url);
-      if (agent === undefined) {
-        agent = new ProxyAgent(target.url);
-        proxyAgents.set(target.url, agent);
-      }
-      return agent;
-    },
+    dispatcherFactory: createProxyAgentFactory(config),
   });
 
   // Egress limiting wraps the transport, so retries and the multi-hop calls a
@@ -141,35 +132,152 @@ export async function buildRunner(options: {
   };
 }
 
+/**
+ * Builds a per-proxy `ProxyAgent` dispatcher, one per distinct proxy URL, with
+ * an explicit connect-phase timeout.
+ *
+ * Undici defaults to a 10s connect timeout otherwise, which lets a dead proxy
+ * sit half-connected for 10s per attempt — most of a 15s request timeout that
+ * never gets the chance to fire, and the dominant cost of scraping through a
+ * partly-dead pool.
+ */
+export function createProxyAgentFactory(config: AppConfig): (target: ProxyTarget) => unknown {
+  const proxyAgents = new Map<string, ProxyAgent>();
+  return (target) => {
+    if (target.protocol !== 'http' && target.protocol !== 'https') {
+      throw new Error(
+        `proxy protocol ${target.protocol} is not supported by the fetch transport; use http or https`,
+      );
+    }
+    let agent = proxyAgents.get(target.url);
+    if (agent === undefined) {
+      agent = new ProxyAgent({ uri: target.url, connectTimeout: config.proxy.connectTimeoutMs });
+      proxyAgents.set(target.url, agent);
+    }
+    return agent;
+  };
+}
+
+/**
+ * A pool plus, when configured, the service that keeps it stocked.
+ *
+ * Returned together because their lifetimes are the same: the manager holds
+ * timers and must be stopped wherever the pool stops being used.
+ */
+export interface ProxySupply {
+  pool: ProxyPool;
+  /** `null` unless `PROXY_SOURCE_URL` is set. */
+  source: ProxySourceManager | null;
+}
+
+/**
+ * Builds the proxy pool and, if a candidate source is configured, wires it in.
+ *
+ * The static `PROXY_POOL` list keeps working exactly as before: its entries are
+ * seeded first and marked `config`, which is what exempts them from the
+ * eviction the dynamic source applies to its own candidates.
+ */
+export function createProxySupply(
+  config: AppConfig,
+  logger: Logger,
+  onProxyEvent?: ProxyEventListener,
+  /**
+   * The concurrency the run will actually use, overrides included.
+   *
+   * Passed in rather than read off the config because the supply target is
+   * derived from it: a run started at `--concurrency 100` needs a pool sized
+   * for 100, not for whatever the file said.
+   */
+  concurrency: number = config.concurrency,
+): ProxySupply {
+  const sourceUrl = config.proxy.source.url;
+  const pool = createProxyPool(config, logger, onProxyEvent, sourceUrl !== '');
+  if (sourceUrl === '' || !(pool instanceof InMemoryProxyPool)) {
+    return { pool, source: null };
+  }
+
+  // Direct transport, deliberately: fetching the list of proxies through a
+  // proxy we are not yet sure works would make an empty pool unrecoverable.
+  const http = new FetchHttpClient({ defaultTimeoutMs: config.requestTimeoutMs });
+  const settings = config.proxy.source;
+  const targetCapacity = resolveTargetCapacity(config, concurrency);
+
+  const source = new ProxySourceManager({
+    source: new ProxyScrapeSource({ url: sourceUrl, http, logger }),
+    // The probe gets production's own connect budget on purpose: certifying a
+    // proxy under a budget the real request will not grant it is how a probe
+    // ends up admitting candidates that fail on their very first job.
+    probe: new HttpCanaryProxyProbe({
+      timeoutMs: settings.validateTimeoutMs,
+      connectTimeoutMs: config.proxy.connectTimeoutMs,
+    }),
+    roster: pool,
+    targetCapacity,
+    minCapacity: settings.minCapacity,
+    validateConcurrency: settings.validateConcurrency,
+    refreshIntervalMs: settings.refreshIntervalMs,
+    maxCandidates: settings.maxCandidates,
+    logger,
+  });
+
+  if (config.proxy.maxConcurrentPerProxy === 0) {
+    logger.warn(
+      'PROXY_MAX_CONCURRENT is 0, so per-proxy capacity is unbounded and the supply target ' +
+        'falls back to counting usable proxies; set a limit for the target to mean slots',
+    );
+  }
+
+  logger.info(
+    {
+      target_capacity: targetCapacity,
+      min_capacity: settings.minCapacity,
+      concurrency,
+      configured: pool.size,
+    },
+    'dynamic proxy source configured',
+  );
+  return { pool, source };
+}
+
 export function createProxyPool(
   config: AppConfig,
   logger: Logger,
   onProxyEvent?: ProxyEventListener,
+  /** Keep a real pool even with no static entries, so a source can fill it. */
+  allowEmpty = false,
 ): ProxyPool {
   const targets = parseProxyList(config.proxy.pool);
-  if (targets.length === 0) {
+  if (targets.length === 0 && !allowEmpty) {
     logger.debug('no proxies configured; requests will go out directly');
     return new NullProxyPool();
   }
-  logger.info(
-    {
-      proxies: targets.length,
-      max_concurrent_per_proxy: config.proxy.maxConcurrentPerProxy,
-      // The ceiling on simultaneous proxied requests. Below the configured
-      // concurrency, this — not the queue — is what the run is bounded by.
-      capacity:
-        config.proxy.maxConcurrentPerProxy === 0
-          ? null
-          : targets.length * config.proxy.maxConcurrentPerProxy,
-    },
-    'proxy pool configured',
-  );
+  if (targets.length > 0)
+    logger.info(
+      {
+        proxies: targets.length,
+        max_concurrent_per_proxy: config.proxy.maxConcurrentPerProxy,
+        // The ceiling on simultaneous proxied requests, reached only once every
+        // proxy has earned its full concurrency. Below the configured
+        // concurrency, this — not the queue — is what the run is bounded by.
+        max_capacity:
+          config.proxy.maxConcurrentPerProxy === 0
+            ? null
+            : targets.length * config.proxy.maxConcurrentPerProxy,
+      },
+      'proxy pool configured',
+    );
   return new InMemoryProxyPool({
     targets,
     maxConsecutiveFailures: config.proxy.maxConsecutiveFailures,
     cooldownMs: config.proxy.cooldownMs,
     maxConcurrentPerProxy: config.proxy.maxConcurrentPerProxy,
     probationConcurrency: config.proxy.probationConcurrency,
+    explorationPeriod: config.proxy.explorationPeriod,
+    acquireWaitMs: config.proxy.acquireWaitMs,
+    // A source-fed pool can be evicted down to nothing and refilled seconds
+    // later. Reading that empty moment as "no proxies wanted" would send the
+    // request out on the origin IP.
+    requireProxy: allowEmpty,
     logger,
     ...(onProxyEvent === undefined ? {} : { onEvent: onProxyEvent }),
   });

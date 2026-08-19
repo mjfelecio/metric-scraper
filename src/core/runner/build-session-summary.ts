@@ -98,6 +98,7 @@ function emptyProxyStats(): ProxyPoolStats {
     poolExhaustedCount: 0,
     totalRequests: 0,
     totalFailures: 0,
+    source: null,
     perProxy: [],
   };
 }

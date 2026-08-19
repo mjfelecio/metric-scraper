@@ -41,6 +41,8 @@ export const ProxyUsageSchema = z.object({
   proxy_id: z.string(),
   /** `p1`…`pN`, from configuration order. Stable within a run. */
   label: z.string(),
+  /** `config`, or the name of the source that supplied this proxy. */
+  source: z.string(),
   state: ProxyStateSchema,
   /** Why it is out of rotation: consecutive_failures, detected_block, unsuitable_exit. */
   block_kind: z.string().nullable(),
@@ -74,6 +76,64 @@ export const ProxyUsageSchema = z.object({
 });
 export type ProxyUsage = z.infer<typeof ProxyUsageSchema>;
 
+/**
+ * Where the pool's capacity came from, when a live candidate source is used.
+ *
+ * `null` for a statically configured pool, which is what tells the two apart
+ * when reading a run back months later.
+ */
+export const ProxySourceSummarySchema = z.object({
+  name: z.string(),
+  /** Known, validated but not yet needed. */
+  candidates: z.number().int().nonnegative(),
+  validating: z.number().int().nonnegative(),
+  admitted: z.number().int().nonnegative(),
+  /** Rejected for this process and never retried, however often they reappear. */
+  rejected: z.number().int().nonnegative(),
+  fetched: z.number().int().nonnegative(),
+  malformed: z.number().int().nonnegative(),
+  duplicates: z.number().int().nonnegative(),
+  refreshes: z.number().int().nonnegative(),
+  refresh_failures: z.number().int().nonnegative(),
+  last_refresh_at: z.string().datetime().nullable(),
+  last_refresh_error: z.string().nullable(),
+  probe_successes: z.number().int().nonnegative(),
+  probe_failures: z.number().int().nonnegative(),
+  /**
+   * Probe failures split by the layer that rejected them.
+   *
+   * `connect` is a dead host, `tunnel` is a host that is not a proxy, `tls` is
+   * a proxy intercepting our traffic, `response` is one rewriting it. Reading a
+   * run back, this is what says whether the candidate list went stale or the
+   * probe is doing its job.
+   */
+  probe_failures_by_stage: z.object({
+    connect: z.number().int().nonnegative(),
+    tunnel: z.number().int().nonnegative(),
+    tls: z.number().int().nonnegative(),
+    response: z.number().int().nonnegative(),
+  }),
+  /** Candidates ever admitted. Cumulative, unlike the `admitted` gauge. */
+  admitted_total: z.number().int().nonnegative(),
+  /** Of those, how many the pool ever actually leased. */
+  admitted_tried: z.number().int().nonnegative(),
+  /** Of those tried, how many went on to record a real success. */
+  admitted_proven: z.number().int().nonnegative(),
+  /**
+   * `admitted_proven / admitted_tried`. `null` before anything was tried.
+   *
+   * The measured answer to "is our validation predictive", recorded per run so
+   * a change to the probe can be judged against evidence rather than intent.
+   * Note the denominator: a proxy the run never needed is not a failed
+   * admission, and counting it as one would make the rate fall as the pool got
+   * healthier.
+   */
+  admission_to_first_success_rate: z.number().min(0).max(1).nullable(),
+  /** Usable capacity the supply aims at, in concurrent slots. */
+  target_capacity: z.number().int().nonnegative(),
+});
+export type ProxySourceSummary = z.infer<typeof ProxySourceSummarySchema>;
+
 export const ProxySummarySchema = z.object({
   configured: z.number().int().nonnegative(),
   /** Proxies that handled at least one request. */
@@ -101,6 +161,7 @@ export const ProxySummarySchema = z.object({
    */
   pool_exhausted: z.number().int().nonnegative(),
   total_failures: z.number().int().nonnegative(),
+  source: ProxySourceSummarySchema.nullable(),
   per_proxy: z.array(ProxyUsageSchema),
 });
 export type ProxySummary = z.infer<typeof ProxySummarySchema>;

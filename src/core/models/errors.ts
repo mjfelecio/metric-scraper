@@ -38,6 +38,12 @@ export const ScrapeErrorInfoSchema = z.object({
   message: z.string(),
   /** Whether another attempt could plausibly succeed. */
   retryable: z.boolean(),
+  /**
+   * The terminal system/library error code, when one was found by walking
+   * `error.cause` (e.g. `ECONNREFUSED`, `UND_ERR_CONNECT_TIMEOUT`). `undefined`
+   * for errors that never had a coded cause to preserve — never a placeholder.
+   */
+  causeCode: z.string().optional(),
 });
 
 export type ScrapeErrorInfo = z.infer<typeof ScrapeErrorInfoSchema>;
@@ -49,6 +55,8 @@ export interface ScrapeErrorOptions {
   status?: ScrapeStatus | undefined;
   retryable?: boolean | undefined;
   cause?: unknown;
+  /** See `ScrapeErrorInfo.causeCode`. */
+  causeCode?: string | undefined;
 }
 
 const DEFAULT_STATUS_BY_CODE: Record<ScrapeErrorCode, FailureStatus> = {
@@ -112,6 +120,7 @@ export class ScrapeError extends Error {
   readonly code: ScrapeErrorCode;
   readonly status: ScrapeStatus;
   readonly retryable: boolean;
+  readonly causeCode: string | undefined;
 
   constructor(options: ScrapeErrorOptions) {
     super(options.message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -119,10 +128,16 @@ export class ScrapeError extends Error {
     this.code = options.code;
     this.status = options.status ?? defaultStatusForCode(options.code);
     this.retryable = options.retryable ?? defaultRetryableForCode(options.code);
+    this.causeCode = options.causeCode;
   }
 
   toInfo(): ScrapeErrorInfo {
-    return { code: this.code, message: this.message, retryable: this.retryable };
+    return {
+      code: this.code,
+      message: this.message,
+      retryable: this.retryable,
+      causeCode: this.causeCode,
+    };
   }
 
   static isScrapeError(value: unknown): value is ScrapeError {

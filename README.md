@@ -129,40 +129,105 @@ cp .env.example .env
 
 All are optional. See [`.env.example`](.env.example) for the annotated list.
 
-| Variable                       | Default    | Meaning                                                                              |
-| ------------------------------ | ---------- | ------------------------------------------------------------------------------------ |
-| `LOG_LEVEL`                    | `info`     | `trace`…`fatal`, or `silent`. Logs go to stderr.                                     |
-| `SCRAPER_CONCURRENCY`          | `10`       | Ceiling on jobs in flight at once. See [§5.1](#51-concurrency-rate-and-backpressure) |
-| `SCRAPER_TARGET_RPM`           | `500`      | **Logical jobs** admitted per minute; `0` disables pacing                            |
-| `SCRAPER_BURST`                | `0`        | Jobs admissible at once after idle; `0` = one second of target                       |
-| `SCRAPER_HTTP_RPM_PER_HOST`    | `0`        | **Actual HTTP requests** per minute per host, retries included; `0` = off            |
-| `SCRAPER_MAX_QUEUE_SIZE`       | `1000`     | Max waiting jobs before the producer waits; `0` = unbounded                          |
-| `SCRAPER_REQUEST_TIMEOUT_MS`   | `15000`    | Maximum duration of each individual outbound HTTP request                            |
-| `TIKTOK_ATTEMPT_TIMEOUT_MS`    | `15000`    | Maximum duration of one complete TikTok attempt                                      |
-| `INSTAGRAM_ATTEMPT_TIMEOUT_MS` | `60000`    | Maximum duration of one complete Instagram attempt                                   |
-| `SCRAPER_POLL_INTERVAL_MS`     | `900000`   | Default gap between cycle starts in `--watch`; `0` = back-to-back                    |
-| `RETRY_MAX_ATTEMPTS`           | `3`        | Attempts per URL including the first; `1` disables retries                           |
-| `RETRY_INITIAL_DELAY_MS`       | `250`      | First backoff delay                                                                  |
-| `RETRY_MAX_DELAY_MS`           | `10000`    | Backoff ceiling                                                                      |
-| `RETRY_BACKOFF_FACTOR`         | `2`        | Growth multiplier                                                                    |
-| `RETRY_JITTER`                 | `true`     | Full jitter, so a batch does not re-fire in lockstep                                 |
-| `OUTPUT_DIR`                   | `./output` | Where JSONL and run summaries are written                                            |
-| `PROXY_POOL`                   | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct           |
-| `PROXY_MAX_FAILURES`           | `3`        | Consecutive failures before cooldown                                                 |
-| `PROXY_COOLDOWN_MS`            | `60000`    | How long a failed/blocked proxy is benched                                           |
-| `PROXY_MAX_CONCURRENT`         | `8`        | Jobs sharing one proxy at a time; `0` = unlimited                                    |
-| `PROXY_PROBATION_CONCURRENT`   | `1`        | Jobs on a proxy that has not succeeded yet, or whose last outcome failed             |
-| `SESSION_STORE_PATH`           | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous                         |
-| `SESSION_MAX_FAILURES`         | `3`        | Consecutive failures before cooldown                                                 |
-| `SESSION_COOLDOWN_MS`          | `300000`   | How long a blocked session is benched                                                |
-| `INSTAGRAM_POST_DOC_ID`        | current ID | Anonymous post metadata operation                                                    |
-| `INSTAGRAM_CLIPS_DOC_ID`       | current ID | Recent creator-Reels operation                                                       |
-| `INSTAGRAM_CLIPS_MAX_PAGES`    | `2`        | Maximum anonymous clips pages checked per candidate author                           |
-| `INSTAGRAM_CLIPS_MAX_AUTHORS`  | `3`        | Maximum primary/coauthor accounts checked per Reel                                   |
+| Variable                            | Default    | Meaning                                                                              |
+| ----------------------------------- | ---------- | ------------------------------------------------------------------------------------ |
+| `LOG_LEVEL`                         | `info`     | `trace`…`fatal`, or `silent`. Logs go to stderr.                                     |
+| `SCRAPER_CONCURRENCY`               | `10`       | Ceiling on jobs in flight at once. See [§5.1](#51-concurrency-rate-and-backpressure) |
+| `SCRAPER_TARGET_RPM`                | `500`      | **Logical jobs** admitted per minute; `0` disables pacing                            |
+| `SCRAPER_BURST`                     | `0`        | Jobs admissible at once after idle; `0` = one second of target                       |
+| `SCRAPER_HTTP_RPM_PER_HOST`         | `0`        | **Actual HTTP requests** per minute per host, retries included; `0` = off            |
+| `SCRAPER_MAX_QUEUE_SIZE`            | `1000`     | Max waiting jobs before the producer waits; `0` = unbounded                          |
+| `SCRAPER_REQUEST_TIMEOUT_MS`        | `15000`    | Maximum duration of each individual outbound HTTP request                            |
+| `TIKTOK_ATTEMPT_TIMEOUT_MS`         | `15000`    | Maximum duration of one complete TikTok attempt                                      |
+| `INSTAGRAM_ATTEMPT_TIMEOUT_MS`      | `60000`    | Maximum duration of one complete Instagram attempt                                   |
+| `SCRAPER_POLL_INTERVAL_MS`          | `900000`   | Default gap between cycle starts in `--watch`; `0` = back-to-back                    |
+| `RETRY_MAX_ATTEMPTS`                | `3`        | Attempts per URL including the first; `1` disables retries                           |
+| `RETRY_INITIAL_DELAY_MS`            | `250`      | First backoff delay                                                                  |
+| `RETRY_MAX_DELAY_MS`                | `10000`    | Backoff ceiling                                                                      |
+| `RETRY_BACKOFF_FACTOR`              | `2`        | Growth multiplier                                                                    |
+| `RETRY_JITTER`                      | `true`     | Full jitter, so a batch does not re-fire in lockstep                                 |
+| `OUTPUT_DIR`                        | `./output` | Where JSONL and run summaries are written                                            |
+| `PROXY_POOL`                        | _(empty)_  | Comma/newline-separated `protocol://[user:pass@]host:port`. Empty = direct           |
+| `PROXY_MAX_FAILURES`                | `3`        | Consecutive failures before cooldown                                                 |
+| `PROXY_COOLDOWN_MS`                 | `60000`    | How long a failed/blocked proxy is benched                                           |
+| `PROXY_MAX_CONCURRENT`              | `8`        | Ceiling on jobs sharing one proxy; earned, not granted. `0` = unlimited              |
+| `PROXY_PROBATION_CONCURRENT`        | `1`        | Floor every proxy starts at; a proxy that has never succeeded never leaves it        |
+| `PROXY_EXPLORATION_PERIOD`          | `5`        | One lease in this many is reserved for an unproven proxy; `0` = off                  |
+| `PROXY_CONNECT_TIMEOUT_MS`          | `3000`     | Undici connect-phase timeout per proxy; must be < `SCRAPER_REQUEST_TIMEOUT_MS`       |
+| `PROXY_ACQUIRE_WAIT_MS`             | `5000`     | How long a job waits for a proxy before failing; `0` = fail immediately              |
+| `PROXY_SOURCE_URL`                  | _(empty)_  | ProxyScrape-style text endpoint for candidate proxies. Empty = feature off           |
+| `PROXY_SOURCE_REFRESH_MS`           | `900000`   | How often the candidate list is refetched                                            |
+| `PROXY_SOURCE_TARGET_CAPACITY`      | `0`        | Usable capacity to aim for, in slots; `0` follows `SCRAPER_CONCURRENCY`              |
+| `PROXY_SOURCE_MIN_CAPACITY`         | `5`        | Startup floor, and the floor below which the roster is never evicted                 |
+| `PROXY_SOURCE_VALIDATE_CONCURRENCY` | `10`       | Simultaneous validation probes                                                       |
+| `PROXY_SOURCE_VALIDATE_TIMEOUT_MS`  | `5000`     | Whole-probe budget; must exceed `PROXY_CONNECT_TIMEOUT_MS`                           |
+| `PROXY_SOURCE_MAX_CANDIDATES`       | `5000`     | Ceiling on remembered candidates                                                     |
+| `SESSION_STORE_PATH`                | _(empty)_  | Path to an operator-supplied session file. Empty = anonymous                         |
+| `SESSION_MAX_FAILURES`              | `3`        | Consecutive failures before cooldown                                                 |
+| `SESSION_COOLDOWN_MS`               | `300000`   | How long a blocked session is benched                                                |
+| `INSTAGRAM_POST_DOC_ID`             | current ID | Anonymous post metadata operation                                                    |
+| `INSTAGRAM_CLIPS_DOC_ID`            | current ID | Recent creator-Reels operation                                                       |
+| `INSTAGRAM_CLIPS_MAX_PAGES`         | `2`        | Maximum anonymous clips pages checked per candidate author                           |
+| `INSTAGRAM_CLIPS_MAX_AUTHORS`       | `3`        | Maximum primary/coauthor accounts checked per Reel                                   |
 
 **Credentials never live in source.** Proxy credentials are read from `PROXY_POOL` and
 kept inside the in-memory `ProxyTarget`; everything user-facing (logs, metrics, run
 summaries) uses a credential-free proxy id like `http://proxy-a.example.net:8000`.
+
+**`PROXY_SOURCE_URL` layers a live candidate supply on top of `PROXY_POOL`, never
+instead of it.** With it set, a background source periodically fetches a list of
+candidate proxies, validates each one, and feeds survivors into the same pool the static
+list uses — rotation, cooldown, probation and eviction all apply to them unchanged. Every
+proxy reports which origin admitted it (`source: "config"` for `PROXY_POOL` entries, or
+the source's name otherwise) in `ProxyHealth` and in run summaries — statically
+configured proxies are exempt from the source's own eviction, so they behave exactly as
+they did before this feature existed. Leave `PROXY_SOURCE_URL` empty to keep running on
+`PROXY_POOL` alone.
+
+**A candidate is admitted only once it has carried a real HTTPS request.** The probe
+opens a CONNECT tunnel to a neutral endpoint (`www.gstatic.com/generate_204`), completes
+a TLS handshake validated against the public trust store, and requires the endpoint's own
+`204` back. Four things can fail and the run summary says which: `connect` (dead host),
+`tunnel` (not a proxy at all — a web server answering `CONNECT` with `400`), `tls` (a
+proxy intercepting our traffic with its own certificate) and `response` (a proxy
+rewriting it). The trust store is deliberately not relaxed: a proxy presenting its own
+certificate is one reading everything we send, which is a reason to reject it rather than
+a certificate problem to work around.
+
+This replaced a plain TCP connect probe, which was measured admitting proxies that could
+not carry a single request — 42% of a live ProxyScrape list accept a TCP connection and
+under a quarter of those complete an HTTPS round trip. The evidence, and the reasoning
+about what should and should not be validated before admission, is in
+[`docs/proxy-validation-measurement.md`](docs/proxy-validation-measurement.md); rerun it
+with `pnpm diagnose:proxy`. Validation generates **no traffic to TikTok or Instagram**.
+
+What the probe deliberately does not answer is whether a platform will serve a given exit
+node. That is target policy, it changes minute to minute, and it stays where it was: with
+the pool's health model on real jobs. Roughly two thirds of admitted proxies reach a
+platform on their first try, so admission is evidence, not a guarantee.
+
+**Known limitation: SOCKS candidates are accepted but cannot be used.** `PROXY_POOL` and
+the candidate parser both accept `socks4://` and `socks5://` (`proxy-config.ts`), but the
+undici transport supports only `http`/`https` and throws when handed anything else. That
+throw escapes `FetchHttpClient`'s error mapping, so the attempt is classified `unknown` →
+`neutral` and the proxy is never blamed, never cooled and never evicted. The canary probe
+keeps such candidates out of a dynamic pool — a SOCKS server does not answer an HTTP
+`CONNECT` — but a SOCKS entry written into `PROXY_POOL` by hand will still burn one job
+per lease. Keep `&protocol=http` on `PROXY_SOURCE_URL` and use `http`/`https` entries.
+
+**Supply is measured in slots, and eviction has a floor.** "Enough proxies" means the
+sum of _earned, currently-leasable_ capacity — `proxies.capacity` in the run summary,
+which counts a never-successful proxy at the probation floor and a benched one at zero.
+That is the same unit as `SCRAPER_CONCURRENCY`, so the two can be compared directly, and
+a roster of dead-but-unbenched proxies can no longer report a pool at full strength.
+Replenishment admits validated candidates _before_ reaping hopeless ones, so a slot is
+swapped rather than dropped and refilled; retired proxies are always reaped, but a
+cooling one is kept once the roster is down to `PROXY_SOURCE_MIN_CAPACITY` entries that
+could still come back, because a cooldown is the only path back when the candidate list
+runs out. When nothing is leasable, `acquire` waits up to `PROXY_ACQUIRE_WAIT_MS` — but
+only while waiting can help, meaning a cooldown due inside that budget or a source with
+candidates left. With every proxy retired and no supply behind them it still fails at
+once, and it never answers "go direct".
 
 ### 5.1 Concurrency, rate, and backpressure
 
@@ -209,12 +274,36 @@ made to wait, so memory is bounded by `maxQueueSize` rather than by input size.
 A full queue is not a run failure — dropping work would be a poor trade in a
 system whose output feeds payouts.
 
-**Proxy capacity is `proxies x PROXY_MAX_CONCURRENT`.** Set to `0`, leases are
-shared without limit and the global `concurrency` is the only bound, so adding
-proxies spreads the same work over more IPs without raising throughput — and one
-dead IP can absorb a whole batch. With the limit set (default `8`), a larger pool
-genuinely scales. If `SCRAPER_CONCURRENCY` exceeds `proxies x limit`, the pool is
-the binding constraint; the surplus shows up as `waits.proxy_acquire_ms`.
+**Proxy capacity is earned, and `proxies x PROXY_MAX_CONCURRENT` is only its
+ceiling.** Every proxy starts at `PROXY_PROBATION_CONCURRENT` (default `1`),
+doubles its slots on each success up to `PROXY_MAX_CONCURRENT`, and halves them
+on each failure. What the pool can actually serve right now is the sum of that,
+reported as `proxies.capacity` in the run summary — and _that_ is the number to
+compare `SCRAPER_CONCURRENCY` against. If concurrency exceeds it, the pool is the
+binding constraint and the surplus shows up as `waits.proxy_acquire_ms`.
+
+The ramp exists because the earlier model was binary: full concurrency for a
+proxy whose last outcome was a success, one slot for everything else. Real
+proxies fail intermittently, so nearly every proxy carried a recent failure
+nearly always and pool capacity collapsed to _the number of usable proxies_. One
+measured run had 23 proxies, a configured concurrency of 100, and a real ceiling
+of 18 — with an 89%-success proxy throttled exactly as hard as a dead one.
+Halving rather than collapsing keeps a good record worth something; keeping the
+floor for proxies that have never succeeded keeps a dead IP to one job at a time.
+Set `PROXY_MAX_CONCURRENT=0` to opt out entirely: leases are then shared without
+limit, the global `concurrency` is the only bound, and only the never-succeeded
+floor still applies.
+
+**Rotation reserves a share of leases for unproven proxies.** Proxies that have
+succeeded at least once are chosen by _normalised_ load (`inFlight / capacity`,
+so traffic fills proxies in proportion to what they have earned) then
+least-recently-used. One lease in `PROXY_EXPLORATION_PERIOD` goes instead to the
+least-tried proxy that has never succeeded. Without that reservation a proxy
+needs a success to be preferred but is scheduled last, so it can never earn one —
+which is what made "more proxies" stop meaning "more capacity" here, and would
+have neutralised the `PROXY_SOURCE_URL` supply layer entirely. The cost is
+bounded twice: at most one lease in `N`, and at most `PROXY_MAX_FAILURES`
+requests through any one bad proxy before it cools out of the eligible set.
 
 **Proxy health is one model, used in three places.** Every attempt is classified
 once — `classifyProxyOutcome` — and that single verdict drives rotation state and
@@ -425,6 +514,28 @@ Tick **Continuous** to run a session instead, with the same three knobs as the C
 cycles — without it a fifteen-minute interval makes a healthy dashboard look hung — plus a
 **throughput graph** and a session-summary download.
 
+When a continuous session runs against **exactly one URL**, a **metric history** panel
+appears: a live line chart of that video's views, likes, comments or shares across cycles,
+one point per completed cycle, on a timestamp axis. It exists to make unusual movement
+visible by eye — a sudden jump, a plateau, or one metric moving while the others do not —
+and it deliberately makes no judgement of its own: there is no bot score and no anomaly
+classifier, only the numbers and their changes.
+
+Axis labels abbreviate (`153.2K`), but hovering a point shows the cycle number, the
+timestamp, the **exact integer the scraper returned** (`153,247`) and the change since the
+previous cycle (`+8,420`). That distinction matters: TikTok quantizes public view counts
+at higher values, and the chart must show what was actually collected rather than round it
+further. A cycle whose scrape failed is drawn as a break in the line rather than dropped,
+so an outage cannot be mistaken for a flat metric, and the next cycle's change is measured
+against the last cycle that had a value.
+
+It reads the snapshot the runner already produced and the poll already carries — the same
+row that goes to the JSONL — so there is one source of truth for the numbers, no second
+transport and no extra request. The chart redraws only when a cycle actually completes,
+and its markers are capped, so a session left running overnight costs no more per poll
+than one that started a minute ago. Multi-URL sessions and one-shot runs never accumulate
+or ship the series at all.
+
 When proxies are configured, a **proxy pool** panel appears: usable / cooling / retired
 counts, live capacity and how many jobs are in flight on how many proxies, then one row
 per proxy with its state, in-flight load, request tallies, and a cooldown countdown for
@@ -540,6 +651,12 @@ One JSON object per line, appended, UTF-8, keys in a fixed order:
 Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, actual
 throughput, raw platform HTTP calls, latency p50/p95/max, status and error breakdowns,
 retry statistics, proxy statistics and session burn/health statistics.
+
+When `PROXY_SOURCE_URL` is configured, each per-proxy entry also carries a `source`
+field (`"config"` or the source's name), and the proxy summary as a whole carries a
+`source` block — candidates seen, validating, admitted, rejected, and the
+`target_capacity` the supply was aiming at — so a source-fed run is auditable after the
+fact the same way the static pool always was.
 
 When proxies are configured, a run also writes `<name>.proxy-events.jsonl`: one row per
 proxy **health transition** — never per request — recording `from`/`to` state, the reason

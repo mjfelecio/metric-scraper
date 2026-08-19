@@ -246,6 +246,49 @@
             <div id="throughput-chart" class="w-full overflow-x-auto"></div>
           </div>
 
+          <!-- Live metric time series (continuous, single URL) ---------->
+          <div
+            id="metric-series-panel"
+            class="hidden rounded-xl border border-slate-800 bg-slate-900/50 p-5"
+          >
+            <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">
+                Metric history
+              </h2>
+              <div class="flex gap-1" id="metric-tabs">
+                <button
+                  type="button"
+                  class="metric-tab-btn rounded-md border border-slate-700 px-2.5 py-1 text-xs font-medium"
+                  data-metric="views"
+                >
+                  Views
+                </button>
+                <button
+                  type="button"
+                  class="metric-tab-btn rounded-md border border-slate-700 px-2.5 py-1 text-xs font-medium"
+                  data-metric="likes"
+                >
+                  Likes
+                </button>
+                <button
+                  type="button"
+                  class="metric-tab-btn rounded-md border border-slate-700 px-2.5 py-1 text-xs font-medium"
+                  data-metric="comments"
+                >
+                  Comments
+                </button>
+                <button
+                  type="button"
+                  class="metric-tab-btn rounded-md border border-slate-700 px-2.5 py-1 text-xs font-medium"
+                  data-metric="shares"
+                >
+                  Shares
+                </button>
+              </div>
+            </div>
+            <div id="metric-series-chart" class="w-full overflow-x-auto"></div>
+          </div>
+
           <!-- Proxy pool ------------------------------------------------>
           <div
             id="proxy-panel"

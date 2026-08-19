@@ -4,6 +4,16 @@ import { type ProxyProtocol, type ProxyTarget } from '../../core/scraper/lease-p
 const SUPPORTED_PROTOCOLS: readonly ProxyProtocol[] = ['http', 'https', 'socks4', 'socks5'];
 
 /**
+ * Ports `URL` erases because they are the scheme's default.
+ *
+ * `new URL('http://1.2.3.4:80').port` is the empty string, so reading the port
+ * straight off the URL rejected every proxy on a default port as "portless" —
+ * 7.5% of one real free-proxy list, and any `PROXY_POOL` entry written the same
+ * way. The port was in the input; only the parser lost it.
+ */
+const DEFAULT_PORTS: Partial<Record<ProxyProtocol, number>> = { http: 80, https: 443 };
+
+/**
  * Parses a proxy list that came from configuration — never from source code.
  *
  * Accepts comma-, semicolon- or newline-separated entries of the form
@@ -46,7 +56,7 @@ export function parseProxyEntry(entry: string): ProxyTarget {
     });
   }
 
-  const port = Number.parseInt(url.port, 10);
+  const port = url.port === '' ? (DEFAULT_PORTS[protocol] ?? Number.NaN) : Number(url.port);
   if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
     throw new ScrapeError({
       code: 'config_error',

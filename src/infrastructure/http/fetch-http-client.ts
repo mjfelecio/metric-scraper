@@ -5,6 +5,7 @@ import {
   type HttpResponse,
 } from '../../core/scraper/http-port.js';
 import { type ProxyTarget } from '../../core/scraper/lease-ports.js';
+import { redactEntry } from '../proxy/proxy-config.js';
 
 export interface FetchHttpClientOptions {
   defaultTimeoutMs: number;
@@ -102,6 +103,9 @@ export class FetchHttpClient implements HttpClient {
   }
 }
 
+/** Connect-phase codes: the socket never opened, so this is a `timeout`, not a `network_error`. */
+const CONNECT_TIMEOUT_CODES = new Set(['UND_ERR_CONNECT_TIMEOUT', 'ETIMEDOUT']);
+
 function toHttpError(error: unknown, url: string): HttpError {
   if (error instanceof HttpError) return error;
   const name = error instanceof Error ? error.name : '';
@@ -112,9 +116,69 @@ function toHttpError(error: unknown, url: string): HttpError {
       cause: error,
     });
   }
+
+  // undici's fetch wraps every transport failure in `TypeError: fetch failed`,
+  // whose own message is always that one string. The useful part — ECONNREFUSED,
+  // UND_ERR_CONNECT_TIMEOUT, ECONNRESET, ENOTFOUND — sits one level down in
+  // `.cause` and was previously discarded, making every proxy failure read
+  // identically regardless of cause.
+  const terminal = terminalCause(error);
+  if (terminal !== null) {
+    const isConnectTimeout = terminal.code !== null && CONNECT_TIMEOUT_CODES.has(terminal.code);
+    const detail =
+      terminal.code !== null
+        ? `${terminal.code} — ${redactEntry(terminal.message)}`
+        : redactEntry(terminal.message);
+    return new HttpError({
+      code: isConnectTimeout ? 'timeout' : 'network_error',
+      message: isConnectTimeout
+        ? `request to ${url} timed out connecting: ${detail}`
+        : `request to ${url} failed: ${detail}`,
+      cause: error,
+      causeCode: terminal.code ?? undefined,
+    });
+  }
+
   return new HttpError({
     code: 'network_error',
     message: `request to ${url} failed: ${error instanceof Error ? error.message : String(error)}`,
     cause: error,
   });
+}
+
+interface TerminalCause {
+  /** A system/library error code, when the chain had one (e.g. `ECONNREFUSED`). */
+  readonly code: string | null;
+  readonly message: string;
+}
+
+/**
+ * Walks `error.cause` to the deepest error, preferring the first one that
+ * carries a system/library error code (Node's `ECONNREFUSED` etc., undici's
+ * `UND_ERR_CONNECT_TIMEOUT` etc.) over a generic wrapper message like
+ * `fetch failed`. Cycle-safe via `seen`.
+ *
+ * Returns `null` only when `error` itself has no cause to walk to — in that
+ * case its own `.message` is already the most specific thing available, and
+ * the caller falls back to the pre-existing behaviour rather than being
+ * handed a `code: null` that adds nothing.
+ */
+function terminalCause(error: unknown): TerminalCause | null {
+  if (!(error instanceof Error)) return null;
+
+  let current: Error = error;
+  const seen = new Set<Error>([error]);
+
+  for (;;) {
+    const code = (current as NodeJS.ErrnoException).code;
+    if (typeof code === 'string') {
+      return { code, message: current.message };
+    }
+    const next = current.cause;
+    if (!(next instanceof Error) || seen.has(next)) {
+      return current === error ? null : { code: null, message: current.message };
+    }
+    seen.add(next);
+    current = next;
+  }
 }

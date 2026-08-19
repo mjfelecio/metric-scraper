@@ -4,6 +4,7 @@ import { type ProxyUsageView } from '../../src/core/metrics/metrics-collector.js
 import { type ProxyUsage } from '../../src/core/models/run-summary.js';
 import { buildProxySummary, mergeProxyUsage } from '../../src/core/runner/build-proxy-summary.js';
 import { type ProxyHealth, type ProxyPoolStats } from '../../src/core/scraper/pool-ports.js';
+import { type ProxySourceStats } from '../../src/core/scraper/proxy-source-ports.js';
 
 const COOLING_UNTIL = Date.parse('2026-08-18T19:26:00.000Z');
 const WENT_BAD_AT = Date.parse('2026-08-18T19:21:00.000Z');
@@ -12,6 +13,8 @@ function health(overrides: Partial<ProxyHealth> = {}): ProxyHealth {
   return {
     id: 'http://gate-a.example.net:8000',
     label: 'p1',
+    source: 'config',
+    admittedAt: 0,
     state: 'healthy',
     blockKind: null,
     requests: 0,
@@ -54,6 +57,7 @@ function stats(perProxy: ProxyHealth[], overrides: Partial<ProxyPoolStats> = {})
     poolExhaustedCount: 0,
     totalRequests: perProxy.reduce((total, entry) => total + entry.requests, 0),
     totalFailures: perProxy.reduce((total, entry) => total + entry.failures, 0),
+    source: null,
     perProxy,
     ...overrides,
   };
@@ -73,7 +77,62 @@ function usage(overrides: Partial<ProxyUsageView> = {}): ProxyUsageView {
   };
 }
 
+function sourceStats(overrides: Partial<ProxySourceStats> = {}): ProxySourceStats {
+  return {
+    name: 'proxyscrape',
+    candidates: 800,
+    validating: 0,
+    admitted: 4,
+    rejected: 20,
+    fetched: 824,
+    malformed: 0,
+    duplicates: 0,
+    refreshes: 1,
+    refreshFailures: 0,
+    lastRefreshAt: 0,
+    lastRefreshError: null,
+    probeSuccesses: 6,
+    probeFailures: 20,
+    probeFailuresByStage: { connect: 12, tunnel: 6, tls: 2, response: 0 },
+    admittedTotal: 6,
+    admittedTried: 6,
+    admittedProven: 3,
+    admissionToFirstSuccessRate: 0.5,
+    targetCapacity: 10,
+    ...overrides,
+  };
+}
+
 describe('buildProxySummary', () => {
+  it('carries the probe stage breakdown and admission rate into the summary', () => {
+    // These are the numbers the validation strategy is judged on, so they have
+    // to survive into the artifact rather than living only in the dashboard.
+    const summary = buildProxySummary(stats([], { source: sourceStats() }), []);
+
+    expect(summary.source).toMatchObject({
+      probe_failures_by_stage: { connect: 12, tunnel: 6, tls: 2, response: 0 },
+      admitted_total: 6,
+      admitted_tried: 6,
+      admitted_proven: 3,
+      admission_to_first_success_rate: 0.5,
+    });
+  });
+
+  it('reports no admission rate before anything has been admitted', () => {
+    const summary = buildProxySummary(
+      stats([], {
+        source: sourceStats({
+          admittedTotal: 0,
+          admittedProven: 0,
+          admissionToFirstSuccessRate: null,
+        }),
+      }),
+      [],
+    );
+
+    expect(summary.source?.admission_to_first_success_rate).toBeNull();
+  });
+
   it('joins pool state onto the metrics tallies for the same proxy', () => {
     const summary = buildProxySummary(
       stats([
@@ -148,6 +207,7 @@ describe('mergeProxyUsage', () => {
     return {
       proxy_id: 'http://a:8000',
       label: 'p1',
+      source: 'config',
       state: 'healthy',
       block_kind: null,
       requests: 10,

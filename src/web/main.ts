@@ -12,6 +12,7 @@ import {
   sessionSummaryUrl,
   startRun,
 } from './api.js';
+import { METRIC_KEYS, type MetricKey } from './metric-format.js';
 import { render } from './render.js';
 import { Store } from './state.js';
 import './styles.css';
@@ -86,6 +87,19 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('.input-method
       store.update({ inputMethod: method });
     }
   });
+}
+
+for (const button of document.querySelectorAll<HTMLButtonElement>('.metric-tab-btn')) {
+  button.addEventListener('click', () => {
+    const metric = button.dataset['metric'];
+    if (isMetricKey(metric)) {
+      store.update({ metric });
+    }
+  });
+}
+
+function isMetricKey(value: string | undefined): value is MetricKey {
+  return value !== undefined && (METRIC_KEYS as readonly string[]).includes(value);
 }
 
 inputTextArea.addEventListener('input', () => {
@@ -218,6 +232,7 @@ async function beginRun(): Promise<void> {
     timeline: [],
     timelineCursor: 0,
     cycles: [],
+    metricSeries: [],
     sessionSummary: null,
     stalled: false,
   });
@@ -277,6 +292,9 @@ async function poll(runId: string): Promise<void> {
         schedule: state.schedule,
         cycle: state.cycle,
         cycles: state.cycles,
+        // Assigned wholesale rather than accumulated: the server holds the only
+        // copy and it is already bounded at one point per cycle.
+        metricSeries: state.metricSeries,
         sessionSummary: state.sessionSummary,
         stalled: state.stalled,
         timeline:

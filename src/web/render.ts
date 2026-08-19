@@ -3,8 +3,19 @@ import { summarizeFailureConcentration } from '../core/metrics/proxy-insights.js
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type ScrapeStatus } from '../core/models/status.js';
 import { type ProxyHealth, type ProxyState } from '../core/scraper/pool-ports.js';
+import { type ProxyProbeStage, type ProxySourceStats } from '../core/scraper/proxy-source-ports.js';
 import { formatDuration } from '../core/schedule/duration.js';
 
+import {
+  METRIC_LABELS,
+  formatClock,
+  formatCompact,
+  formatDelta,
+  formatExact,
+  formatTimestamp,
+  toPlotPoints,
+  type MetricPlotPoint,
+} from './metric-format.js';
 import { isRunActive, type AppState } from './state.js';
 
 /**
@@ -70,6 +81,7 @@ export function render(state: AppState): void {
   renderError(state);
   renderProgress(state);
   renderThroughputChart(state);
+  renderMetricSeriesChart(state);
   renderProxyPanel(state);
   renderResults(state);
   renderInputReport(state);
@@ -264,7 +276,10 @@ function renderProxyPanel(state: AppState): void {
   const panel = el('proxy-panel');
   const pool = state.proxies;
 
-  if (pool === null || pool.configured === 0) {
+  // A dynamically sourced pool is briefly empty while the first candidates are
+  // being validated, and hiding the panel exactly then would hide the thing the
+  // operator most wants to watch.
+  if (pool === null || (pool.configured === 0 && pool.source === null)) {
     panel.classList.add('hidden');
     panel.innerHTML = '';
     return;
@@ -303,6 +318,7 @@ function renderProxyPanel(state: AppState): void {
            </p>`
         : ''
     }
+    ${pool.source === null ? '' : proxySourceLine(pool.source)}
     ${
       concentration.concentrated
         ? `<p class="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
@@ -332,11 +348,68 @@ function renderProxyPanel(state: AppState): void {
     </div>`;
 }
 
+/**
+ * Where the pool's capacity is coming from.
+ *
+ * Sits above the per-proxy table because with a live source the interesting
+ * question moves up a level: not "is p7 healthy" but "is the supply keeping up
+ * with what the pool is burning".
+ */
+function proxySourceLine(source: ProxySourceStats): string {
+  const failed = source.refreshFailures > 0;
+  return `<p class="mt-3 rounded border ${
+    failed
+      ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+      : 'border-slate-800 bg-slate-950/40 text-slate-400'
+  } px-3 py-2 text-xs">
+      <span class="font-semibold">Source: ${escapeHtml(source.name)}</span>
+      — ${source.candidates.toLocaleString()} candidate(s),
+      ${source.validating} validating,
+      ${source.admitted} admitted,
+      ${source.rejected} rejected,
+      target ${source.targetCapacity} slots.
+      Probes: ${source.probeSuccesses} passed / ${source.probeFailures} failed
+      (${probeStageBreakdown(source)}).
+      Admitted ${source.admittedTotal}, tried ${source.admittedTried},
+      of which ${source.admittedProven} ever succeeded${
+        source.admissionToFirstSuccessRate === null
+          ? ''
+          : ` — ${(source.admissionToFirstSuccessRate * 100).toFixed(0)}%`
+      }.
+      ${
+        source.lastRefreshError === null
+          ? ''
+          : `Last refresh failed: ${escapeHtml(source.lastRefreshError)}.`
+      }
+    </p>`;
+}
+
+/**
+ * Which layer is doing the rejecting, in the order a probe meets them.
+ *
+ * Named rather than numbered because the names are the diagnosis: a run
+ * failing mostly at `tunnel` is being fed hosts that are not proxies, and one
+ * failing at `tls` is being intercepted. Empty stages are dropped so the line
+ * stays short on a healthy run.
+ */
+function probeStageBreakdown(source: ProxySourceStats): string {
+  const stages: readonly ProxyProbeStage[] = ['connect', 'tunnel', 'tls', 'response'];
+  const parts = stages
+    .filter((stage) => source.probeFailuresByStage[stage] > 0)
+    .map((stage) => `${stage} ${source.probeFailuresByStage[stage]}`);
+  return parts.length === 0 ? 'no failures' : parts.join(', ');
+}
+
 function proxyRow(proxy: ProxyHealth, now: number): string {
   return `<tr class="border-t border-slate-800/70">
       <td class="py-1.5 pr-3">
         <span class="text-slate-300">${escapeHtml(proxy.label)}</span>
         <span class="text-slate-500">${escapeHtml(proxy.id)}</span>
+        ${
+          proxy.source === 'config'
+            ? ''
+            : `<span class="ml-1 rounded bg-slate-800 px-1 text-[10px] text-slate-400">${escapeHtml(proxy.source)}</span>`
+        }
       </td>
       <td class="py-1.5 pr-3">
         <span class="rounded px-1.5 py-0.5 text-[11px] ${PROXY_STATE_STYLES[proxy.state]}">
@@ -397,6 +470,7 @@ function renderResults(state: AppState): void {
           <th class="px-2 py-2 font-medium">URL</th>
           <th class="px-2 py-2 text-right font-medium">Latency</th>
           <th class="px-2 py-2 text-right font-medium">Attempts</th>
+          <th class="px-2 py-2 text-right font-medium">Time</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-slate-800/70">
@@ -424,6 +498,8 @@ function resultRow(result: RecentResultDto): string {
     </td>
     <td class="px-2 py-2 text-right align-top font-mono text-slate-400">${result.latencyMs} ms</td>
     <td class="px-2 py-2 text-right align-top font-mono text-slate-400">${result.attempts}</td>
+    <td class="px-2 py-2 text-right align-top font-mono text-slate-500"
+        title="${escapeHtml(result.scrapedAt)}">${escapeHtml(formatClock(Date.parse(result.scrapedAt)))}</td>
   </tr>`;
 }
 
@@ -807,4 +883,284 @@ function renderThroughputChart(state: AppState): void {
         <span class="inline-block h-0.5 w-4 bg-amber-400"></span>retries/min (not throughput)
       </span>
     </div>`;
+}
+
+// --- metric time series -----------------------------------------------------
+
+/**
+ * Points drawn at once. A sliding window rather than the peak-preserving
+ * `downsample` used for throughput: here every point is one cycle, and it is the
+ * *consecutive* values and their differences that carry the meaning, so dropping
+ * points out of the middle would misrepresent the series.
+ */
+const MAX_METRIC_POINTS_PLOTTED = 400;
+
+/**
+ * Cap on *hoverable* markers, independent of how many points the line covers.
+ *
+ * Every marker carries its own tooltip so that hovering needs no JavaScript, and
+ * at 400 markers that markup is hundreds of kilobytes rebuilt on every poll.
+ * Past roughly this many the dots are also less than a hit-radius apart, so the
+ * tooltips overlap and are unusable anyway — thinning them costs nothing a user
+ * could have read. The line itself is always drawn over every point.
+ */
+const MAX_METRIC_MARKERS = 96;
+
+/**
+ * Signature of the last chart drawn, so an unchanged series is not rebuilt.
+ *
+ * The poll runs every 400ms but a point only arrives once per cycle — minutes
+ * apart at a normal interval — so almost every tick would otherwise re-emit
+ * identical markup for no reason. The series is append-only (trimmed only at
+ * its head), so its length plus its first and last cycle identify it exactly.
+ */
+let lastMetricChartKey = '';
+
+/** Tooltip box, in viewBox units. */
+const TIP = { width: 168, lineHeight: 15, padding: 9 } as const;
+
+/**
+ * Rounds an axis floor down to a multiple of `step`, never below zero.
+ * Counterpart to `niceCeiling`, so both bounds land on the same grid.
+ */
+function floorTo(value: number, step: number): number {
+  return Math.max(0, Math.floor(value / step) * step);
+}
+
+/**
+ * Chooses the y-axis window.
+ *
+ * Zero-based by default, which is the honest reading of a count. But a view
+ * counter sitting at 153,200 and moving by a few hundred an hour is a dead flat
+ * line on a 0–200K axis, and watching those movements is the entire point of
+ * this chart — so when the observed range is small relative to the magnitude,
+ * the axis zooms to the data instead.
+ *
+ * Both bounds are quantized to a round step so that a new cycle nudges the line
+ * rather than rescaling the whole chart underneath the operator.
+ */
+function metricAxis(values: readonly number[]): { min: number; max: number } {
+  const hi = Math.max(...values);
+  const lo = Math.min(...values);
+  const span = hi - lo;
+
+  if (span > 0 && span < hi * 0.25) {
+    const step = niceCeiling(span / 2);
+    return {
+      min: floorTo(lo - span * 0.25, step),
+      max: Math.ceil((hi + span * 0.25) / step) * step,
+    };
+  }
+
+  return { min: 0, max: niceCeiling(Math.max(1, hi) * 1.05) };
+}
+
+/**
+ * One tooltip: cycle, timestamp, the exact integer, and the change from the
+ * previous cycle that had a value.
+ *
+ * The exact figure is deliberately the prominent line. Axis labels abbreviate
+ * (`153.2K`), and this is where the operator confirms what the scraper actually
+ * returned — including a platform's own quantized figure, which must pass
+ * through unaltered.
+ */
+function metricTooltip(point: MetricPlotPoint, metric: string, x: number, y: number): string {
+  const hasDelta = point.delta !== null;
+  const lines = hasDelta ? 5 : 4;
+  const height = TIP.padding * 2 + TIP.lineHeight * lines;
+
+  // Flip to the left near the right-hand edge so the box cannot run off the
+  // viewBox and get clipped.
+  const flip = x > CHART.padLeft + (CHART.width - CHART.padLeft - CHART.padRight) * 0.62;
+  const boxX = flip ? x - TIP.width - 10 : x + 10;
+  const boxY = Math.min(
+    CHART.height - CHART.padBottom - height,
+    Math.max(CHART.padTop, y - height / 2),
+  );
+
+  const textX = boxX + TIP.padding;
+  const line = (index: number): number => boxY + TIP.padding + TIP.lineHeight * (index + 0.8);
+
+  const value =
+    point.value === null
+      ? `<text x="${textX}" y="${line(3)}" class="fill-slate-400" font-size="12">no value (${escapeHtml(point.status)})</text>`
+      : `<text x="${textX}" y="${line(3)}" class="fill-slate-100" font-size="14" font-family="ui-monospace, monospace">${escapeHtml(formatExact(point.value))}</text>`;
+
+  const delta =
+    point.delta === null
+      ? ''
+      : `<text x="${textX}" y="${line(4)}" font-size="11" font-family="ui-monospace, monospace" class="${point.delta >= 0 ? 'fill-emerald-400' : 'fill-rose-400'}">${escapeHtml(formatDelta(point.delta))}</text>`;
+
+  // Whitespace kept out of the template on purpose: this markup is emitted once
+  // per marker and rebuilt on every poll, so its size is a running cost.
+  return (
+    `<g class="metric-tip">` +
+    `<rect x="${boxX}" y="${boxY}" width="${TIP.width}" height="${height}" rx="6" class="fill-slate-950 stroke-slate-700" stroke-width="1" opacity="0.97" />` +
+    `<text x="${textX}" y="${line(0)}" class="fill-slate-200" font-size="12" font-weight="600">Cycle ${String(point.cycle)}</text>` +
+    `<text x="${textX}" y="${line(1)}" class="fill-slate-500" font-size="10">${escapeHtml(formatTimestamp(point.at))}</text>` +
+    `<text x="${textX}" y="${line(2)}" class="fill-slate-500" font-size="10">${escapeHtml(metric)}</text>` +
+    value +
+    delta +
+    `</g>`
+  );
+}
+
+/**
+ * A single video's metrics across the cycles of a continuous session.
+ *
+ * Continuous mode with exactly one URL only: with a batch there is no single
+ * series to plot, and a one-shot run has nothing to plot it against. Drawn with
+ * the same hand-rolled SVG approach — and the same `CHART` box, `niceCeiling`
+ * and `pathFrom` helpers — as the throughput graph above it, so the dashboard
+ * still carries no charting dependency.
+ */
+function renderMetricSeriesChart(state: AppState): void {
+  const panel = el('metric-series-panel');
+  const container = el('metric-series-chart');
+
+  // `input.accepted` is the server's own parsed URL count, so this agrees with
+  // what actually ran rather than with what the textarea happens to contain.
+  const singleUrl = state.input !== null && state.input.accepted === 1;
+  if (!state.continuous || !singleUrl) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>('.metric-tab-btn')) {
+    button.dataset['active'] = String(button.dataset['metric'] === state.metric);
+  }
+
+  const first = state.metricSeries[0];
+  const last = state.metricSeries[state.metricSeries.length - 1];
+  const key = `${state.metric}|${String(state.metricSeries.length)}|${String(first?.cycle)}|${String(last?.cycle)}`;
+  // The container's own content is part of the condition: the cache is only
+  // valid while what it describes is still on the page.
+  if (key === lastMetricChartKey && container.innerHTML !== '') return;
+  lastMetricChartKey = key;
+
+  const label = METRIC_LABELS[state.metric];
+  // Deltas are computed over the whole series *before* windowing, so trimming
+  // for display can never change a number the operator reads.
+  const all = toPlotPoints(state.metricSeries, state.metric);
+  const points = all.slice(-MAX_METRIC_POINTS_PLOTTED);
+  const values = points
+    .filter((point) => point.value !== null)
+    .map((point) => point.value as number);
+
+  if (values.length === 0) {
+    container.innerHTML = `<p class="py-12 text-center text-sm text-slate-500">
+      ${points.length === 0 ? 'Waiting for the first cycle…' : `No ${escapeHtml(label.toLowerCase())} reported yet.`}
+    </p>`;
+    return;
+  }
+
+  const { width, height, padLeft, padRight, padTop, padBottom } = CHART;
+  const plotWidth = width - padLeft - padRight;
+  const plotHeight = height - padTop - padBottom;
+
+  const axis = metricAxis(values);
+  const ySpan = Math.max(1, axis.max - axis.min);
+  const firstMs = points[0]?.tMs ?? 0;
+  const lastMs = points[points.length - 1]?.tMs ?? firstMs;
+  const spanMs = lastMs - firstMs;
+
+  // A lone point sits in the middle rather than pinned to the left edge, where
+  // it would read as the start of a line that is not there.
+  const x = (point: MetricPlotPoint): number =>
+    spanMs <= 0 ? padLeft + plotWidth / 2 : padLeft + ((point.tMs - firstMs) / spanMs) * plotWidth;
+  const y = (value: number): number =>
+    padTop + plotHeight - ((value - axis.min) / ySpan) * plotHeight;
+
+  // Split into runs of consecutive points that have values: a cycle that
+  // reported nothing leaves a visible break instead of an interpolated line
+  // across data that was never collected.
+  const segments: string[] = [];
+  let run: (readonly [number, number])[] = [];
+  for (const point of points) {
+    if (point.value === null) {
+      if (run.length > 1) segments.push(pathFrom(run));
+      run = [];
+      continue;
+    }
+    run.push([x(point), y(point.value)] as const);
+  }
+  if (run.length > 1) segments.push(pathFrom(run));
+
+  const gridlines = [0, 0.25, 0.5, 0.75, 1]
+    .map((fraction) => {
+      const value = axis.min + fraction * ySpan;
+      const gy = y(value);
+      return `<line x1="${padLeft}" y1="${gy}" x2="${padLeft + plotWidth}" y2="${gy}"
+                stroke="currentColor" class="text-slate-800" stroke-width="1" />
+              <text x="${padLeft - 8}" y="${gy + 4}" text-anchor="end"
+                class="fill-slate-500" font-size="11">${escapeHtml(formatCompact(value))}</text>`;
+    })
+    .join('');
+
+  const xTicks =
+    spanMs <= 0
+      ? ''
+      : [0, 0.25, 0.5, 0.75, 1]
+          .map((fraction) => {
+            const tx = padLeft + fraction * plotWidth;
+            const anchor = fraction === 0 ? 'start' : fraction === 1 ? 'end' : 'middle';
+            return `<text x="${tx}" y="${height - 10}" text-anchor="${anchor}"
+                      class="fill-slate-500" font-size="11"
+                    >${escapeHtml(formatClock(firstMs + fraction * spanMs))}</text>`;
+          })
+          .join('');
+
+  // Every cycle that reported nothing gets a rule, whatever the marker density:
+  // an outage must never be thinned away, and the rule is cheap.
+  const gaps = points
+    .filter((point) => point.value === null)
+    .map(
+      (point) => `<line x1="${x(point)}" y1="${padTop}" x2="${x(point)}" y2="${padTop + plotHeight}"
+            stroke="currentColor" class="text-rose-500/40" stroke-width="1" stroke-dasharray="2 4" />`,
+    )
+    .join('');
+
+  // Thinned to a density a cursor can actually separate. The newest point is
+  // always kept — it is the one being watched.
+  const stride = Math.ceil(points.length / MAX_METRIC_MARKERS);
+  const markers = points
+    .filter((_, index) => index % stride === 0 || index === points.length - 1)
+    .map((point) => {
+      const px = x(point);
+      // A failed cycle is pinned to the baseline, hollow, so it reads as an
+      // absence rather than as a value of zero.
+      const py = point.value === null ? padTop + plotHeight : y(point.value);
+      const dot =
+        point.value === null
+          ? `<circle cx="${px}" cy="${py}" r="3" fill="none" stroke="currentColor" class="text-rose-400" stroke-width="1.5" />`
+          : `<circle cx="${px}" cy="${py}" r="3" class="fill-sky-400" />`;
+      return `<g class="metric-point">${dot}<circle cx="${px}" cy="${py}" r="12" fill="transparent" />${metricTooltip(point, label, px, py)}</g>`;
+    })
+    .join('');
+
+  const line = segments
+    .map(
+      (path) => `<path d="${path}" fill="none" stroke="currentColor" class="text-sky-400"
+                       stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round" />`,
+    )
+    .join('');
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}"
+         role="img" aria-label="${escapeHtml(label)} per cycle"
+         style="min-width:${width / 1.6}px">
+      ${gridlines}
+      ${gaps}
+      ${line}
+      ${markers}
+      <line x1="${padLeft}" y1="${padTop + plotHeight}" x2="${padLeft + plotWidth}"
+            y2="${padTop + plotHeight}" stroke="currentColor" class="text-slate-700"
+            stroke-width="1" />
+      ${xTicks}
+    </svg>
+    <p class="mt-2 text-[11px] text-slate-500">
+      ${String(all.length)} cycle${all.length === 1 ? '' : 's'} ·
+      hover a point for the exact ${escapeHtml(label.toLowerCase())} count and its change
+    </p>`;
 }
