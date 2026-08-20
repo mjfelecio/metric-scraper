@@ -1,3 +1,4 @@
+import { type BandwidthView } from '../core/metrics/bandwidth.js';
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type InputFormat, type InputIssue } from '../core/models/input.js';
 import { type Platform } from '../core/models/platform.js';
@@ -6,6 +7,13 @@ import { type CycleSummary, type SessionSummary } from '../core/models/session-s
 import { type ScrapeStatus } from '../core/models/status.js';
 import { type ProxyPoolStats } from '../core/scraper/pool-ports.js';
 import { type RunProgress } from '../core/runner/types.js';
+// `import type` (whole-clause), not `import { type X }`: under
+// verbatimModuleSyntax a per-specifier `type` modifier still emits a
+// side-effecting `import {}` at build time, and `bandwidth-baselines.ts`'s own
+// top-level `node:fs`/`node:path` imports would then break the browser bundle
+// (see the module comment below: this file must stay free of Node imports).
+// A whole-clause `import type` is guaranteed to be fully erased instead.
+import type { BaselineSummary } from '../infrastructure/output/bandwidth-baselines.js';
 
 /**
  * Transport types shared between the Node application layer and the browser
@@ -121,6 +129,18 @@ export interface RunStateDto {
    * `null` when no proxies are configured.
    */
   proxies: ProxyPoolStats | null;
+
+  /**
+   * Bandwidth for this run plus the cross-run baseline.
+   *
+   * Ships on the run-state poll for the same reason `proxies` does: the
+   * dashboard is already asking for this object once a second, and a route of
+   * its own would only duplicate that.
+   *
+   * `null` when `METRICS_BANDWIDTH` is off, or on but nothing has been
+   * measured yet — never a synthetic zero (see `BandwidthView`).
+   */
+  bandwidth: { current: BandwidthView; baseline: BaselineSummary } | null;
 
   /** Continuous-session fields. All inert for a one-shot run. */
   continuous: boolean;

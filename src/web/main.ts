@@ -288,6 +288,7 @@ async function poll(runId: string): Promise<void> {
         error: state.error,
         hasOutput: state.hasOutput,
         proxies: state.proxies,
+        bandwidth: state.bandwidth,
         continuous: state.continuous,
         schedule: state.schedule,
         cycle: state.cycle,

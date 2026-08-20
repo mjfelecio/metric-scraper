@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { loadConfig, type AppConfig } from '../config/env.js';
+import { type BandwidthView } from '../core/metrics/bandwidth.js';
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { parseInput } from '../core/input/parse-input.js';
 import { type Logger, nullLogger } from '../core/logging/logger.js';
@@ -16,6 +17,8 @@ import { type MetricSnapshot } from '../core/models/snapshot.js';
 import {
   appendBaseline,
   buildBaselineRecord,
+  readBaselines,
+  summarizeBaselines,
 } from '../infrastructure/output/bandwidth-baselines.js';
 import { JsonlFileSink } from '../infrastructure/output/jsonl-file-sink.js';
 import { ProxyEventLog } from '../infrastructure/output/proxy-event-log.js';
@@ -26,6 +29,7 @@ import {
 } from '../infrastructure/output/run-paths.js';
 import { createDefaultUrlNormalizerRegistry } from '../platforms/index.js';
 
+import { bandwidthViewFromCycles, bandwidthViewFromSummary } from './bandwidth-view.js';
 import { buildRunner, createProxySupply } from './composition.js';
 import { appendMetricPoint } from './metric-series.js';
 import { runSession, type SessionProgress } from './scrape-session.js';
@@ -193,6 +197,7 @@ export class RunService {
         outputPath: null,
         hasOutput: false,
         proxies: null,
+        bandwidth: null,
         continuous,
         schedule,
         cycle: null,
@@ -335,6 +340,13 @@ export class RunService {
         onCycleEnd: (cycle: CycleSummary) => {
           state.cycles.push(cycle);
           if (cycle.summary !== null) state.summary = cycle.summary;
+          // Refreshed once per cycle, not once per poll: a session's own
+          // cumulative bandwidth has no single source (each cycle only carries
+          // its own `RunSummary`), and re-reading the baseline file on every
+          // ~1s dashboard poll would turn a display concern into a per-poll
+          // disk read. A cycle boundary is the only point this figure can
+          // change anyway.
+          void this.refreshBandwidth(state, bandwidthViewFromCycles(state.cycles));
           if (trackMetrics) {
             appendMetricPoint(state.metricSeries, cycle, pendingSnapshot);
             // Cleared so the next cycle cannot re-emit this cycle's snapshot:
@@ -481,6 +493,12 @@ export class RunService {
       state.summary = result.summary;
       state.hasOutput = result.summary.output.rows_written > 0;
       state.finishedAt = new Date().toISOString();
+      // Read only now, once, at run end — not on every ~1s dashboard poll.
+      // Deliberately after `appendBandwidthBaseline` above: this run's own
+      // line may already be in the file by this point, and `refreshBandwidth`
+      // passes `state.runId` through to `summarizeBaselines` so that line is
+      // excluded from its own baseline.
+      await this.refreshBandwidth(state, bandwidthViewFromSummary(result.summary));
 
       if (result.fatalError !== null) {
         state.state = 'failed';
@@ -568,6 +586,35 @@ export class RunService {
         'could not append bandwidth baseline',
       );
     }
+  }
+
+  /**
+   * Sets `state.bandwidth` from a freshly computed `current` view, reading the
+   * baseline history off disk only when there is something to pair it with.
+   *
+   * Deliberately not read on every `get()` poll: `RunStateDto` is polled about
+   * once a second, but the baseline file only *could* have changed at a run or
+   * cycle boundary (that is the only place anything ever appends to it), so
+   * every call site here is one of those boundaries, never the poll itself.
+   * `current === null` (measurement off, or nothing measured yet) skips the
+   * read entirely — that state can never have a baseline worth showing either.
+   *
+   * `state.runId` is passed through to `summarizeBaselines` so a run's own
+   * just-appended line (see `appendBandwidthBaseline`) is excluded from its
+   * own baseline (R2/R6).
+   */
+  private async refreshBandwidth(
+    state: RunStateDto,
+    current: BandwidthView | null,
+  ): Promise<void> {
+    if (current === null) {
+      state.bandwidth = null;
+      return;
+    }
+
+    const baselinePath = path.join(this.config.outputDir, 'bandwidth-baselines.jsonl');
+    const { records } = await readBaselines(baselinePath);
+    state.bandwidth = { current, baseline: summarizeBaselines(records, state.runId) };
   }
 }
 

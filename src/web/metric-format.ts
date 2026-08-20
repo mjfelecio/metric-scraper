@@ -97,6 +97,31 @@ export function toPlotPoints(
   });
 }
 
+const BYTE_UNITS = [
+  { threshold: 1_000_000_000, suffix: 'GB' },
+  { threshold: 1_000_000, suffix: 'MB' },
+  { threshold: 1_000, suffix: 'KB' },
+] as const;
+
+/**
+ * Human-scaled byte figure, e.g. `1.4 MB`.
+ *
+ * Decimal (1000-based) units, not binary (1024-based) ones: proxies bill by
+ * the decimal byte, and this figure exists to predict that bill.
+ */
+export function formatBytes(value: number): string {
+  const magnitude = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+
+  for (const { threshold, suffix } of BYTE_UNITS) {
+    if (magnitude >= threshold) {
+      return `${sign}${(magnitude / threshold).toFixed(1)} ${suffix}`;
+    }
+  }
+
+  return `${sign}${String(magnitude)} B`;
+}
+
 /** `Aug 19, 2026 16:42:18` — the tooltip's timestamp. */
 export function formatTimestamp(iso: string): string {
   const date = new Date(iso);

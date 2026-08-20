@@ -9,11 +9,15 @@ import {
   type SessionScheduleDto,
 } from '../app/types.js';
 import { type InputFormat } from '../core/models/input.js';
+import { type BandwidthView } from '../core/metrics/bandwidth.js';
 import { type Platform } from '../core/models/platform.js';
 import { type RunSummary } from '../core/models/run-summary.js';
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type CycleSummary, type SessionSummary } from '../core/models/session-summary.js';
 import { type RunProgress } from '../core/runner/types.js';
+// `import type` (whole-clause), not `import { type X }`: see the equivalent
+// import in `../app/types.js` for why this one must be fully erased.
+import type { BaselineSummary } from '../infrastructure/output/bandwidth-baselines.js';
 import { type MetricKey } from './metric-format.js';
 import { type ProxyPoolStats } from '../core/scraper/pool-ports.js';
 
@@ -52,6 +56,13 @@ export interface AppState {
   defaults: RunDefaultsDto | null;
   /** Live proxy pool state; `null` when no proxies are configured. */
   proxies: ProxyPoolStats | null;
+  /**
+   * This run's bandwidth plus the cross-run baseline.
+   *
+   * `null` when `METRICS_BANDWIDTH` is off, or on but nothing has been
+   * measured yet — never a synthetic zero (see `BandwidthView`).
+   */
+  bandwidth: { current: BandwidthView; baseline: BaselineSummary } | null;
 
   schedule: SessionScheduleDto | null;
   cycle: CycleProgressDto | null;
@@ -92,6 +103,7 @@ export function createInitialState(): AppState {
     hasOutput: false,
     defaults: null,
     proxies: null,
+    bandwidth: null,
 
     schedule: null,
     cycle: null,
