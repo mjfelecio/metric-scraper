@@ -286,4 +286,38 @@ describe('mergeProxyUsage', () => {
     const merged = mergeProxyUsage([row(), row({ proxy_id: 'http://b:8000', label: 'p2' })]);
     expect(merged.map((entry) => entry.proxy_id)).toEqual(['http://a:8000', 'http://b:8000']);
   });
+
+  it('sums measured bytes across cycles for the same proxy', () => {
+    const merged = mergeProxyUsage([
+      row({ request_bytes: 100, response_bytes: 900 }),
+      row({ request_bytes: 50, response_bytes: 450 }),
+      row({ request_bytes: 25, response_bytes: 225 }),
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ request_bytes: 175, response_bytes: 1_575 });
+  });
+
+  it('stays null when no contributing cycle ever measured bandwidth', () => {
+    // Both cycles have request_bytes/response_bytes: null — metrics were off,
+    // or this proxy simply never appeared in the bandwidth aggregator. The
+    // merge must not turn that into a measured zero.
+    const merged = mergeProxyUsage([row(), row()]);
+
+    expect(merged[0]?.request_bytes).toBeNull();
+    expect(merged[0]?.response_bytes).toBeNull();
+  });
+
+  it('treats an unmeasured cycle as contributing nothing once another cycle has real bytes', () => {
+    // One cycle measured (100/900), the other didn't (null/null) — e.g. the
+    // proxy carried no traffic that cycle, so the bandwidth aggregator has no
+    // row for it. The merged total must be the real cycle's bytes, not null
+    // and not a value inflated by treating "unmeasured" as some other number.
+    const merged = mergeProxyUsage([
+      row({ request_bytes: 100, response_bytes: 900 }),
+      row({ request_bytes: null, response_bytes: null }),
+    ]);
+
+    expect(merged[0]).toMatchObject({ request_bytes: 100, response_bytes: 900 });
+  });
 });
