@@ -8,6 +8,7 @@ import { type UrlNormalizer } from '../core/url/types.js';
 
 import { InstagramScraper, type InstagramScraperOptions } from './instagram/instagram-scraper.js';
 import { InstagramUrlNormalizer } from './instagram/instagram-url-normalizer.js';
+import { InstagramUrlResolver } from './instagram/instagram-url-resolver.js';
 import { TikTokScraper } from './tiktok/tiktok-scraper.js';
 import { TikTokUrlNormalizer } from './tiktok/tiktok-url-normalizer.js';
 import { TikTokUrlResolver } from './tiktok/tiktok-url-resolver.js';
@@ -28,7 +29,7 @@ export function createDefaultUrlNormalizerRegistry(): UrlNormalizerRegistry {
 }
 
 export function createDefaultUrlResolverRegistry() {
-  return createUrlResolverRegistry([new TikTokUrlResolver()]);
+  return createUrlResolverRegistry([new TikTokUrlResolver(), new InstagramUrlResolver()]);
 }
 
 export function createDefaultScrapers(
@@ -46,6 +47,7 @@ export function createDefaultScraperRegistry(
 export {
   InstagramScraper,
   InstagramUrlNormalizer,
+  InstagramUrlResolver,
   TikTokScraper,
   TikTokUrlNormalizer,
   TikTokUrlResolver,
