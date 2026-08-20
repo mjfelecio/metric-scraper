@@ -6,7 +6,7 @@ import { type CycleSummary } from '../core/models/session-summary.js';
  * Converts the persisted (snake_case) `RunSummary.bandwidth` block into the
  * camelCase `BandwidthView` the dashboard renders from.
  *
- * `perProxy` is deliberately left empty. The persisted summary's per-proxy
+ * `perProxy` is deliberately `null`. The persisted summary's per-proxy
  * bandwidth (`summary.proxies.per_proxy[].request_bytes` /`.response_bytes`)
  * is nullable *per proxy* even when this top-level block is measured — a
  * proxy that was configured but never leased has no bucket in the aggregator
@@ -25,7 +25,7 @@ export function bandwidthViewFromSummary(summary: RunSummary | null): BandwidthV
     responseBytes: bandwidth.response_bytes,
     totalBytes: bandwidth.total_bytes,
     bytesPerRequest: bandwidth.bytes_per_request,
-    perProxy: [],
+    perProxy: null,
   };
 }
 
@@ -67,6 +67,6 @@ export function bandwidthViewFromCycles(cycles: readonly CycleSummary[]): Bandwi
     responseBytes,
     totalBytes,
     bytesPerRequest: requests === 0 ? null : totalBytes / requests,
-    perProxy: [],
+    perProxy: null,
   };
 }

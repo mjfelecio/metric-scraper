@@ -27,7 +27,7 @@ describe('BandwidthAggregator', () => {
     agg.record({ proxyId: 'p2', host: 'h', requestBytes: 20, responseBytes: 180 });
     agg.record({ proxyId: 'p1', host: 'h', requestBytes: 10, responseBytes: 90 });
 
-    const byId = new Map(agg.view().perProxy.map((row) => [row.proxyId, row]));
+    const byId = new Map((agg.view().perProxy ?? []).map((row) => [row.proxyId, row]));
     expect(byId.get('p1')?.requests).toBe(2);
     expect(byId.get('p1')?.totalBytes).toBe(200);
     expect(byId.get('p2')?.requests).toBe(1);
@@ -38,7 +38,7 @@ describe('BandwidthAggregator', () => {
     const agg = new BandwidthAggregator();
     agg.record({ proxyId: null, host: 'h', requestBytes: 5, responseBytes: 15 });
 
-    const direct = agg.view().perProxy.find((row) => row.proxyId === null);
+    const direct = agg.view().perProxy?.find((row) => row.proxyId === null);
     expect(direct?.requests).toBe(1);
     expect(direct?.totalBytes).toBe(20);
   });

@@ -36,7 +36,8 @@ export interface BandwidthView {
   readonly totalBytes: number;
   /** `null` until at least one request has been measured. */
   readonly bytesPerRequest: number | null;
-  readonly perProxy: readonly ProxyBandwidthView[];
+  /** `null` when this view was reconstructed without per-proxy measurements. */
+  readonly perProxy: readonly ProxyBandwidthView[] | null;
 }
 
 interface Bucket {

@@ -39,7 +39,7 @@ describe('bandwidthViewFromSummary', () => {
       responseBytes: 1_393_600,
       totalBytes: 1_433_600,
       bytesPerRequest: 10_096,
-      perProxy: [],
+      perProxy: null,
     });
   });
 
@@ -97,7 +97,7 @@ describe('bandwidthViewFromCycles', () => {
       responseBytes: 135_000,
       totalBytes: 150_000,
       bytesPerRequest: 1_000,
-      perProxy: [],
+      perProxy: null,
     });
   });
 
@@ -129,7 +129,7 @@ describe('bandwidthViewFromCycles', () => {
       responseBytes: 9_000,
       totalBytes: 10_000,
       bytesPerRequest: 1_000,
-      perProxy: [],
+      perProxy: null,
     });
   });
 });

@@ -9,7 +9,6 @@ import { loadConfig, type AppConfig } from '../../src/config/env.js';
 import { nullLogger } from '../../src/core/logging/logger.js';
 import { BandwidthAggregator } from '../../src/core/metrics/bandwidth.js';
 import { MetricsCollector } from '../../src/core/metrics/metrics-collector.js';
-import { type ThroughputSample } from '../../src/core/metrics/throughput-timeline.js';
 import { type InputRecord } from '../../src/core/models/input.js';
 import { type Platform } from '../../src/core/models/platform.js';
 import {
@@ -247,10 +246,10 @@ describe('runSession', () => {
     // cycle so a double-count or a dropped cycle lands on a total no correct
     // implementation would produce.
     const cycleBytes = [100, 200, 400];
-    const samples: ThroughputSample[] = [];
+    const foldedTotals: number[] = [];
 
     const summary = await session({
-      onSample: (sample) => samples.push(sample),
+      onBandwidthFold: (totalBytes) => foldedTotals.push(totalBytes),
       createRunner: async (context) => {
         const built = await runnerFactory({ scraper: okScraper })(context);
         const bandwidth = new BandwidthAggregator();
@@ -266,20 +265,8 @@ describe('runSession', () => {
     });
 
     expect(summary.cycles.started).toBe(3);
-    expect(samples.length).toBeGreaterThan(0);
-
-    // Never resets to a lower value mid-session: each cycle's aggregator dies
-    // with its runner, but the running total must survive the handoff.
-    for (let i = 1; i < samples.length; i += 1) {
-      const previous = samples[i - 1]?.bytes ?? 0;
-      const current = samples[i]?.bytes ?? 0;
-      expect(current).toBeGreaterThanOrEqual(previous);
-    }
-
-    // The final sample is the only one guaranteed to postdate all three
-    // cycles, so it is the one figure that must equal the exact sum — not
-    // more (double-counted), not less (a cycle's bytes lost at the boundary).
-    const finalSample = samples[samples.length - 1];
-    expect(finalSample?.bytes).toBe(700);
+    // Observed synchronously at every boundary, so this cannot depend on a
+    // real 5 ms timer landing inside a tiny handoff window.
+    expect(foldedTotals).toEqual([100, 300, 700]);
   });
 });

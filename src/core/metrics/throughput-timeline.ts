@@ -108,6 +108,8 @@ export class ThroughputTimeline {
     // whole window anyway.
     if (deltaMs <= 0) return null;
 
+    // Every input is cumulative and monotonic; a negative delta means that
+    // upstream invariant already failed, so no rate should expose the dip.
     const perMinute = (delta: number): number => Math.max(0, (delta / deltaMs) * 60_000);
 
     const sample: ThroughputSample = {

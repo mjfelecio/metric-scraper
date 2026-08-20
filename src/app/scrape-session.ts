@@ -112,6 +112,8 @@ export interface RunSessionOptions {
   onProgress?: ((progress: SessionProgress) => void) | undefined;
   onCycleStart?: ((context: CycleContext) => void) | undefined;
   onCycleEnd?: ((cycle: CycleSummary) => void) | undefined;
+  /** Test seam fired after one cycle's bytes are folded into the cumulative base. */
+  onBandwidthFold?: ((totalBytes: number) => void) | undefined;
   /**
    * Every finished URL, tagged with the cycle it belongs to.
    *
@@ -409,8 +411,10 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
       // sample taken between cycles keeps reading the run's true total instead
       // of momentarily dropping back to whatever the next cycle has measured
       // so far.
-      bandwidthBaseBytes += currentBandwidth?.view().totalBytes ?? 0;
+      const finishedCycleBytes = currentBandwidth?.view().totalBytes ?? 0;
       currentBandwidth = null;
+      bandwidthBaseBytes += finishedCycleBytes;
+      options.onBandwidthFold?.(bandwidthBaseBytes);
       const finishedAtMs = now();
       const cycleSummary: CycleSummary = {
         cycle: context.cycle,

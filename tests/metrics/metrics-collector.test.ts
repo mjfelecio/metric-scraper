@@ -234,7 +234,7 @@ describe('MetricsCollector bandwidth', () => {
     const view = collector.view();
     expect(view.bandwidth?.totalBytes).toBe(3_000);
     expect(view.bandwidth?.bytesPerRequest).toBe(1_500);
-    expect(view.bandwidth?.perProxy[0]?.proxyId).toBe('p1');
+    expect(view.bandwidth?.perProxy?.[0]?.proxyId).toBe('p1');
   });
 
   it('joins measured bytes onto the matching proxy row, leaving others null', () => {
