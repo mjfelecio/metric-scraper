@@ -17,6 +17,11 @@ describe('loadConfig', () => {
     expect(config.session.storePath).toBeNull();
     expect(config.instagram.clipsMaxPages).toBe(2);
     expect(config.instagram.clipsMaxAuthors).toBe(3);
+    expect(config.requestTimeoutMs).toBe(15_000);
+    expect(config.attemptTimeoutMsByPlatform).toEqual({
+      tiktok: 15_000,
+      instagram: 60_000,
+    });
   });
 
   it('reads overrides from the environment', () => {
@@ -28,6 +33,9 @@ describe('loadConfig', () => {
       OUTPUT_DIR: '/tmp/snapshots',
       INSTAGRAM_CLIPS_MAX_PAGES: '3',
       INSTAGRAM_CLIPS_MAX_AUTHORS: '2',
+      SCRAPER_REQUEST_TIMEOUT_MS: '12000',
+      TIKTOK_ATTEMPT_TIMEOUT_MS: '18000',
+      INSTAGRAM_ATTEMPT_TIMEOUT_MS: '75000',
     });
 
     expect(config.concurrency).toBe(25);
@@ -36,6 +44,11 @@ describe('loadConfig', () => {
     expect(config.outputDir).toBe('/tmp/snapshots');
     expect(config.instagram.clipsMaxPages).toBe(3);
     expect(config.instagram.clipsMaxAuthors).toBe(2);
+    expect(config.requestTimeoutMs).toBe(12_000);
+    expect(config.attemptTimeoutMsByPlatform).toEqual({
+      tiktok: 18_000,
+      instagram: 75_000,
+    });
   });
 
   it('treats an empty string as unset', () => {
@@ -64,6 +77,11 @@ describe('loadConfig', () => {
     expect(() => load({ RETRY_MAX_ATTEMPTS: '0' })).toThrow(/invalid configuration/);
     expect(() => load({ INSTAGRAM_CLIPS_MAX_PAGES: '0' })).toThrow(/invalid configuration/);
     expect(() => load({ INSTAGRAM_CLIPS_MAX_AUTHORS: '0' })).toThrow(/invalid configuration/);
+    expect(() => load({ TIKTOK_ATTEMPT_TIMEOUT_MS: '0' })).toThrow(/invalid configuration/);
+    expect(() => load({ INSTAGRAM_ATTEMPT_TIMEOUT_MS: '-1' })).toThrow(/invalid configuration/);
+    expect(() => load({ INSTAGRAM_ATTEMPT_TIMEOUT_MS: '1.5' })).toThrow(
+      /INSTAGRAM_ATTEMPT_TIMEOUT_MS/,
+    );
   });
 
   it('rejects a max delay below the initial delay', () => {

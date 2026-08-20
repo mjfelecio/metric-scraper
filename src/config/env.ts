@@ -30,6 +30,12 @@ export const AppConfigSchema = z.object({
    * path in seconds. `0` means back-to-back cycles.
    */
   pollIntervalMs: z.number().int().min(0),
+  /** Maximum wall-clock duration of one complete scrape attempt, by platform. */
+  attemptTimeoutMsByPlatform: z.object({
+    tiktok: z.number().int().min(1),
+    instagram: z.number().int().min(1),
+  }),
+  /** Maximum wall-clock duration of one outbound HTTP request. */
   requestTimeoutMs: z.number().int().min(1),
 
   retry: z.object({
@@ -173,6 +179,13 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     // unbounded pending work, and the producer has no way to feel the pressure.
     maxQueueSize: int(env, 'SCRAPER_MAX_QUEUE_SIZE', 1_000),
     pollIntervalMs: int(env, 'SCRAPER_POLL_INTERVAL_MS', 900_000),
+    attemptTimeoutMsByPlatform: {
+      // Preserve TikTok's existing whole-attempt ceiling. Instagram receives
+      // a separate budget because one attempt may make up to eight sequential
+      // requests while TikTok normally makes two.
+      tiktok: int(env, 'TIKTOK_ATTEMPT_TIMEOUT_MS', 15_000),
+      instagram: int(env, 'INSTAGRAM_ATTEMPT_TIMEOUT_MS', 60_000),
+    },
     requestTimeoutMs: int(env, 'SCRAPER_REQUEST_TIMEOUT_MS', 15_000),
 
     retry: {
@@ -314,6 +327,7 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
     httpRpmPerHost: config.httpRpmPerHost,
     maxQueueSize: config.maxQueueSize,
     pollIntervalMs: config.pollIntervalMs,
+    attemptTimeoutMsByPlatform: { ...config.attemptTimeoutMsByPlatform },
     requestTimeoutMs: config.requestTimeoutMs,
     retry: config.retry,
     outputDir: config.outputDir,

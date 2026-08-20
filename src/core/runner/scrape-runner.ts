@@ -41,7 +41,8 @@ export interface ScrapeRunnerConfig {
   burst?: number | undefined;
   /** Waiting (not running) jobs before the producer is made to wait. `0` = unbounded. */
   maxQueueSize: number;
-  requestTimeoutMs: number;
+  /** Maximum duration of one complete attempt, selected by the record's platform. */
+  attemptTimeoutMsByPlatform: Readonly<Record<Platform, number>>;
 }
 
 export interface ScrapeRunnerDeps {
@@ -67,6 +68,8 @@ export interface ScrapeRunnerDeps {
   rateLimiter?: RateLimiter | undefined;
   sleep?: Sleep | undefined;
   now?: (() => Date) | undefined;
+  /** Creates the per-attempt deadline signal. Overridable for deterministic tests. */
+  createTimeoutSignal?: ((delayMs: number) => AbortSignal) | undefined;
 }
 
 export interface RunOptions {
@@ -100,11 +103,14 @@ export class ScrapeRunner {
   private readonly deps: ScrapeRunnerDeps;
   private readonly sleep: Sleep;
   private readonly now: () => Date;
+  private readonly createTimeoutSignal: (delayMs: number) => AbortSignal;
 
   constructor(deps: ScrapeRunnerDeps) {
     this.deps = deps;
     this.sleep = deps.sleep ?? realSleep;
     this.now = deps.now ?? (() => new Date());
+    this.createTimeoutSignal =
+      deps.createTimeoutSignal ?? ((delayMs) => AbortSignal.timeout(delayMs));
   }
 
   async run(records: readonly InputRecord[], options: RunOptions = {}): Promise<RunResult> {
@@ -354,12 +360,11 @@ export class ScrapeRunner {
         metrics.recordProxyAcquire(Date.now() - acquireStart);
         lastProxyId = proxyLease?.id ?? null;
 
-        // The attempt is bounded by both the run's lifetime and the per-request
-        // timeout, so a hung platform response cannot stall the queue.
-        const attemptSignal = AbortSignal.any([
-          signal,
-          AbortSignal.timeout(config.requestTimeoutMs),
-        ]);
+        // One request and one attempt are different budgets. The HTTP client
+        // applies a fresh request timeout to every outbound call; this signal
+        // bounds the whole platform workflow and preserves run cancellation.
+        const attemptTimeoutMs = config.attemptTimeoutMsByPlatform[record.platform];
+        const attemptSignal = AbortSignal.any([signal, this.createTimeoutSignal(attemptTimeoutMs)]);
 
         result = await scraper.scrape(record.url, {
           attempt,

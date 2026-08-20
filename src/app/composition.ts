@@ -141,7 +141,7 @@ export async function buildRunner(options: {
       targetRpm,
       ...(burst > 0 ? { burst } : {}),
       maxQueueSize: config.maxQueueSize,
-      requestTimeoutMs: config.requestTimeoutMs,
+      attemptTimeoutMsByPlatform: config.attemptTimeoutMsByPlatform,
     },
   });
 
