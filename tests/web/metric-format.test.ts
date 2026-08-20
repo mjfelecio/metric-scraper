@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { type MetricPointDto } from '../../src/app/types.js';
 import {
+  formatBytes,
   formatCompact,
   formatDelta,
   formatExact,
@@ -50,6 +51,50 @@ describe('formatCompact', () => {
     // 153,299 must not read as 153.3K.
     expect(formatCompact(153_299)).toBe('153.2K');
     expect(formatCompact(1_999)).toBe('1.9K');
+  });
+});
+
+describe('formatBytes', () => {
+  it('stays in bytes below 1000', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(999)).toBe('999 B');
+  });
+
+  it('uses one decimal with a unit suffix at each threshold', () => {
+    expect(formatBytes(1_000)).toBe('1.0 KB');
+    expect(formatBytes(1_433_600)).toBe('1.4 MB');
+    expect(formatBytes(2_400_000_000)).toBe('2.4 GB');
+  });
+
+  it('signs negative values', () => {
+    expect(formatBytes(-1_500)).toBe('-1.5 KB');
+  });
+
+  /**
+   * Minor #1: the unit was chosen from the *unrounded* magnitude, so a value
+   * that rounds up to exactly 1000.0 at its own unit never got promoted to
+   * the next one — `formatBytes(999_999)` used to return `"1000.0 KB"`
+   * instead of `"1.0 MB"`.
+   */
+  it('promotes a value that rounds up to 1000.0 at its own unit to the next unit, rather than printing a 1000.0 mantissa', () => {
+    expect(formatBytes(999_999)).toBe('1.0 MB');
+    expect(formatBytes(999_999_999)).toBe('1.0 GB');
+  });
+
+  it('does not promote a value that rounds to just under 1000.0', () => {
+    expect(formatBytes(999_949)).toBe('999.9 KB');
+    expect(formatBytes(999_949_999)).toBe('999.9 MB');
+  });
+
+  it('has no unit above GB to promote to, so a huge value still reports in GB', () => {
+    expect(formatBytes(999_999_999_999)).toBe('1000.0 GB');
+  });
+
+  it('promotes right at the boundary where rounding first reaches 1000.0', () => {
+    // 999_950 / 1000 = 999.95 -> rounds to 1000.0 at KB, must promote to MB.
+    expect(formatBytes(999_950)).toBe('1.0 MB');
+    // One byte below that must not promote.
+    expect(formatBytes(999_949)).toBe('999.9 KB');
   });
 });
 

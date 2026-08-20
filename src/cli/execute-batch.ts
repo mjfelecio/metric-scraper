@@ -1,3 +1,4 @@
+import { appendBandwidthBaseline } from '../app/bandwidth-refresh.js';
 import { buildRunner, createProxySupply, type RunnerOverrides } from '../app/composition.js';
 import { loadConfig, type AppConfig } from '../config/env.js';
 import { parseInput } from '../core/input/parse-input.js';
@@ -103,6 +104,15 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
   await proxyEvents.close();
 
   await writeRunSummary(paths.summary, result.summary);
+  // R8: the CLI path completes a `RunSummary` exactly like the web
+  // dashboard's one-shot run, so it earns a line in the same cross-run
+  // baseline history — design doc §3.5, "one line per completed run".
+  // `appendBandwidthBaseline` swallows its own errors (logging instead), so
+  // this can never turn a bad baseline write into a failed batch.
+  await appendBandwidthBaseline(result.summary, {
+    outputDir: options.outputDir ?? config.outputDir,
+    logger,
+  });
 
   if (options.json === true) {
     process.stdout.write(`${JSON.stringify(result.summary, null, 2)}\n`);

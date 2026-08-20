@@ -113,10 +113,20 @@ export function formatBytes(value: number): string {
   const magnitude = Math.abs(value);
   const sign = value < 0 ? '-' : '';
 
-  for (const { threshold, suffix } of BYTE_UNITS) {
-    if (magnitude >= threshold) {
-      return `${sign}${(magnitude / threshold).toFixed(1)} ${suffix}`;
+  for (let i = 0; i < BYTE_UNITS.length; i += 1) {
+    const unit = BYTE_UNITS[i];
+    if (unit === undefined || magnitude < unit.threshold) continue;
+
+    const rounded = Math.round((magnitude / unit.threshold) * 10) / 10;
+    // The unit was chosen from the *unrounded* magnitude, so rounding to one
+    // decimal can still carry the value across the next unit's boundary
+    // (999,999 -> naive "1000.0 KB"). Re-express with the unit one size up
+    // rather than ever displaying a mantissa of 1000.
+    const bigger = BYTE_UNITS[i - 1];
+    if (bigger !== undefined && rounded >= 1000) {
+      return `${sign}${(magnitude / bigger.threshold).toFixed(1)} ${bigger.suffix}`;
     }
+    return `${sign}${rounded.toFixed(1)} ${unit.suffix}`;
   }
 
   return `${sign}${String(magnitude)} B`;

@@ -41,6 +41,16 @@ import {
 
 const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;
 
+/**
+ * The run id given to one cycle's own `ScrapeRunner.run` — distinct per
+ * cycle, so cycle N and cycle N+1 are never confused with one another (e.g.
+ * when excluding "this run" from its own bandwidth baseline — see R8 in
+ * `bandwidth-refresh.ts`, the other place this must be reproduced exactly).
+ */
+export function cycleRunId(sessionId: string, cycle: number): string {
+  return `${sessionId}-cycle-${String(cycle).padStart(3, '0')}`;
+}
+
 export interface SessionScheduleOptions {
   /** Time between cycle starts. `0` = back-to-back. */
   intervalMs: number;
@@ -339,7 +349,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
         currentBandwidth = built.bandwidth;
 
         const result = await built.runner.run(records, {
-          runId: `${sessionId}-cycle-${String(context.cycle).padStart(3, '0')}`,
+          runId: cycleRunId(sessionId, context.cycle),
           platform: options.platform,
           counts: options.counts,
           summaryPath: cycleSummaryPath,
