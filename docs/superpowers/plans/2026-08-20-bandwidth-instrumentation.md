@@ -144,7 +144,7 @@ interface Bucket {
 }
 
 /** The key used for direct traffic, which has no proxy id. */
-const DIRECT = '�direct';
+const DIRECT = '__direct__';
 
 export class BandwidthAggregator implements BandwidthSink {
   private readonly buckets = new Map<string, Bucket>();
