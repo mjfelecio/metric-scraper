@@ -173,6 +173,7 @@ export async function runComparison(deps: RunComparisonDeps): Promise<Comparison
     } catch (error) {
       apifyError = describe(error);
     }
+    apifyRun = await settleBilling(client, apifyRun, deps.sleep, deps.logger);
   } else {
     apifyError = describe(settled.error);
   }
@@ -255,4 +256,48 @@ export async function runComparison(deps: RunComparisonDeps): Promise<Comparison
 function describe(error: unknown): string {
   const scrapeError = ScrapeError.from(error);
   return `${scrapeError.code}: ${scrapeError.message}`;
+}
+
+/**
+ * Re-reads the run once the dataset is in hand, to pick up settled charges.
+ *
+ * Apify posts a run's cost *after* it reports `SUCCEEDED`. Reading
+ * `usageTotalUsd` at the moment the status flips therefore yields `0` with
+ * every `chargedEventCounts` entry at zero — which the report would then
+ * publish as "Actual run cost: $0.0000" and, worse, project forward as a $0
+ * cost at 100,000 videos. Two real runs measured $0.0134 and $0.0158 a few
+ * seconds after each reported $0.
+ *
+ * A billing re-read is not worth failing the benchmark over: the metrics are
+ * already collected, so any error here is swallowed and the original run kept.
+ */
+async function settleBilling(
+  client: ApifyClient,
+  run: ApifyRun,
+  sleep: ((ms: number) => Promise<void>) | undefined,
+  logger: Logger | undefined,
+): Promise<ApifyRun> {
+  if (hasBilling(run)) return run;
+  const wait = sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  for (const delayMs of BILLING_SETTLE_DELAYS_MS) {
+    try {
+      await wait(delayMs);
+      const refreshed = await client.getRun(run.id);
+      if (hasBilling(refreshed)) return refreshed;
+    } catch (error) {
+      logger?.warn({ err: describe(error) }, 'could not re-read the run for settled charges');
+      return run;
+    }
+  }
+  return run;
+}
+
+/** Delays between billing re-reads. Bounded: cost detail is not worth a long stall. */
+const BILLING_SETTLE_DELAYS_MS = [2_000, 4_000] as const;
+
+/** True once Apify has posted a non-zero cost or a non-zero charged event. */
+function hasBilling(run: ApifyRun): boolean {
+  if (run.usageTotalUsd !== null && run.usageTotalUsd > 0) return true;
+  return Object.values(run.chargedEventCounts ?? {}).some((value) => value > 0);
 }

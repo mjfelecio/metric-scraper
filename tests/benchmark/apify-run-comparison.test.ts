@@ -297,3 +297,75 @@ describe('runComparison — execute', () => {
     ).rejects.toThrow(/requires both an Apify transport and a token/);
   });
 });
+
+describe('runComparison — settled billing', () => {
+  /** Routes by URL so the billing re-read is distinguishable from the start call. */
+  function billingTransport(onRunRead: () => unknown): {
+    transport: ApifyTransport;
+    runReads: () => number;
+  } {
+    let runReads = 0;
+    return {
+      runReads: () => runReads,
+      transport: {
+        request: (request) => {
+          if (request.url.includes('/dataset/items')) return Promise.resolve(json(200, DATASET));
+          if (request.method === 'GET' && request.url.includes('/actor-runs/')) {
+            runReads += 1;
+            return Promise.resolve(json(200, { data: onRunRead() }));
+          }
+          // The start call: SUCCEEDED, but Apify has not posted the cost yet.
+          return Promise.resolve(
+            json(201, {
+              data: { ...RUN_DATA, usageTotalUsd: 0, chargedEventCounts: { 'video-result': 0 } },
+            }),
+          );
+        },
+      },
+    };
+  }
+
+  /**
+   * Apify posts a run's cost after the status flips to SUCCEEDED. Without the
+   * re-read the report publishes "$0.0000" and projects $0 at 100,000 videos.
+   * Two real runs measured $0.0134 and $0.0158 seconds after reporting $0.
+   */
+  it('re-reads the run to pick up charges that settle after SUCCEEDED', async () => {
+    const { transport, runReads } = billingTransport(() => RUN_DATA);
+    const outcome = await runComparison(executeDeps(transport));
+
+    expect(outcome.apifyRun?.usageTotalUsd).toBe(0.008);
+    expect(outcome.apifyRun?.chargedEventCounts).toEqual({ 'video-result': 2 });
+    expect(runReads()).toBe(1);
+  });
+
+  it('does not re-read when the completed run already reports a cost', async () => {
+    let runReads = 0;
+    const transport: ApifyTransport = {
+      request: (request) => {
+        if (request.url.includes('/dataset/items')) return Promise.resolve(json(200, DATASET));
+        if (request.method === 'GET' && request.url.includes('/actor-runs/')) {
+          runReads += 1;
+          return Promise.resolve(json(200, { data: RUN_DATA }));
+        }
+        return Promise.resolve(json(201, { data: RUN_DATA }));
+      },
+    };
+
+    const outcome = await runComparison(executeDeps(transport));
+    expect(outcome.apifyRun?.usageTotalUsd).toBe(0.008);
+    expect(runReads).toBe(0);
+  });
+
+  it('keeps the zero-cost run rather than failing when the re-read errors', async () => {
+    const { transport } = billingTransport(() => {
+      throw new Error('billing lookup exploded');
+    });
+
+    // Cost detail is not worth losing a completed comparison over.
+    const outcome = await runComparison(executeDeps(transport));
+    expect(outcome.apifyError).toBeNull();
+    expect(outcome.rows.length).toBeGreaterThan(0);
+    expect(outcome.apifyRun?.usageTotalUsd).toBe(0);
+  });
+});
