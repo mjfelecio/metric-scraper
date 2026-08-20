@@ -76,6 +76,7 @@ export function parseInput(text: string, options: ParseInputOptions): ParsedInpu
       raw_url: candidate.value,
       url: result.url,
       platform: result.platform,
+      requires_resolution: result.requiresResolution,
       position: candidate.position,
     });
   }

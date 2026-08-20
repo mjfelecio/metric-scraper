@@ -10,6 +10,8 @@ import { InstagramScraper, type InstagramScraperOptions } from './instagram/inst
 import { InstagramUrlNormalizer } from './instagram/instagram-url-normalizer.js';
 import { TikTokScraper } from './tiktok/tiktok-scraper.js';
 import { TikTokUrlNormalizer } from './tiktok/tiktok-url-normalizer.js';
+import { TikTokUrlResolver } from './tiktok/tiktok-url-resolver.js';
+import { createUrlResolverRegistry } from '../core/url/resolver.js';
 
 /**
  * The only place that knows which platforms exist.
@@ -25,6 +27,10 @@ export function createDefaultUrlNormalizerRegistry(): UrlNormalizerRegistry {
   return new UrlNormalizerRegistry(createDefaultNormalizers());
 }
 
+export function createDefaultUrlResolverRegistry() {
+  return createUrlResolverRegistry([new TikTokUrlResolver()]);
+}
+
 export function createDefaultScrapers(
   options: { instagram?: InstagramScraperOptions } = {},
 ): Scraper[] {
@@ -37,4 +43,10 @@ export function createDefaultScraperRegistry(
   return createScraperRegistry(createDefaultScrapers(options));
 }
 
-export { InstagramScraper, InstagramUrlNormalizer, TikTokScraper, TikTokUrlNormalizer };
+export {
+  InstagramScraper,
+  InstagramUrlNormalizer,
+  TikTokScraper,
+  TikTokUrlNormalizer,
+  TikTokUrlResolver,
+};
