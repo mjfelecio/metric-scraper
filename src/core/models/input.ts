@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 import { PlatformSchema } from './platform.js';
+import { type ScrapeErrorInfo } from './errors.js';
+import { type FailureStatus } from './status.js';
 
 export const INPUT_FORMATS = ['text', 'json'] as const;
 export const InputFormatSchema = z.enum(INPUT_FORMATS);
@@ -13,11 +15,42 @@ export const InputRecordSchema = z.object({
   /** Result of generic + platform normalization. This is what gets requested. */
   url: z.string(),
   platform: PlatformSchema,
+  /** True when a network redirect must be resolved before scraping. */
+  requires_resolution: z.boolean().optional(),
   /** 1-based line number for text input, or array index for JSON input. */
   position: z.number().int().positive(),
 });
 
 export type InputRecord = z.infer<typeof InputRecordSchema>;
+
+export interface InputResolutionStats {
+  attempts: number;
+  retries: number;
+  proxyId: string | null;
+  platformHttpRequests: number;
+  latencyMs: number;
+}
+
+export interface PreparedInputRecord {
+  kind: 'ready';
+  record: InputRecord;
+  resolution: InputResolutionStats | null;
+}
+
+export interface PreparedInputFailure {
+  kind: 'failure';
+  record: InputRecord;
+  status: FailureStatus;
+  error: ScrapeErrorInfo;
+  resolution: InputResolutionStats;
+}
+
+export type PreparedInputItem = PreparedInputRecord | PreparedInputFailure;
+
+export interface PreparedInput {
+  items: PreparedInputItem[];
+  issues: InputIssue[];
+}
 
 export const INPUT_ISSUE_CODES = [
   'malformed_json',

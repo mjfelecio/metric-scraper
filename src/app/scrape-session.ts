@@ -5,7 +5,7 @@ import { type Logger, nullLogger } from '../core/logging/logger.js';
 import { type BandwidthAggregator } from '../core/metrics/bandwidth.js';
 import { ThroughputTimeline, type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { ScrapeError } from '../core/models/errors.js';
-import { type InputRecord } from '../core/models/input.js';
+import { type InputRecord, type PreparedInput } from '../core/models/input.js';
 import { type Platform } from '../core/models/platform.js';
 import { type SnapshotSink } from '../core/output/snapshot-sink.js';
 import { type ProxyPoolStats } from '../core/scraper/pool-ports.js';
@@ -38,6 +38,7 @@ import {
   type BuiltRunner,
   type RunnerOverrides,
 } from './composition.js';
+import { type ResolvedUrl } from './input-preparer.js';
 
 const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;
 
@@ -114,6 +115,8 @@ export interface RunSessionOptions {
   onCycleEnd?: ((cycle: CycleSummary) => void) | undefined;
   /** Test seam fired after one cycle's bytes are folded into the cumulative base. */
   onBandwidthFold?: ((totalBytes: number) => void) | undefined;
+  /** Reports redirect-discovered duplicates to the UI/CLI integration. */
+  onInputPrepared?: ((prepared: PreparedInput) => void) | undefined;
   /**
    * Every finished URL, tagged with the cycle it belongs to.
    *
@@ -196,6 +199,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
   // then topped up in the background for the rest of the session.
   await proxySupply.source?.start();
   const sessionPool = await createSessionPool(config, sessionLogger);
+  const resolutionCache = new Map<string, ResolvedUrl>();
 
   // Session-cumulative counters, updated as results land rather than derived
   // from cycle summaries, so the live timeline is accurate mid-cycle.
@@ -219,6 +223,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
 
   const cycles: CycleSummary[] = [];
   let currentCycle = 0;
+  let currentTotal = records.length;
   let liveProgress: RunProgress | null = null;
   // Read through a function: the only writer is a callback, so narrowing the
   // variable inline would let the compiler assume it is still null.
@@ -240,7 +245,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     cyclesCompleted: cycles.length,
     plannedCycles: schedule.maxCycles,
     processed: live()?.processed ?? 0,
-    total: live()?.total ?? records.length,
+    total: live()?.total ?? currentTotal,
     completed,
     successes,
     failures,
@@ -345,15 +350,36 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
                 ...(options.overrides === undefined ? {} : { overrides: options.overrides }),
                 proxyPool,
                 sessionPool,
+                resolutionCache,
               })
             : await options.createRunner({ cycle: context.cycle, sink });
 
         currentBandwidth = built.bandwidth;
 
-        const result = await built.runner.run(records, {
+        const prepared =
+          built.inputPreparer === undefined
+            ? {
+                items: records.map((record) => ({
+                  kind: 'ready' as const,
+                  record,
+                  resolution: null,
+                })),
+                issues: [],
+              }
+            : await built.inputPreparer.prepare(records, {
+                ...(options.signal === undefined ? {} : { signal: options.signal }),
+              });
+        options.onInputPrepared?.(prepared);
+        currentTotal = prepared.items.length;
+
+        const result = await built.runner.run(prepared.items, {
           runId: cycleRunId(sessionId, context.cycle),
           platform: options.platform,
-          counts: options.counts,
+          counts: {
+            ...options.counts,
+            accepted: Math.max(0, options.counts.accepted - prepared.issues.length),
+            rejected: options.counts.rejected + prepared.issues.length,
+          },
           summaryPath: cycleSummaryPath,
           ...(options.signal === undefined ? {} : { signal: options.signal }),
           onProgress: (progress) => {

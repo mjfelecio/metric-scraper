@@ -83,6 +83,17 @@ export class TikTokScraper implements Scraper {
         partial,
       );
     }
+    if (response.status === 400) {
+      return scrapeFailure(
+        'private',
+        {
+          code: 'private',
+          message: 'TikTok post is unavailable publicly or only visible to its creator',
+          retryable: false,
+        },
+        partial,
+      );
+    }
     if (response.status === 451) {
       return scrapeFailure('error', geoBlocked(response.status), partial);
     }

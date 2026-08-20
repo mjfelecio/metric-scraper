@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { BandwidthAggregator } from '../../src/core/metrics/bandwidth.js';
 import { MetricsCollector } from '../../src/core/metrics/metrics-collector.js';
 import { ScrapeError } from '../../src/core/models/errors.js';
-import { type InputRecord } from '../../src/core/models/input.js';
+import { type InputRecord, type PreparedInputItem } from '../../src/core/models/input.js';
 import { type Platform } from '../../src/core/models/platform.js';
 import {
   scrapeFailure,
@@ -127,6 +127,41 @@ function urls(count: number): InputRecord[] {
 }
 
 describe('ScrapeRunner', () => {
+  it('writes a prepared URL-resolution failure without calling the scraper', async () => {
+    const scraper = new FakeScraper(() => scrapeSuccess(EMPTY_VIDEO_DATA));
+    const { runner, sink } = buildRunner({ scraper });
+    const failed: PreparedInputItem = {
+      kind: 'failure',
+      record: {
+        raw_url: 'https://vm.tiktok.com/GONE/',
+        url: 'https://vm.tiktok.com/GONE/',
+        platform: 'tiktok',
+        position: 1,
+        requires_resolution: true,
+      },
+      status: 'not_found',
+      error: { code: 'not_found', message: 'short link was not found', retryable: false },
+      resolution: {
+        attempts: 1,
+        retries: 0,
+        proxyId: null,
+        platformHttpRequests: 1,
+        latencyMs: 12,
+      },
+    };
+
+    const result = await runner.run([failed]);
+
+    expect(scraper.calls).toHaveLength(0);
+    expect(sink.snapshots[0]).toMatchObject({
+      url: 'https://vm.tiktok.com/GONE/',
+      status: 'not_found',
+      latency_ms: 12,
+    });
+    expect(result.summary.totals.failures).toBe(1);
+    expect(result.summary.totals.platform_http_requests).toBe(1);
+  });
+
   it('writes one row per URL and never drops a failure', async () => {
     const scraper = new FakeScraper((url) =>
       url.endsWith('2')
@@ -307,6 +342,8 @@ describe('ScrapeRunner', () => {
       total_bytes: 2_000,
       bytes_per_request: 1_000,
     });
+  });
+
   it.each([
     ['tiktok', 15_000],
     ['instagram', 60_000],

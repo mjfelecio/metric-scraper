@@ -141,7 +141,7 @@ describe('TikTokScraper', () => {
     [429, 'rate_limited', 'rate_limited', true],
     [403, 'rate_limited', 'blocked', true],
     [500, 'error', 'http_error', true],
-    [400, 'error', 'http_error', false],
+    [400, 'private', 'private', false],
     // 451 is about the exit node's jurisdiction, not the video, so it gets its
     // own code and is worth retrying through a different proxy.
     [451, 'error', 'geo_blocked', true],
@@ -175,6 +175,29 @@ describe('TikTokScraper', () => {
       expect(result.error.code).toBe('blocked');
       expect(result.error.retryable).toBe(true);
     }
+  });
+
+  it('maps TikTok creator-only status to private instead of HTTP 400', async () => {
+    const request = vi
+      .fn<HttpClient['request']>()
+      .mockResolvedValue(response(400, '<html>embed error</html>', 'Bad Request'));
+    const http: HttpClient = {
+      request,
+    };
+
+    const result = await new TikTokScraper().scrape(URL, context(http));
+
+    expect(result.outcome).toBe('failure');
+    if (result.outcome === 'failure') {
+      expect(result.status).toBe('private');
+      expect(result.error).toEqual({
+        code: 'private',
+        message: 'TikTok post is unavailable publicly or only visible to its creator',
+        retryable: false,
+      });
+      expect(result.partial?.video_id).toBe(VIDEO_ID);
+    }
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it('maps TikTok Slardar WAF pages to a retryable blocked result', async () => {

@@ -10,7 +10,7 @@ import { type BandwidthAggregator } from '../metrics/bandwidth.js';
 import { type MetricsCollector } from '../metrics/metrics-collector.js';
 import { createRateLimiter, type RateLimiter } from '../rate-limit/rate-limit.js';
 import { ScrapeError, type ScrapeErrorInfo } from '../models/errors.js';
-import { type InputRecord } from '../models/input.js';
+import { type InputRecord, type PreparedInputItem } from '../models/input.js';
 import { type Platform } from '../models/platform.js';
 import { type RunSummary } from '../models/run-summary.js';
 import { type ScrapeResult } from '../models/scrape-result.js';
@@ -113,7 +113,10 @@ export class ScrapeRunner {
       deps.createTimeoutSignal ?? ((delayMs) => AbortSignal.timeout(delayMs));
   }
 
-  async run(records: readonly InputRecord[], options: RunOptions = {}): Promise<RunResult> {
+  async run(
+    records: readonly (InputRecord | PreparedInputItem)[],
+    options: RunOptions = {},
+  ): Promise<RunResult> {
     const { config, logger, metrics, sink } = this.deps;
     const runId = options.runId ?? randomUUID();
     const runLogger = logger.child({ run_id: runId });
@@ -170,11 +173,11 @@ export class ScrapeRunner {
       });
     };
 
-    const submit = (record: InputRecord): void => {
+    const submit = (record: InputRecord | PreparedInputItem): void => {
       void queue
         .add(async () => {
           if (signal.aborted) return;
-          const event = await this.processRecord(record, signal, runLogger, runCache);
+          const event = await this.processPreparedItem(record, signal, runLogger, runCache);
 
           try {
             await sink.write(event.snapshot);
@@ -296,6 +299,48 @@ export class ScrapeRunner {
     );
 
     return { runId, summary, fatalError };
+  }
+
+  private async processPreparedItem(
+    item: InputRecord | PreparedInputItem,
+    signal: AbortSignal,
+    logger: Logger,
+    runCache: Map<string, unknown>,
+  ): Promise<JobCompletedEvent> {
+    if (!('kind' in item)) return this.processRecord(item, signal, logger, runCache);
+
+    if (item.kind === 'failure') {
+      return {
+        snapshot: createFailureSnapshot(
+          {
+            platform: item.record.platform,
+            url: item.record.url,
+            scrapedAt: this.now(),
+            latencyMs: item.resolution.latencyMs,
+          },
+          item.status,
+          item.error,
+        ),
+        attempts: item.resolution.attempts,
+        retries: item.resolution.retries,
+        proxyId: item.resolution.proxyId,
+        platformHttpRequests: item.resolution.platformHttpRequests,
+      };
+    }
+
+    const event = await this.processRecord(item.record, signal, logger, runCache);
+    if (item.resolution === null) return event;
+    return {
+      ...event,
+      snapshot: {
+        ...event.snapshot,
+        latency_ms: event.snapshot.latency_ms + item.resolution.latencyMs,
+      },
+      attempts: event.attempts + item.resolution.attempts,
+      retries: event.retries + item.resolution.retries,
+      proxyId: event.proxyId ?? item.resolution.proxyId,
+      platformHttpRequests: event.platformHttpRequests + item.resolution.platformHttpRequests,
+    };
   }
 
   /**
@@ -513,8 +558,9 @@ function extractErrorCode(error: string | null): string | null {
   return separator === -1 ? error : error.slice(0, separator);
 }
 
-function inferPlatform(records: readonly InputRecord[]): Platform | null {
-  const first = records[0];
+function inferPlatform(records: readonly (InputRecord | PreparedInputItem)[]): Platform | null {
+  const normalized = records.map((item) => ('kind' in item ? item.record : item));
+  const first = normalized[0];
   if (first === undefined) return null;
-  return records.every((record) => record.platform === first.platform) ? first.platform : null;
+  return normalized.every((record) => record.platform === first.platform) ? first.platform : null;
 }
