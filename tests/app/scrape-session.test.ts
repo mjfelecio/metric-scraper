@@ -95,6 +95,7 @@ function runnerFactory(options: {
       normalizers: createDefaultUrlNormalizerRegistry(),
       concurrency: 4,
       targetRpm: 0,
+      bandwidth: null,
     });
   };
 }

@@ -21,6 +21,14 @@ export interface FetchHttpClientOptions {
    * request that requires a proxy fails loudly instead of silently going direct.
    */
   dispatcherFactory?: ((target: ProxyTarget) => unknown) | undefined;
+  /**
+   * Transport used when no proxy is assigned.
+   *
+   * Without this the direct path bypasses any composed dispatcher, so a run
+   * with no proxies would report zero bandwidth. Passed explicitly rather than
+   * set globally, so nothing outside this client is affected.
+   */
+  defaultDispatcher?: unknown;
 }
 
 /**
@@ -74,6 +82,8 @@ export class FetchHttpClient implements HttpClient {
       // `dispatcher` is an undici-specific RequestInit extension, and its type
       // lives in a package this project deliberately does not depend on yet.
       Object.assign(init, { dispatcher: this.options.dispatcherFactory(proxy) });
+    } else if (this.options.defaultDispatcher !== undefined) {
+      Object.assign(init, { dispatcher: this.options.defaultDispatcher });
     }
 
     const startedAt = Date.now();

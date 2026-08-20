@@ -6,7 +6,17 @@ vi.mock('undici', async (importOriginal) => {
   const actual = await importOriginal<typeof Undici>();
   return {
     ...actual,
-    ProxyAgent: vi.fn().mockImplementation((options: unknown) => ({ __options: options })),
+    ProxyAgent: vi.fn().mockImplementation((options: unknown) => {
+      // A bandwidth-measurement no-op: these tests are about ProxyAgent
+      // construction and caching, not about the interceptor, so `compose`
+      // just returns the same object rather than modeling undici's real
+      // (distinct-object) behavior.
+      const agent: { __options: unknown; compose: (interceptor: unknown) => unknown } = {
+        __options: options,
+        compose: () => agent,
+      };
+      return agent;
+    }),
   };
 });
 
@@ -14,6 +24,7 @@ import { ProxyAgent } from 'undici';
 
 import { createProxyAgentFactory, createProxySupply } from '../../src/app/composition.js';
 import { loadConfig } from '../../src/config/env.js';
+import { nullBandwidthSink } from '../../src/core/metrics/bandwidth.js';
 import { nullLogger } from '../../src/core/logging/logger.js';
 import { type ProxyTarget } from '../../src/core/scraper/lease-ports.js';
 
@@ -32,7 +43,7 @@ function target(overrides: Partial<ProxyTarget> = {}): ProxyTarget {
 describe('createProxyAgentFactory', () => {
   it('constructs the ProxyAgent with the configured connect timeout', () => {
     const config = loadConfig({ env: { PROXY_CONNECT_TIMEOUT_MS: '2500' }, dotenv: false });
-    const factory = createProxyAgentFactory(config);
+    const factory = createProxyAgentFactory(config, nullBandwidthSink);
 
     factory(target());
 
@@ -44,7 +55,7 @@ describe('createProxyAgentFactory', () => {
 
   it('defaults to 3000ms when PROXY_CONNECT_TIMEOUT_MS is unset', () => {
     const config = loadConfig({ env: {}, dotenv: false });
-    const factory = createProxyAgentFactory(config);
+    const factory = createProxyAgentFactory(config, nullBandwidthSink);
 
     factory(target());
 
@@ -53,7 +64,7 @@ describe('createProxyAgentFactory', () => {
 
   it('reuses one agent per distinct proxy URL rather than building a new one per call', () => {
     const config = loadConfig({ env: {}, dotenv: false });
-    const factory = createProxyAgentFactory(config);
+    const factory = createProxyAgentFactory(config, nullBandwidthSink);
 
     const first = factory(target());
     const second = factory(target());
@@ -64,7 +75,7 @@ describe('createProxyAgentFactory', () => {
 
   it('builds a separate agent for a different proxy URL', () => {
     const config = loadConfig({ env: {}, dotenv: false });
-    const factory = createProxyAgentFactory(config);
+    const factory = createProxyAgentFactory(config, nullBandwidthSink);
 
     factory(target({ url: 'http://a.example.net:8080', host: 'a.example.net' }));
     factory(target({ url: 'http://b.example.net:8080', host: 'b.example.net' }));
@@ -74,7 +85,7 @@ describe('createProxyAgentFactory', () => {
 
   it('refuses a proxy protocol the fetch transport cannot dispatch through', () => {
     const config = loadConfig({ env: {}, dotenv: false });
-    const factory = createProxyAgentFactory(config);
+    const factory = createProxyAgentFactory(config, nullBandwidthSink);
 
     expect(() => factory(target({ protocol: 'socks5' }))).toThrow(/socks5/);
   });

@@ -168,6 +168,22 @@ describe('loadConfig proxy supply', () => {
   });
 });
 
+describe('METRICS_BANDWIDTH', () => {
+  it('defaults to true so the dashboard panel is populated', () => {
+    expect(load({}).metricsBandwidth).toBe(true);
+  });
+
+  it('can be switched off', () => {
+    expect(load({ METRICS_BANDWIDTH: 'false' }).metricsBandwidth).toBe(false);
+  });
+
+  it('rejects a non-boolean value rather than guessing', () => {
+    expect(() => load({ METRICS_BANDWIDTH: 'sometimes' })).toThrow(
+      /METRICS_BANDWIDTH must be a boolean/,
+    );
+  });
+});
+
 describe('redactConfig', () => {
   it('never exposes proxy credentials', () => {
     const config = load({

@@ -9,6 +9,7 @@ import { createCountingInterceptor } from '../../src/infrastructure/http/countin
 class FakeHandler {
   readonly events: string[] = [];
   readonly chunks: Buffer[] = [];
+  readonly errors: unknown[] = [];
 
   onRequestStart(): void {
     this.events.push('requestStart');
@@ -21,6 +22,10 @@ class FakeHandler {
   }
   onResponseEnd(): void {
     this.events.push('responseEnd');
+  }
+  onResponseError(_controller: unknown, error: unknown): void {
+    this.events.push('responseError');
+    this.errors.push(error);
   }
 }
 
@@ -40,6 +45,31 @@ function dispatchWith(
     );
     for (const chunk of chunks) handler.onResponseData?.(controller as never, chunk as never);
     handler.onResponseEnd?.(controller as never, {} as never);
+    return true;
+  };
+}
+
+/**
+ * Drives a wrapped handler through a transfer that fails mid-flight: some
+ * response data arrives, then the transfer errors instead of ending normally.
+ * `onResponseEnd` is never called.
+ */
+function dispatchWithMidflightError(
+  chunks: readonly Buffer[],
+  responseHeaders: Record<string, string>,
+  error: unknown,
+): (opts: unknown, handler: Record<string, (...args: never[]) => unknown>) => boolean {
+  return (_opts, handler) => {
+    const controller = {};
+    handler.onRequestStart?.(controller as never, {} as never);
+    handler.onResponseStart?.(
+      controller as never,
+      200 as never,
+      responseHeaders as never,
+      'OK' as never,
+    );
+    for (const chunk of chunks) handler.onResponseData?.(controller as never, chunk as never);
+    handler.onResponseError?.(controller as never, error as never);
     return true;
   };
 }
@@ -147,5 +177,33 @@ describe('createCountingInterceptor', () => {
     const responseBytes = sink.view().responseBytes;
     expect(responseBytes).toBeGreaterThanOrEqual(compressed.byteLength);
     expect(responseBytes).toBeLessThan(original.byteLength);
+  });
+
+  /**
+   * A transfer that fails mid-flight — routine with proxies — still consumed
+   * bandwidth up to the point of failure, so `onResponseError` must record it
+   * exactly once instead of silently dropping it.
+   */
+  it('records bytes consumed before a mid-flight response error, exactly once', () => {
+    const sink = new BandwidthAggregator();
+    const handler = new FakeHandler();
+    const interceptor = createCountingInterceptor({ sink, proxyId: 'p1' });
+    const chunks = [Buffer.alloc(500), Buffer.alloc(300)];
+    const transferError = new Error('socket hang up');
+
+    interceptor(dispatchWithMidflightError(chunks, {}, transferError) as never)(opts, handler);
+
+    // The failure path was actually driven, not the happy path.
+    expect(handler.events).toEqual(['requestStart', 'responseStart', 'responseError']);
+    expect(handler.errors).toEqual([transferError]);
+
+    const view = sink.view();
+    expect(view.requests).toBe(1);
+    expect(view.responseBytes).toBe(800);
+    expect(view.requestBytes).toBeGreaterThan(0);
+
+    // Recorded exactly once: a single sample in the aggregator's per-proxy view.
+    expect(view.perProxy).toHaveLength(1);
+    expect(view.perProxy[0]?.requests).toBe(1);
   });
 });
