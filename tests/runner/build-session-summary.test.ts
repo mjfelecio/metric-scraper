@@ -204,6 +204,7 @@ describe('buildSessionSummary', () => {
         retries: 0,
         inFlight: 0,
         cycle: 1,
+        bytes: 0,
       });
     }
 

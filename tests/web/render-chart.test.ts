@@ -33,6 +33,8 @@ function sample(
     successesPerMinute: ok,
     failuresPerMinute: failed,
     retriesPerMinute: retries,
+    bytes: 0,
+    bytesPerMinute: 0,
   };
 }
 
