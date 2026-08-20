@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import { loadConfig, type AppConfig } from '../config/env.js';
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
@@ -12,6 +13,10 @@ import { type RunSummary } from '../core/models/run-summary.js';
 import { type CycleSummary } from '../core/models/session-summary.js';
 import { type JobCompletedEvent } from '../core/runner/types.js';
 import { type MetricSnapshot } from '../core/models/snapshot.js';
+import {
+  appendBaseline,
+  type BandwidthBaselineRecord,
+} from '../infrastructure/output/bandwidth-baselines.js';
 import { JsonlFileSink } from '../infrastructure/output/jsonl-file-sink.js';
 import { ProxyEventLog } from '../infrastructure/output/proxy-event-log.js';
 import {
@@ -471,6 +476,7 @@ export class RunService {
       proxySupply.source?.stop();
       await proxyEvents.close();
       await this.persistSummary(paths.summary, result.summary);
+      await this.appendBandwidthBaseline(result.summary);
 
       state.summary = result.summary;
       state.hasOutput = result.summary.output.rows_written > 0;
@@ -537,6 +543,36 @@ export class RunService {
       this.logger.warn(
         { path, message: error instanceof Error ? error.message : String(error) },
         'could not write run summary',
+      );
+    }
+  }
+
+  /**
+   * Appends this run's bandwidth to the cross-run baseline history.
+   *
+   * Skipped entirely when `summary.bandwidth` is `null` (METRICS_BANDWIDTH
+   * off, or nothing was measured) — an unmeasured run entering the history as
+   * a zero would corrupt every later average. A failure to append must not
+   * fail the run, matching `persistSummary`.
+   */
+  private async appendBandwidthBaseline(summary: RunSummary): Promise<void> {
+    if (summary.bandwidth === null) return;
+
+    const baselinePath = path.join(this.config.outputDir, 'bandwidth-baselines.jsonl');
+    const record: BandwidthBaselineRecord = {
+      runId: summary.run_id,
+      finishedAt: summary.finished_at,
+      requests: summary.totals.requests,
+      totalBytes: summary.bandwidth.total_bytes,
+      avgBytesPerRequest: summary.bandwidth.bytes_per_request ?? 0,
+    };
+
+    try {
+      await appendBaseline(baselinePath, record);
+    } catch (error) {
+      this.logger.warn(
+        { path: baselinePath, message: error instanceof Error ? error.message : String(error) },
+        'could not append bandwidth baseline',
       );
     }
   }
