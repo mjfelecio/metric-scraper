@@ -1,4 +1,5 @@
 import { type BandwidthSink } from '../../core/metrics/bandwidth.js';
+import { type Dispatcher } from 'undici';
 
 /** Bytes of framing undici adds per header line: `: ` plus CRLF. */
 const HEADER_OVERHEAD_BYTES = 4;
@@ -23,63 +24,61 @@ export interface CountingInterceptorOptions {
  * Undici v7 keeps handler methods on the prototype, so `{...handler}` produces
  * an object missing most of them and the request hangs with no error.
  */
-export function createCountingInterceptor(options: CountingInterceptorOptions) {
-  return (dispatch: (opts: unknown, handler: unknown) => unknown) =>
-    (opts: unknown, handler: unknown): unknown => {
-      const request = opts as {
-        method?: string;
-        path?: string;
-        headers?: Record<string, unknown> | undefined;
-        body?: unknown;
-      };
-      const inner = handler as Record<string, ((...args: unknown[]) => unknown) | undefined>;
-
-      let requestBytes = measureRequest(request);
+export function createCountingInterceptor(
+  options: CountingInterceptorOptions,
+): Dispatcher.DispatcherComposeInterceptor {
+  return (dispatch) =>
+    (request, inner): boolean => {
+      const plannedRequestBytes = measureRequest(request);
+      let requestBytes = 0;
       let responseBytes = 0;
       let host = readHost(request.headers) ?? 'unknown';
 
-      const wrapped = {
-        onRequestStart: (...args: unknown[]): unknown => inner.onRequestStart?.(...args),
-        onRequestUpgrade: (...args: unknown[]): unknown => inner.onRequestUpgrade?.(...args),
-        onResponseStart: (...args: unknown[]): unknown => {
-          responseBytes += measureHeaders(args[2]);
-          return inner.onResponseStart?.(...args);
+      const wrapped: Dispatcher.DispatchHandler = {
+        // Undici v7 does not call this until it has a connection on which the
+        // request can start. In particular, a refused connection goes straight
+        // to onResponseError, so planned bytes do not become measured bytes.
+        onRequestStart: (controller, context): void => {
+          requestBytes = plannedRequestBytes;
+          inner.onRequestStart?.(controller, context);
         },
-        onResponseData: (...args: unknown[]): unknown => {
-          const chunk = args[1];
-          if (chunk instanceof Uint8Array) responseBytes += chunk.byteLength;
-          return inner.onResponseData?.(...args);
+        onRequestUpgrade: (controller, statusCode, headers, socket): void => {
+          inner.onRequestUpgrade?.(controller, statusCode, headers, socket);
         },
-        onResponseEnd: (...args: unknown[]): unknown => {
+        onResponseStart: (controller, statusCode, headers, statusMessage): void => {
+          responseBytes += measureHeaders(headers);
+          inner.onResponseStart?.(controller, statusCode, headers, statusMessage);
+        },
+        onResponseData: (controller, chunk): void => {
+          responseBytes += chunk.byteLength;
+          inner.onResponseData?.(controller, chunk);
+        },
+        onResponseEnd: (controller, trailers): void => {
           options.sink.record({ proxyId: options.proxyId, host, requestBytes, responseBytes });
           // Guard against a handler that is somehow driven twice: a second end
           // must not double-count the same round trip.
           requestBytes = 0;
           responseBytes = 0;
-          return inner.onResponseEnd?.(...args);
+          inner.onResponseEnd?.(controller, trailers);
         },
-        onResponseError: (...args: unknown[]): unknown => {
-          // A failed transfer still consumed bandwidth, so it is still recorded.
+        onResponseError: (controller, error): void => {
+          // A transfer that started and then failed still consumed bandwidth.
+          // A connect failure never reached onRequestStart and remains all-zero.
           if (requestBytes > 0 || responseBytes > 0) {
             options.sink.record({ proxyId: options.proxyId, host, requestBytes, responseBytes });
             requestBytes = 0;
             responseBytes = 0;
           }
-          return inner.onResponseError?.(...args);
+          inner.onResponseError?.(controller, error);
         },
       };
 
       host = readHost(request.headers) ?? host;
-      return dispatch(opts, wrapped);
+      return dispatch(request, wrapped);
     };
 }
 
-function measureRequest(request: {
-  method?: string;
-  path?: string;
-  headers?: Record<string, unknown> | undefined;
-  body?: unknown;
-}): number {
+function measureRequest(request: Dispatcher.DispatchOptions): number {
   const line = `${request.method ?? 'GET'} ${request.path ?? '/'} HTTP/1.1\r\n`;
   let bytes = Buffer.byteLength(line) + 2; // trailing CRLF that closes the head
   bytes += measureHeaders(request.headers);
@@ -113,8 +112,15 @@ function renderHeaderValue(value: unknown): string {
   return '';
 }
 
-function readHost(headers: Record<string, unknown> | undefined): string | null {
-  if (headers === undefined) return null;
+function readHost(headers: Dispatcher.DispatchOptions['headers']): string | null {
+  if (headers === undefined || headers === null || Array.isArray(headers)) return null;
+  if (Symbol.iterator in headers) {
+    for (const [key, value] of headers) {
+      if (key.toLowerCase() === 'host' && typeof value === 'string' && value.length > 0)
+        return value;
+    }
+    return null;
+  }
   const value = headers.host ?? headers.Host;
   return typeof value === 'string' && value.length > 0 ? value : null;
 }

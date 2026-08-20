@@ -22,10 +22,15 @@ vi.mock('undici', async (importOriginal) => {
 
 import { ProxyAgent } from 'undici';
 
-import { createProxyAgentFactory, createProxySupply } from '../../src/app/composition.js';
+import {
+  buildRunner as buildComposedRunner,
+  createProxyAgentFactory,
+  createProxySupply,
+} from '../../src/app/composition.js';
 import { loadConfig } from '../../src/config/env.js';
 import { nullBandwidthSink } from '../../src/core/metrics/bandwidth.js';
 import { nullLogger } from '../../src/core/logging/logger.js';
+import { MemorySnapshotSink } from '../../src/core/output/snapshot-sink.js';
 import { type ProxyTarget } from '../../src/core/scraper/lease-ports.js';
 
 function target(overrides: Partial<ProxyTarget> = {}): ProxyTarget {
@@ -123,5 +128,25 @@ describe('createProxySupply', () => {
     const config = loadConfig({ env: {}, dotenv: false });
 
     expect(createProxySupply(config, nullLogger).source).toBeNull();
+  });
+});
+
+describe('buildRunner bandwidth lifetime', () => {
+  it('creates a distinct bandwidth aggregator for every runner', async () => {
+    const config = loadConfig({ env: { METRICS_BANDWIDTH: 'true' }, dotenv: false });
+    const first = await buildComposedRunner({
+      config,
+      logger: nullLogger,
+      sink: new MemorySnapshotSink(),
+    });
+    const second = await buildComposedRunner({
+      config,
+      logger: nullLogger,
+      sink: new MemorySnapshotSink(),
+    });
+
+    expect(first.bandwidth).not.toBeNull();
+    expect(second.bandwidth).not.toBeNull();
+    expect(first.bandwidth).not.toBe(second.bandwidth);
   });
 });

@@ -108,9 +108,7 @@ export async function buildRunner(options: {
       ? {}
       : {
           defaultDispatcher: new Agent().compose(
-            // The interceptor is typed loosely (`unknown`) so this file does not
-            // have to depend on undici's exact dispatch/handler types.
-            createCountingInterceptor({ sink: bandwidthSink, proxyId: null }) as never,
+            createCountingInterceptor({ sink: bandwidthSink, proxyId: null }),
           ),
         }),
   });
@@ -187,7 +185,7 @@ export function createProxyAgentFactory(
       });
       // Composed per target so the proxy id is captured for attribution.
       agent = config.metricsBandwidth
-        ? base.compose(createCountingInterceptor({ sink, proxyId: proxyId(target) }) as never)
+        ? base.compose(createCountingInterceptor({ sink, proxyId: proxyId(target) }))
         : base;
       proxyAgents.set(target.url, agent);
     }

@@ -1,6 +1,8 @@
+import net from 'node:net';
 import { gzipSync } from 'node:zlib';
 
 import { describe, expect, it } from 'vitest';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 import { BandwidthAggregator } from '../../src/core/metrics/bandwidth.js';
 import { createCountingInterceptor } from '../../src/infrastructure/http/counting-dispatcher.js';
@@ -86,7 +88,7 @@ describe('createCountingInterceptor', () => {
     const interceptor = createCountingInterceptor({ sink, proxyId: 'p1' });
     const chunks = [Buffer.alloc(1000), Buffer.alloc(2400)];
 
-    interceptor(dispatchWith(chunks, {}) as never)(opts, new FakeHandler());
+    interceptor(dispatchWith(chunks, {}))(opts, new FakeHandler());
 
     expect(sink.view().responseBytes).toBe(3400);
   });
@@ -95,7 +97,7 @@ describe('createCountingInterceptor', () => {
     const sink = new BandwidthAggregator();
     const interceptor = createCountingInterceptor({ sink, proxyId: 'p1' });
 
-    interceptor(dispatchWith([], {}) as never)(opts, new FakeHandler());
+    interceptor(dispatchWith([], {}))(opts, new FakeHandler());
 
     // "GET /embed/v2/123 HTTP/1.1\r\n" + both headers + the blank line.
     expect(sink.view().requestBytes).toBeGreaterThan(50);
@@ -105,7 +107,7 @@ describe('createCountingInterceptor', () => {
     const sink = new BandwidthAggregator();
     const interceptor = createCountingInterceptor({ sink, proxyId: 'p1' });
 
-    interceptor(dispatchWith([Buffer.alloc(100)], { 'content-type': 'text/html' }) as never)(
+    interceptor(dispatchWith([Buffer.alloc(100)], { 'content-type': 'text/html' }))(
       opts,
       new FakeHandler(),
     );
@@ -122,7 +124,7 @@ describe('createCountingInterceptor', () => {
     const handler = new FakeHandler();
     const interceptor = createCountingInterceptor({ sink, proxyId: 'p1' });
 
-    interceptor(dispatchWith([Buffer.alloc(8)], {}) as never)(opts, handler);
+    interceptor(dispatchWith([Buffer.alloc(8)], {}))(opts, handler);
 
     expect(handler.events).toEqual(['requestStart', 'responseStart', 'responseEnd']);
     expect(handler.chunks).toHaveLength(1);
@@ -131,27 +133,27 @@ describe('createCountingInterceptor', () => {
 
   it('attributes the sample to its proxy id', () => {
     const sink = new BandwidthAggregator();
-    createCountingInterceptor({ sink, proxyId: 'proxy-7' })(dispatchWith([], {}) as never)(
+    createCountingInterceptor({ sink, proxyId: 'proxy-7' })(dispatchWith([], {}))(
       opts,
       new FakeHandler(),
     );
 
-    expect(sink.view().perProxy[0]?.proxyId).toBe('proxy-7');
+    expect(sink.view().perProxy?.[0]?.proxyId).toBe('proxy-7');
   });
 
   it('records a null proxy id for direct traffic', () => {
     const sink = new BandwidthAggregator();
-    createCountingInterceptor({ sink, proxyId: null })(dispatchWith([], {}) as never)(
+    createCountingInterceptor({ sink, proxyId: null })(dispatchWith([], {}))(
       opts,
       new FakeHandler(),
     );
 
-    expect(sink.view().perProxy[0]?.proxyId).toBeNull();
+    expect(sink.view().perProxy?.[0]?.proxyId).toBeNull();
   });
 
   it('still records when the response carries no body', () => {
     const sink = new BandwidthAggregator();
-    createCountingInterceptor({ sink, proxyId: null })(dispatchWith([], {}) as never)(
+    createCountingInterceptor({ sink, proxyId: null })(dispatchWith([], {}))(
       opts,
       new FakeHandler(),
     );
@@ -171,7 +173,7 @@ describe('createCountingInterceptor', () => {
 
     const sink = new BandwidthAggregator();
     createCountingInterceptor({ sink, proxyId: null })(
-      dispatchWith([compressed], { 'content-encoding': 'gzip' }) as never,
+      dispatchWith([compressed], { 'content-encoding': 'gzip' }),
     )(opts, new FakeHandler());
 
     const responseBytes = sink.view().responseBytes;
@@ -191,7 +193,7 @@ describe('createCountingInterceptor', () => {
     const chunks = [Buffer.alloc(500), Buffer.alloc(300)];
     const transferError = new Error('socket hang up');
 
-    interceptor(dispatchWithMidflightError(chunks, {}, transferError) as never)(opts, handler);
+    interceptor(dispatchWithMidflightError(chunks, {}, transferError))(opts, handler);
 
     // The failure path was actually driven, not the happy path.
     expect(handler.events).toEqual(['requestStart', 'responseStart', 'responseError']);
@@ -204,6 +206,34 @@ describe('createCountingInterceptor', () => {
 
     // Recorded exactly once: a single sample in the aggregator's per-proxy view.
     expect(view.perProxy).toHaveLength(1);
-    expect(view.perProxy[0]?.requests).toBe(1);
+    expect(view.perProxy?.[0]?.requests).toBe(1);
+  });
+
+  it('does not record a request when the connection is refused before transmission', async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('expected TCP address');
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error === undefined ? resolve() : reject(error))),
+    );
+
+    const sink = new BandwidthAggregator();
+    const agent = new Agent().compose(createCountingInterceptor({ sink, proxyId: null }));
+    try {
+      await expect(
+        undiciFetch(`http://127.0.0.1:${String(address.port)}/never-sent`, {
+          dispatcher: agent,
+        }),
+      ).rejects.toThrow();
+      expect(sink.view()).toMatchObject({
+        requests: 0,
+        requestBytes: 0,
+        responseBytes: 0,
+        totalBytes: 0,
+      });
+    } finally {
+      await agent.close();
+    }
   });
 });
