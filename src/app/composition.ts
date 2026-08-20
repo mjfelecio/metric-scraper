@@ -157,6 +157,7 @@ export async function buildRunner(options: {
     proxyPool,
     retryPolicy,
     logger,
+    metrics,
     concurrency,
     requestTimeoutMs: config.requestTimeoutMs,
     ...(options.resolutionCache === undefined ? {} : { cache: options.resolutionCache }),

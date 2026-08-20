@@ -1,4 +1,5 @@
 import { type Logger } from '../core/logging/logger.js';
+import { type MetricsCollector } from '../core/metrics/metrics-collector.js';
 import { ScrapeError, type ScrapeErrorInfo } from '../core/models/errors.js';
 import {
   type InputIssue,
@@ -21,6 +22,7 @@ export interface InputPreparerOptions {
   proxyPool: ProxyPool;
   retryPolicy: RetryPolicy;
   logger: Logger;
+  metrics?: MetricsCollector | undefined;
   concurrency: number;
   requestTimeoutMs: number;
   cache?: Map<string, ResolvedUrl> | undefined;
@@ -79,6 +81,9 @@ export class InputPreparer {
 
     const workerCount = Math.min(Math.max(1, this.options.concurrency), records.length);
     await Promise.all(Array.from({ length: workerCount }, worker));
+    if (signal.aborted) {
+      throw new ScrapeError({ code: 'cancelled', message: 'URL preparation was cancelled' });
+    }
 
     const items: PreparedInputItem[] = [];
     const issues: InputIssue[] = [];
@@ -159,7 +164,10 @@ export class InputPreparer {
         break;
       }
       retries += 1;
+      this.options.metrics?.recordRetry();
+      const backoffStartedAt = this.now();
       await this.sleep(this.options.retryPolicy.delayFor(attempts), signal);
+      this.options.metrics?.recordRetryBackoff(this.now() - backoffStartedAt);
     }
 
     const fallback = lastResult?.outcome === 'failure' ? lastResult : cancelledResolution();
@@ -188,7 +196,9 @@ export class InputPreparer {
     let result: UrlResolutionResult;
 
     try {
+      const acquireStartedAt = this.now();
       lease = await this.options.proxyPool.acquire(signal);
+      this.options.metrics?.recordProxyAcquire(this.now() - acquireStartedAt);
       const attemptSignal = AbortSignal.any([
         signal,
         AbortSignal.timeout(this.options.requestTimeoutMs),
@@ -213,11 +223,15 @@ export class InputPreparer {
       };
     }
 
-    if (lease !== null) this.reportProxyOutcome(lease, result);
+    if (lease !== null) this.reportProxyOutcome(lease, result, record.platform);
     return { result, proxyId: lease?.id ?? null, httpRequests };
   }
 
-  private reportProxyOutcome(lease: ProxyLease, result: UrlResolutionResult): void {
+  private reportProxyOutcome(
+    lease: ProxyLease,
+    result: UrlResolutionResult,
+    platform: InputRecord['platform'],
+  ): void {
     const outcome: ProxyOutcome =
       result.outcome === 'ok'
         ? 'success'
@@ -228,6 +242,11 @@ export class InputPreparer {
           });
     const reason = result.outcome === 'failure' ? result.error.message : undefined;
     const code = result.outcome === 'failure' ? result.error.code : undefined;
+
+    this.options.metrics?.recordProxyOutcome(lease.id, outcome, {
+      platform,
+      errorCode: code ?? null,
+    });
 
     if (outcome === 'success') this.options.proxyPool.reportSuccess(lease);
     else if (outcome === 'blocked') this.options.proxyPool.markBlocked(lease, reason, code);
