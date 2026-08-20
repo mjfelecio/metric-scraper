@@ -48,7 +48,7 @@ program
       'per URL — including for failures, which are recorded rather than dropped.',
       '',
       'TikTok canonical video/photo URLs are fetched anonymously from first-party public embed pages.',
-      'TikTok short links are not resolved yet. Instagram uses anonymous first-party',
+      'TikTok vm.tiktok.com and vt.tiktok.com short links are resolved and normalized. Instagram uses anonymous first-party',
       'queries with an optional proxy-bound authenticated fallback for exact old-Reel views.',
     ].join('\n'),
   )

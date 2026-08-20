@@ -14,7 +14,8 @@ export interface CanonicalTikTokVideo {
 
 /**
  * Canonicalizes TikTok video/photo post URLs and extracts the platform-native id.
- * Short links remain recognizable but unresolved until the next milestone.
+ * Short links remain recognizable so the asynchronous preparation stage can
+ * resolve them without making this normalizer impure.
  */
 export class TikTokUrlNormalizer implements UrlNormalizer {
   readonly platform: Platform = 'tiktok';

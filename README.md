@@ -16,8 +16,8 @@ Instagram Reels/video posts, as an append-only time series.
 > `InstagramScraper` uses anonymous first-party post and clips operations for exact
 > likes, comments and Reel play counts. It checks a bounded two clips pages across the
 > primary author and public coauthors before using proxy-bound media-info fallback.
-> It fails visibly instead of returning `ok` without an exact view count. TikTok short
-> links are detected but are not resolved in this milestone.
+> It fails visibly instead of returning `ok` without an exact view count. TikTok
+> `vm.tiktok.com` and `vt.tiktok.com` links are resolved into canonical post URLs before scraping.
 
 ---
 
@@ -739,9 +739,11 @@ including the case of the same video appearing twice with different `scraped_at`
   `null` unless a tested response supplies an integer.
 - **TikTok acquisition depends on undocumented public-page hydration JSON.** A payload
   shape change produces a visible `parse_error`; it never fabricates or substitutes metrics.
-- **Short links are detected, not resolved.** `vm.tiktok.com` / `vt.tiktok.com` are
-  flagged with `requiresResolution`; the TikTok scraper currently accepts canonical
-  `/@handle/video/{numeric-id}` and `/@handle/photo/{numeric-id}` URLs.
+- **TikTok short links require a redirect request.** `vm.tiktok.com` / `vt.tiktok.com`
+  links are resolved through the configured proxy and HTTP controls before scraping. Redirects
+  are capped at five hops, must remain under `tiktok.com`, and must end at a canonical
+  `/@handle/video/{numeric-id}` or `/@handle/photo/{numeric-id}` URL. Unresolved links become
+  visible failure rows; they do not stop the rest of a non-strict batch.
 - **Proxy transport supports HTTP and HTTPS only.** SOCKS entries fail loudly rather
   than silently going direct and exposing the origin IP.
 - **Run state is in-process.** The dashboard's run list is memory-only; the JSONL on disk
@@ -787,9 +789,7 @@ including the case of the same video appearing twice with different `scraped_at`
    strict 15 RPM confirmation held at 14.18 RPM, but no proxy pool is configured yet.
 2. Validate the authenticated Instagram fallback for Reels beyond the anonymous page and
    coauthor bounds using a dedicated local test session.
-3. Resolve TikTok `vm.tiktok.com` / `vt.tiktok.com` short links and feed the final canonical
-   URL back into output and de-duplication.
-4. Validate the ~500 rpm target against a real proxy workload and tune concurrency, pacing
+3. Validate the ~500 rpm target against a real proxy workload and tune concurrency, pacing
    and the retry policy from the measured run summaries. The continuous-run harness
    (§6.1) already sustains that rate against the placeholder scrapers; what remains is
    running it against real acquisition once a proxy pool is configured.

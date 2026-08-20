@@ -16,7 +16,7 @@ export interface UrlNormalizationSuccess {
   videoId: string | null;
   /**
    * True when the URL is a short/redirect form that needs a network round trip
-   * before a canonical URL is known. Resolution is not implemented yet.
+   * before a canonical URL is known.
    */
   requiresResolution: boolean;
   /** True when normalization changed the string the user supplied. */
