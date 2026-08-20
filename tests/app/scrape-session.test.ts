@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runSession } from '../../src/app/scrape-session.js';
 import { loadConfig, type AppConfig } from '../../src/config/env.js';
 import { nullLogger } from '../../src/core/logging/logger.js';
+import { BandwidthAggregator } from '../../src/core/metrics/bandwidth.js';
 import { MetricsCollector } from '../../src/core/metrics/metrics-collector.js';
+import { type ThroughputSample } from '../../src/core/metrics/throughput-timeline.js';
 import { type InputRecord } from '../../src/core/models/input.js';
 import { type Platform } from '../../src/core/models/platform.js';
 import {
@@ -237,5 +239,47 @@ describe('runSession', () => {
     expect(summary.throughput.active_rpm).toBeGreaterThanOrEqual(
       summary.throughput.wall_clock_rpm - 1e-9,
     );
+  });
+
+  it('accumulates bandwidth across cycle boundaries without double-counting or losing bytes', async () => {
+    // `buildRunner` mints a fresh `BandwidthAggregator` per cycle in real usage
+    // (see composition.ts); distinct, deliberately non-uniform totals per
+    // cycle so a double-count or a dropped cycle lands on a total no correct
+    // implementation would produce.
+    const cycleBytes = [100, 200, 400];
+    const samples: ThroughputSample[] = [];
+
+    const summary = await session({
+      onSample: (sample) => samples.push(sample),
+      createRunner: async (context) => {
+        const built = await runnerFactory({ scraper: okScraper })(context);
+        const bandwidth = new BandwidthAggregator();
+        const bytes = cycleBytes[context.cycle - 1] ?? 0;
+        bandwidth.record({
+          proxyId: null,
+          host: 'example.com',
+          requestBytes: 0,
+          responseBytes: bytes,
+        });
+        return { ...built, bandwidth };
+      },
+    });
+
+    expect(summary.cycles.started).toBe(3);
+    expect(samples.length).toBeGreaterThan(0);
+
+    // Never resets to a lower value mid-session: each cycle's aggregator dies
+    // with its runner, but the running total must survive the handoff.
+    for (let i = 1; i < samples.length; i += 1) {
+      const previous = samples[i - 1]?.bytes ?? 0;
+      const current = samples[i]?.bytes ?? 0;
+      expect(current).toBeGreaterThanOrEqual(previous);
+    }
+
+    // The final sample is the only one guaranteed to postdate all three
+    // cycles, so it is the one figure that must equal the exact sum — not
+    // more (double-counted), not less (a cycle's bytes lost at the boundary).
+    const finalSample = samples[samples.length - 1];
+    expect(finalSample?.bytes).toBe(700);
   });
 });
