@@ -342,6 +342,8 @@ describe('ScrapeRunner', () => {
       total_bytes: 2_000,
       bytes_per_request: 1_000,
     });
+  });
+
   it.each([
     ['tiktok', 15_000],
     ['instagram', 60_000],
