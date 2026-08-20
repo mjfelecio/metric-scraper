@@ -33,7 +33,9 @@ import { loadSessionsFromFile } from '../infrastructure/session/session-store.js
 import {
   createDefaultScraperRegistry,
   createDefaultUrlNormalizerRegistry,
+  createDefaultUrlResolverRegistry,
 } from '../platforms/index.js';
+import { InputPreparer, type ResolvedUrl } from './input-preparer.js';
 
 export interface RunnerOverrides {
   concurrency?: number | undefined;
@@ -49,6 +51,8 @@ export interface BuiltRunner {
   proxyPool: ProxyPool;
   sessionPool: SessionPool;
   normalizers: UrlNormalizerRegistry;
+  /** Optional only for lightweight test-built runners; production always supplies it. */
+  inputPreparer?: InputPreparer | undefined;
   concurrency: number;
   targetRpm: number;
   /** `null` when `METRICS_BANDWIDTH` is off; otherwise holds the run's wire-byte totals. */
@@ -82,6 +86,8 @@ export async function buildRunner(options: {
    * supplied — a caller that brought its own pool already chose its listener.
    */
   onProxyEvent?: ProxyEventListener | undefined;
+  /** Successful short-link resolutions shared across continuous-session cycles. */
+  resolutionCache?: Map<string, ResolvedUrl> | undefined;
 }): Promise<BuiltRunner> {
   const { config, logger, sink } = options;
   const concurrency = options.overrides?.concurrency ?? config.concurrency;
@@ -126,6 +132,7 @@ export async function buildRunner(options: {
         })
       : transport;
 
+  const retryPolicy = new RetryPolicy({ ...config.retry, ...options.overrides?.retry });
   const runner = new ScrapeRunner({
     scrapers: createDefaultScraperRegistry({ instagram: config.instagram }),
     http,
@@ -134,7 +141,7 @@ export async function buildRunner(options: {
     sink,
     metrics,
     bandwidth,
-    retryPolicy: new RetryPolicy({ ...config.retry, ...options.overrides?.retry }),
+    retryPolicy,
     logger,
     config: {
       concurrency,
@@ -144,6 +151,16 @@ export async function buildRunner(options: {
       attemptTimeoutMsByPlatform: config.attemptTimeoutMsByPlatform,
     },
   });
+  const inputPreparer = new InputPreparer({
+    resolvers: createDefaultUrlResolverRegistry(),
+    http,
+    proxyPool,
+    retryPolicy,
+    logger,
+    concurrency,
+    requestTimeoutMs: config.requestTimeoutMs,
+    ...(options.resolutionCache === undefined ? {} : { cache: options.resolutionCache }),
+  });
 
   return {
     runner,
@@ -151,6 +168,7 @@ export async function buildRunner(options: {
     proxyPool,
     sessionPool,
     normalizers: createDefaultUrlNormalizerRegistry(),
+    inputPreparer,
     concurrency,
     targetRpm,
     bandwidth,

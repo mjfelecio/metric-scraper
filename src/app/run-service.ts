@@ -315,6 +315,14 @@ export class RunService {
           }
           state.timelineCursor += 1;
         },
+        onInputPrepared: (prepared) => {
+          state.input = {
+            candidates: parsed.totalCandidates,
+            accepted: prepared.items.length,
+            rejected: parsed.issues.length + prepared.issues.length,
+            issues: [...parsed.issues, ...prepared.issues],
+          };
+        },
         onProgress: (progress: SessionProgress) => {
           state.state = progress.state === 'waiting' ? 'waiting' : 'running';
           state.stalled = progress.stalled;
@@ -483,6 +491,23 @@ export class RunService {
         overrides: { concurrency: request.concurrency, targetRpm: request.targetRpm },
         proxyPool: proxySupply.pool,
       });
+      const prepared =
+        built.inputPreparer === undefined
+          ? {
+              items: parsed.records.map((inputRecord) => ({
+                kind: 'ready' as const,
+                record: inputRecord,
+                resolution: null,
+              })),
+              issues: [],
+            }
+          : await built.inputPreparer.prepare(parsed.records, { signal: record.abort.signal });
+      state.input = {
+        candidates: parsed.totalCandidates,
+        accepted: prepared.items.length,
+        rejected: parsed.issues.length + prepared.issues.length,
+        issues: [...parsed.issues, ...prepared.issues],
+      };
 
       state.state = 'running';
 
@@ -499,15 +524,15 @@ export class RunService {
       };
       sampleProxies();
 
-      const result = await built.runner.run(parsed.records, {
+      const result = await built.runner.run(prepared.items, {
         runId: state.runId,
         platform,
         signal: record.abort.signal,
         summaryPath: paths.summary,
         counts: {
           candidates: parsed.totalCandidates,
-          accepted: parsed.records.length,
-          rejected: parsed.issues.length,
+          accepted: prepared.items.length,
+          rejected: parsed.issues.length + prepared.issues.length,
         },
         onProgress: (progress) => {
           state.progress = progress;

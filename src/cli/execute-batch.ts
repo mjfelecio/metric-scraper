@@ -49,7 +49,10 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
   const logger = createLogger({ level: options.logLevel ?? config.logLevel });
 
   const parsed = await gatherInput(options);
-  reportInputIssues(parsed, options.strict ?? false);
+  const strict = options.strict ?? false;
+  if (parsed.issues.some(isFatalInputIssue) || (strict && parsed.issues.length > 0)) {
+    reportInputIssues(parsed, strict);
+  }
 
   const startedAt = new Date();
   const paths = resolveRunPaths({
@@ -78,24 +81,41 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
     overrides: options.overrides,
     proxyPool: proxySupply.pool,
   });
+  const prepared =
+    built.inputPreparer === undefined
+      ? {
+          items: parsed.records.map((record) => ({
+            kind: 'ready' as const,
+            record,
+            resolution: null,
+          })),
+          issues: [],
+        }
+      : await built.inputPreparer.prepare(parsed.records);
+  const preparedParsed: ParsedInput = {
+    ...parsed,
+    records: prepared.items.map((item) => item.record),
+    issues: [...parsed.issues, ...prepared.issues],
+  };
+  reportInputIssues(preparedParsed, strict);
 
   const progress = new ProgressReporter({
     enabled: options.progress !== false && options.json !== true,
   });
 
   process.stderr.write(
-    `\nScraping ${parsed.records.length} URL(s) ` +
+    `\nScraping ${prepared.items.length} URL(s) ` +
       `(platform: ${options.platform ?? 'auto'}, concurrency: ${built.concurrency}, ` +
       `target: ${built.targetRpm} req/min)\n`,
   );
 
-  const result = await built.runner.run(parsed.records, {
+  const result = await built.runner.run(prepared.items, {
     platform: options.platform,
     summaryPath: paths.summary,
     counts: {
       candidates: parsed.totalCandidates,
-      accepted: parsed.records.length,
-      rejected: parsed.issues.length,
+      accepted: prepared.items.length,
+      rejected: preparedParsed.issues.length,
     },
     onProgress: (update) => progress.update(update),
   });
@@ -124,7 +144,7 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
     throw result.fatalError;
   }
 
-  return { summary: result.summary, parsed };
+  return { summary: result.summary, parsed: preparedParsed };
 }
 
 /** Shared with `execute-session.ts` so watch mode parses input identically. */
