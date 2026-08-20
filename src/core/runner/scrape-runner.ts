@@ -6,6 +6,7 @@ import {
   type TaskQueueOptions,
 } from '../concurrency/task-queue.js';
 import { type Logger } from '../logging/logger.js';
+import { type BandwidthAggregator } from '../metrics/bandwidth.js';
 import { type MetricsCollector } from '../metrics/metrics-collector.js';
 import { createRateLimiter, type RateLimiter } from '../rate-limit/rate-limit.js';
 import { ScrapeError, type ScrapeErrorInfo } from '../models/errors.js';
@@ -50,6 +51,13 @@ export interface ScrapeRunnerDeps {
   sessionPool: SessionPool;
   sink: SnapshotSink;
   metrics: MetricsCollector;
+  /**
+   * `null`/omitted when `METRICS_BANDWIDTH` is off. When present, its live
+   * totals are folded into `metrics` right before the run summary is built,
+   * so the summary reflects the run's final byte counts rather than staying
+   * permanently unset.
+   */
+  bandwidth?: BandwidthAggregator | null | undefined;
   retryPolicy: RetryPolicy;
   logger: Logger;
   config: ScrapeRunnerConfig;
@@ -248,6 +256,12 @@ export class ScrapeRunner {
       accepted: options.counts?.accepted ?? records.length,
       rejected: options.counts?.rejected ?? 0,
     };
+
+    // Refreshed here, right before the summary is assembled, so the summary
+    // reflects the run's final totals rather than whatever was last sampled.
+    if (this.deps.bandwidth != null) {
+      metrics.recordBandwidth(this.deps.bandwidth.view());
+    }
 
     const summary = buildRunSummary({
       runId,

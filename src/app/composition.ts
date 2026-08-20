@@ -135,6 +135,7 @@ export async function buildRunner(options: {
     sessionPool,
     sink,
     metrics,
+    bandwidth,
     retryPolicy: new RetryPolicy({ ...config.retry, ...options.overrides?.retry }),
     logger,
     config: {

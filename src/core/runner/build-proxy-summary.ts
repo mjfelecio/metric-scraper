@@ -143,6 +143,10 @@ function toRow(health: ProxyHealth, usage: ProxyUsageView | undefined): ProxyUsa
     last_error_code: health.lastErrorCode,
     by_platform: { ...(usage?.byPlatform ?? {}) },
     by_error_code: { ...(usage?.byErrorCode ?? {}) },
+    // `null` rather than falling back to a pool counter: the pool has no notion
+    // of bytes, so there is no "since the session began" figure to fall back to.
+    request_bytes: usage?.requestBytes ?? null,
+    response_bytes: usage?.responseBytes ?? null,
   };
 }
 

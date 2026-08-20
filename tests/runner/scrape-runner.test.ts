@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { BandwidthAggregator } from '../../src/core/metrics/bandwidth.js';
 import { MetricsCollector } from '../../src/core/metrics/metrics-collector.js';
 import { ScrapeError } from '../../src/core/models/errors.js';
 import { type InputRecord } from '../../src/core/models/input.js';
@@ -59,6 +60,7 @@ function buildRunner(options: {
   maxQueueSize?: number;
   proxyPool?: ProxyPool;
   sink?: MemorySnapshotSink;
+  bandwidth?: BandwidthAggregator | null;
 }) {
   const sink = options.sink ?? new MemorySnapshotSink();
   const metrics = new MetricsCollector();
@@ -72,6 +74,7 @@ function buildRunner(options: {
     sessionPool: new NullSessionPool(),
     sink,
     metrics,
+    bandwidth: options.bandwidth ?? null,
     retryPolicy: new RetryPolicy({ maxAttempts: options.maxAttempts ?? 3, jitter: false }),
     logger: nullLogger,
     config: {
@@ -255,6 +258,42 @@ describe('ScrapeRunner', () => {
     });
 
     expect(result.summary.input).toEqual({ candidates: 5, accepted: 1, rejected: 4 });
+  });
+
+  it('reports null bandwidth when no aggregator was wired in', async () => {
+    const { runner } = buildRunner({
+      scraper: new FakeScraper(() => scrapeSuccess(EMPTY_VIDEO_DATA)),
+    });
+
+    const result = await runner.run(records('https://t/1'));
+
+    expect(result.summary.bandwidth).toBeNull();
+  });
+
+  it('refreshes the metrics from the bandwidth aggregator before assembling the summary', async () => {
+    // R1: buildRunner wires a BandwidthAggregator into BuiltRunner, but nothing
+    // ever fed it into MetricsCollector.recordBandwidth — left alone, the
+    // summary's bandwidth block would always be null even with measured
+    // traffic. The runner must refresh it itself, right before the summary is
+    // built, so this is the regression that must never come back.
+    const bandwidth = new BandwidthAggregator();
+    bandwidth.record({ proxyId: null, host: 'example.com', requestBytes: 100, responseBytes: 900 });
+    bandwidth.record({ proxyId: null, host: 'example.com', requestBytes: 100, responseBytes: 900 });
+
+    const { runner } = buildRunner({
+      scraper: new FakeScraper(() => scrapeSuccess(EMPTY_VIDEO_DATA)),
+      bandwidth,
+    });
+
+    const result = await runner.run(records('https://t/1', 'https://t/2'));
+
+    expect(result.summary.bandwidth).not.toBeNull();
+    expect(result.summary.bandwidth).toEqual({
+      request_bytes: 200,
+      response_bytes: 1_800,
+      total_bytes: 2_000,
+      bytes_per_request: 1_000,
+    });
   });
 });
 

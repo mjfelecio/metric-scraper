@@ -73,6 +73,8 @@ function usage(overrides: Partial<ProxyUsageView> = {}): ProxyUsageView {
     blocked: false,
     byPlatform: {},
     byErrorCode: {},
+    requestBytes: null,
+    responseBytes: null,
     ...overrides,
   };
 }
@@ -189,6 +191,21 @@ describe('buildProxySummary', () => {
     expect(summary.per_proxy[0]?.requests).toBe(0);
   });
 
+  it('carries measured request/response bytes onto the proxy row', () => {
+    const summary = buildProxySummary(stats([health()]), [
+      usage({ requests: 4, requestBytes: 400, responseBytes: 6_000 }),
+    ]);
+
+    expect(summary.per_proxy[0]).toMatchObject({ request_bytes: 400, response_bytes: 6_000 });
+  });
+
+  it('reports null bytes for a proxy the bandwidth aggregator never measured', () => {
+    const summary = buildProxySummary(stats([health()]), [usage({ requests: 4 })]);
+
+    expect(summary.per_proxy[0]?.request_bytes).toBeNull();
+    expect(summary.per_proxy[0]?.response_bytes).toBeNull();
+  });
+
   it('falls back to the pool counters when the metrics have nothing to say', () => {
     // The session summary uses this: the pool has counted all session long,
     // while a cycle's metrics start empty.
@@ -229,6 +246,8 @@ describe('mergeProxyUsage', () => {
       last_error_code: null,
       by_platform: { tiktok: { requests: 10, failures: 1 } },
       by_error_code: { http_error: 1 },
+      request_bytes: null,
+      response_bytes: null,
       ...overrides,
     };
   }

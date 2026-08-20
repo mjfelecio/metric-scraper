@@ -206,3 +206,60 @@ describe('MetricsCollector', () => {
     });
   });
 });
+
+describe('MetricsCollector bandwidth', () => {
+  it('reports null bandwidth when nothing was measured', () => {
+    expect(new MetricsCollector().view().bandwidth).toBeNull();
+  });
+
+  it('exposes the recorded bandwidth view', () => {
+    const collector = new MetricsCollector();
+    collector.recordBandwidth({
+      requests: 2,
+      requestBytes: 200,
+      responseBytes: 2_800,
+      totalBytes: 3_000,
+      bytesPerRequest: 1_500,
+      perProxy: [
+        {
+          proxyId: 'p1',
+          requests: 2,
+          requestBytes: 200,
+          responseBytes: 2_800,
+          totalBytes: 3_000,
+        },
+      ],
+    });
+
+    const view = collector.view();
+    expect(view.bandwidth?.totalBytes).toBe(3_000);
+    expect(view.bandwidth?.bytesPerRequest).toBe(1_500);
+    expect(view.bandwidth?.perProxy[0]?.proxyId).toBe('p1');
+  });
+
+  it('joins measured bytes onto the matching proxy row, leaving others null', () => {
+    const collector = new MetricsCollector();
+    collector.start();
+    collector.recordProxyOutcome('p1', 'success');
+    collector.recordProxyOutcome('p2', 'success');
+    collector.recordBandwidth({
+      requests: 1,
+      requestBytes: 100,
+      responseBytes: 900,
+      totalBytes: 1_000,
+      bytesPerRequest: 1_000,
+      perProxy: [
+        { proxyId: 'p1', requests: 1, requestBytes: 100, responseBytes: 900, totalBytes: 1_000 },
+      ],
+    });
+
+    const usage = collector.view().proxyUsage;
+    const p1 = usage.find((entry) => entry.proxyId === 'p1');
+    const p2 = usage.find((entry) => entry.proxyId === 'p2');
+    expect(p1?.requestBytes).toBe(100);
+    expect(p1?.responseBytes).toBe(900);
+    // p2 was never seen by the aggregator: null, not 0.
+    expect(p2?.requestBytes).toBeNull();
+    expect(p2?.responseBytes).toBeNull();
+  });
+});
