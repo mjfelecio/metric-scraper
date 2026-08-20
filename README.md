@@ -17,7 +17,8 @@ Instagram Reels/video posts, as an append-only time series.
 > likes, comments and Reel play counts. It checks a bounded two clips pages across the
 > primary author and public coauthors before using proxy-bound media-info fallback.
 > It fails visibly instead of returning `ok` without an exact view count. TikTok
-> `vm.tiktok.com` and `vt.tiktok.com` links are resolved into canonical post URLs before scraping.
+> `vm.tiktok.com`, `vt.tiktok.com`, Instagram `/share/` links, and legacy
+> `instagr.am` links are resolved into canonical post URLs before scraping.
 
 ---
 
@@ -737,6 +738,10 @@ including the case of the same video appearing twice with different `scraped_at`
   need a dedicated session; missing exact views are never considered successful.
 - **Instagram shares and saves are usually unavailable to non-owners.** They remain
   `null` unless a tested response supplies an integer.
+- **Instagram short links require a redirect request.** `/share/reel/{token}`,
+  `/share/p/{token}`, `/share/{token}`, and legacy `instagr.am` post links use the same
+  proxy and HTTP controls as scraping. Redirects are capped at five Instagram-owned hops
+  and must end at a canonical `/reel/`, `/p/`, or `/tv/` URL.
 - **TikTok acquisition depends on undocumented public-page hydration JSON.** A payload
   shape change produces a visible `parse_error`; it never fabricates or substitutes metrics.
 - **TikTok short links require a redirect request.** `vm.tiktok.com` / `vt.tiktok.com`
