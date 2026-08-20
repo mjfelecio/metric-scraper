@@ -5,7 +5,8 @@ import { type BandwidthView } from '../core/metrics/bandwidth.js';
 import { type RunSummary } from '../core/models/run-summary.js';
 import { type CycleSummary } from '../core/models/session-summary.js';
 import {
-  appendBaseline,
+  appendBaseline as appendBaselineToDisk,
+  type BandwidthBaselineRecord,
   buildBaselineRecord,
   readBaselines as readBaselinesFromDisk,
   summarizeBaselines,
@@ -39,10 +40,23 @@ export function baselinePath(outputDir: string): string {
  */
 export class LatestWins {
   private seq = 0;
+  private tail: Promise<void> = Promise.resolve();
 
   begin(): () => boolean {
     const mine = (this.seq += 1);
     return () => mine === this.seq;
+  }
+
+  /**
+   * Runs cycle bookkeeping in call order while assigning freshness at enqueue
+   * time, before any append or read can yield. Serializing also keeps JSONL
+   * records in cycle order rather than whichever filesystem call finishes first.
+   */
+  enqueue(work: (isLatest: () => boolean) => Promise<void>): Promise<void> {
+    const isLatest = this.begin();
+    const current = this.tail.then(() => work(isLatest));
+    this.tail = current.catch(() => {});
+    return current;
   }
 }
 
@@ -55,6 +69,9 @@ export interface BandwidthBaselineDeps {
    * the real disk read.
    */
   readonly readBaselines?: ((path_: string) => Promise<ReadBaselinesResult>) | undefined;
+  /** Overridable for ordering tests. Defaults to the append-only disk writer. */
+  readonly appendBaseline?:
+    ((path_: string, record: BandwidthBaselineRecord) => Promise<void>) | undefined;
 }
 
 /**
@@ -75,7 +92,7 @@ export async function appendBandwidthBaseline(
 
   const path_ = baselinePath(deps.outputDir);
   try {
-    await appendBaseline(path_, record);
+    await (deps.appendBaseline ?? appendBaselineToDisk)(path_, record);
   } catch (error) {
     deps.logger.warn(
       { path: path_, message: error instanceof Error ? error.message : String(error) },
@@ -110,16 +127,42 @@ export async function refreshBandwidth(
   deps: BandwidthBaselineDeps,
 ): Promise<void> {
   const isLatest = guard.begin();
+  await refreshBandwidthIfLatest(state, current, excludeRunId, isLatest, deps);
+}
 
+async function refreshBandwidthIfLatest(
+  state: RunStateDto,
+  current: BandwidthView | null,
+  excludeRunId: string,
+  isLatest: () => boolean,
+  deps: BandwidthBaselineDeps,
+): Promise<void> {
   if (current === null) {
     if (isLatest()) state.bandwidth = null;
     return;
   }
 
   const read = deps.readBaselines ?? readBaselinesFromDisk;
-  const { records } = await read(baselinePath(deps.outputDir));
+  const path_ = baselinePath(deps.outputDir);
+  let result: ReadBaselinesResult;
+  try {
+    result = await read(path_);
+  } catch (error) {
+    deps.logger.warn(
+      { path: path_, message: error instanceof Error ? error.message : String(error) },
+      'could not read bandwidth baseline history',
+    );
+    if (isLatest()) state.bandwidth = null;
+    return;
+  }
+  if (result.skippedLines > 0) {
+    deps.logger.warn(
+      { path: path_, skipped_lines: result.skippedLines },
+      'skipped corrupt bandwidth baseline lines',
+    );
+  }
   if (!isLatest()) return;
-  state.bandwidth = { current, baseline: summarizeBaselines(records, excludeRunId) };
+  state.bandwidth = { current, baseline: summarizeBaselines(result.records, excludeRunId) };
 }
 
 /**
@@ -140,10 +183,18 @@ export async function recordCycleBandwidth(
   guard: LatestWins,
   deps: BandwidthBaselineDeps,
 ): Promise<void> {
-  if (cycle.summary !== null) {
-    await appendBandwidthBaseline(cycle.summary, deps);
-  }
+  await guard.enqueue(async (isLatest) => {
+    if (cycle.summary !== null) {
+      await appendBandwidthBaseline(cycle.summary, deps);
+    }
 
-  const current = bandwidthViewFromCycles(cycles);
-  await refreshBandwidth(state, current, cycleRunId(sessionId, cycle.cycle), guard, deps);
+    const current = bandwidthViewFromCycles(cycles);
+    await refreshBandwidthIfLatest(
+      state,
+      current,
+      cycleRunId(sessionId, cycle.cycle),
+      isLatest,
+      deps,
+    );
+  });
 }

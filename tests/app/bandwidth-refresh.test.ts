@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   appendBandwidthBaseline,
@@ -17,7 +17,10 @@ import { nullLogger } from '../../src/core/logging/logger.js';
 import { type BandwidthView } from '../../src/core/metrics/bandwidth.js';
 import { type RunSummary } from '../../src/core/models/run-summary.js';
 import { type CycleSummary } from '../../src/core/models/session-summary.js';
-import { type ReadBaselinesResult } from '../../src/infrastructure/output/bandwidth-baselines.js';
+import {
+  type BandwidthBaselineRecord,
+  type ReadBaselinesResult,
+} from '../../src/infrastructure/output/bandwidth-baselines.js';
 
 /** Only `run_id` / `finished_at` / `bandwidth` matter to the functions under test. */
 function summaryWith(runId: string, bandwidth: RunSummary['bandwidth']): RunSummary {
@@ -139,6 +142,38 @@ describe('refreshBandwidth — ordering guard (Important)', () => {
     await olderCall;
     expect(state.bandwidth?.current.requests).toBe(20);
   });
+
+  it('logs corrupt lines instead of silently presenting partial history as complete', async () => {
+    const warn = vi.fn();
+    const state = freshState();
+    await refreshBandwidth(state, view(1, 100), 'current', new LatestWins(), {
+      outputDir: '/unused',
+      logger: { ...nullLogger, warn },
+      readBaselines: () => Promise.resolve({ records: [], skippedLines: 2 }),
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ skipped_lines: 2 }),
+      'skipped corrupt bandwidth baseline lines',
+    );
+    expect(state.bandwidth?.current.totalBytes).toBe(100);
+  });
+
+  it('does not render a read failure as no previous run', async () => {
+    const warn = vi.fn();
+    const state = freshState();
+    await refreshBandwidth(state, view(1, 100), 'current', new LatestWins(), {
+      outputDir: '/unreadable',
+      logger: { ...nullLogger, warn },
+      readBaselines: () => Promise.reject(new Error('access denied')),
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'access denied' }),
+      'could not read bandwidth baseline history',
+    );
+    expect(state.bandwidth).toBeNull();
+  });
 });
 
 describe('recordCycleBandwidth — R8 trap: a cycle must not become its own baseline', () => {
@@ -180,6 +215,44 @@ describe('recordCycleBandwidth — R8 trap: a cycle must not become its own base
     // decision keeps this cumulative, only the *baseline exclusion* is
     // per-cycle), so it reflects both cycles' bytes.
     expect(state.bandwidth?.current.totalBytes).toBe(300_000);
+  });
+
+  it('a slow older append cannot overwrite a newer cycle or make it its own baseline', async () => {
+    const sessionId = 'session-ordered';
+    const guard = new LatestWins();
+    const state = freshState();
+    const records: BandwidthBaselineRecord[] = [];
+
+    let releaseOlder!: () => void;
+    const olderBlocked = new Promise<void>((resolve) => (releaseOlder = resolve));
+    const appendBaseline = async (
+      _path: string,
+      record: BandwidthBaselineRecord,
+    ): Promise<void> => {
+      if (record.runId === cycleRunId(sessionId, 1)) await olderBlocked;
+      records.push(record);
+    };
+    const deps = {
+      outputDir: '/unused',
+      logger: nullLogger,
+      appendBaseline,
+      readBaselines: (): Promise<ReadBaselinesResult> =>
+        Promise.resolve({ records: [...records], skippedLines: 0 }),
+    };
+
+    const cycle1 = cycleWith(1, cycleRunId(sessionId, 1), measured(100_000, 100));
+    const cycle2 = cycleWith(2, cycleRunId(sessionId, 2), measured(200_000, 100));
+    const cycles = [cycle1, cycle2];
+
+    const older = recordCycleBandwidth(state, cycles, cycle1, sessionId, guard, deps);
+    const newer = recordCycleBandwidth(state, cycles, cycle2, sessionId, guard, deps);
+    await Promise.resolve();
+    releaseOlder();
+    await Promise.all([older, newer]);
+
+    expect(state.bandwidth?.current.totalBytes).toBe(300_000);
+    expect(state.bandwidth?.baseline.baseline?.runId).toBe(cycleRunId(sessionId, 1));
+    expect(state.bandwidth?.baseline.baseline?.runId).not.toBe(cycleRunId(sessionId, 2));
   });
 
   it('demonstrates the trap directly: excluding by the session id instead of the cycle id fails to self-exclude', async () => {

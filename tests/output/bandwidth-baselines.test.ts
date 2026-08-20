@@ -239,6 +239,10 @@ describe('appendBaseline / readBaselines', () => {
     expect(result.skippedLines).toBe(0);
   });
 
+  it('rethrows read failures other than a missing history file', async () => {
+    await expect(readBaselines(dir)).rejects.toHaveProperty('code');
+  });
+
   it('round-trips one appended record', async () => {
     const entry = record('1', 10, 1_000);
     await appendBaseline(filePath, entry);

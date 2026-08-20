@@ -66,9 +66,13 @@ export async function readBaselines(path_: string): Promise<ReadBaselinesResult>
   let raw: string;
   try {
     raw = await readFile(path_, 'utf8');
-  } catch {
-    // No history yet is the normal first-run state, not an error.
-    return { records: [], skippedLines: 0 };
+  } catch (error) {
+    // No history yet is the normal first-run state. Permission, I/O, and
+    // malformed-path errors are operational failures and must reach the caller.
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return { records: [], skippedLines: 0 };
+    }
+    throw error;
   }
 
   const records: BandwidthBaselineRecord[] = [];
@@ -91,6 +95,10 @@ export async function readBaselines(path_: string): Promise<ReadBaselinesResult>
     }
   }
   return { records, skippedLines };
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error;
 }
 
 /**
