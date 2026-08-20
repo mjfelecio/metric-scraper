@@ -15,7 +15,7 @@ import { type JobCompletedEvent } from '../core/runner/types.js';
 import { type MetricSnapshot } from '../core/models/snapshot.js';
 import {
   appendBaseline,
-  type BandwidthBaselineRecord,
+  buildBaselineRecord,
 } from '../infrastructure/output/bandwidth-baselines.js';
 import { JsonlFileSink } from '../infrastructure/output/jsonl-file-sink.js';
 import { ProxyEventLog } from '../infrastructure/output/proxy-event-log.js';
@@ -550,23 +550,16 @@ export class RunService {
   /**
    * Appends this run's bandwidth to the cross-run baseline history.
    *
-   * Skipped entirely when `summary.bandwidth` is `null` (METRICS_BANDWIDTH
-   * off, or nothing was measured) — an unmeasured run entering the history as
-   * a zero would corrupt every later average. A failure to append must not
-   * fail the run, matching `persistSummary`.
+   * Skipped entirely when `buildBaselineRecord` returns `null` — METRICS_BANDWIDTH
+   * off, or on but nothing was ever measured. Either way, an unmeasured run
+   * entering the history as a zero would corrupt every later average. A
+   * failure to append must not fail the run, matching `persistSummary`.
    */
   private async appendBandwidthBaseline(summary: RunSummary): Promise<void> {
-    if (summary.bandwidth === null) return;
+    const record = buildBaselineRecord(summary);
+    if (record === null) return;
 
     const baselinePath = path.join(this.config.outputDir, 'bandwidth-baselines.jsonl');
-    const record: BandwidthBaselineRecord = {
-      runId: summary.run_id,
-      finishedAt: summary.finished_at,
-      requests: summary.totals.requests,
-      totalBytes: summary.bandwidth.total_bytes,
-      avgBytesPerRequest: summary.bandwidth.bytes_per_request ?? 0,
-    };
-
     try {
       await appendBaseline(baselinePath, record);
     } catch (error) {

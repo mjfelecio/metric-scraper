@@ -4,12 +4,19 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { BandwidthAggregator } from '../../src/core/metrics/bandwidth.js';
+import { MetricsCollector } from '../../src/core/metrics/metrics-collector.js';
+import { type RunSummary } from '../../src/core/models/run-summary.js';
+import { buildRunSummary } from '../../src/core/runner/build-summary.js';
 import {
   appendBaseline,
+  buildBaselineRecord,
   readBaselines,
   summarizeBaselines,
   type BandwidthBaselineRecord,
 } from '../../src/infrastructure/output/bandwidth-baselines.js';
+import { NullProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
+import { NullSessionPool } from '../../src/infrastructure/session/in-memory-session-pool.js';
 
 function record(runId: string, requests: number, totalBytes: number): BandwidthBaselineRecord {
   return {
@@ -19,6 +26,62 @@ function record(runId: string, requests: number, totalBytes: number): BandwidthB
     totalBytes,
     avgBytesPerRequest: totalBytes / requests,
   };
+}
+
+/**
+ * Builds a real `RunSummary` via the same collaborators production code uses
+ * (`MetricsCollector`, `BandwidthAggregator`, `buildRunSummary`), so
+ * `buildBaselineRecord` is tested against the actual shape it will see.
+ *
+ * `bandwidth: 'off'` never calls `recordBandwidth`, matching METRICS_BANDWIDTH
+ * being disabled (`summary.bandwidth` stays `null`). `bandwidth: { samples, bytesEach }`
+ * feeds that many samples into a `BandwidthAggregator` before finishing — passing
+ * `samples: 0` reproduces "measurement on, but nothing was ever measured"
+ * (every job failed before reaching the interceptor): `summary.bandwidth` is a
+ * non-null object with `requests: 0`.
+ */
+function summaryWithBandwidth(options: {
+  totalsRequests: number;
+  bandwidth: 'off' | { samples: number; bytesEach: number };
+}): RunSummary {
+  const metrics = new MetricsCollector();
+  metrics.start();
+  for (let i = 0; i < options.totalsRequests; i += 1) {
+    metrics.recordResult({ status: 'ok', latencyMs: 100, retries: 0, exhausted: false, errorCode: null });
+  }
+  if (options.bandwidth !== 'off') {
+    const aggregator = new BandwidthAggregator();
+    for (let i = 0; i < options.bandwidth.samples; i += 1) {
+      aggregator.record({
+        proxyId: null,
+        host: 'example.com',
+        requestBytes: options.bandwidth.bytesEach / 2,
+        responseBytes: options.bandwidth.bytesEach / 2,
+      });
+    }
+    metrics.recordBandwidth(aggregator.view());
+  }
+  metrics.finish();
+
+  return buildRunSummary({
+    runId: 'run-1',
+    platform: null,
+    startedAt: new Date('2026-08-20T00:00:00.000Z'),
+    finishedAt: new Date('2026-08-20T00:01:00.000Z'),
+    counts: {
+      candidates: options.totalsRequests,
+      accepted: options.totalsRequests,
+      rejected: 0,
+    },
+    metrics: metrics.view(),
+    proxyStats: new NullProxyPool().getStats(),
+    sessionStats: new NullSessionPool().getStats(),
+    concurrency: 1,
+    targetRpm: 0,
+    snapshotsPath: null,
+    summaryPath: null,
+    rowsWritten: options.totalsRequests,
+  });
 }
 
 describe('summarizeBaselines', () => {
@@ -91,6 +154,72 @@ describe('summarizeBaselines', () => {
   });
 });
 
+describe('buildBaselineRecord', () => {
+  it('returns null when METRICS_BANDWIDTH was off (summary.bandwidth is null)', () => {
+    const summary = summaryWithBandwidth({ totalsRequests: 5, bandwidth: 'off' });
+    expect(summary.bandwidth).toBeNull();
+
+    expect(buildBaselineRecord(summary)).toBeNull();
+  });
+
+  /**
+   * CONTROLLER RULING R6 (Critical): `summary.bandwidth === null` only catches
+   * "feature off". With METRICS_BANDWIDTH on but every job failing before it
+   * reaches the counting interceptor, `bandwidth` is a non-null object with
+   * `requests: 0` while `totals.requests` is still > 0 (URLs were attempted).
+   * That must not be appended to the append-only history as a fabricated
+   * zero-byte run.
+   */
+  it('returns null when bandwidth was measured but zero wire requests were recorded, even though totals.requests is positive', () => {
+    const summary = summaryWithBandwidth({
+      totalsRequests: 5,
+      bandwidth: { samples: 0, bytesEach: 0 },
+    });
+
+    expect(summary.bandwidth).not.toBeNull();
+    expect(summary.bandwidth?.requests).toBe(0);
+    expect(summary.totals.requests).toBe(5);
+
+    expect(buildBaselineRecord(summary)).toBeNull();
+  });
+
+  /**
+   * CONTROLLER RULING R6 (Important): bytes accumulate once per dispatched
+   * wire call (retries and multi-call jobs included), but `totals.requests`
+   * counts URLs with retries excluded. `bandwidth.requests` — not
+   * `totals.requests` — is the correct denominator.
+   */
+  it('uses bandwidth.requests, never totals.requests, as the record denominator', () => {
+    const summary = summaryWithBandwidth({
+      totalsRequests: 2,
+      bandwidth: { samples: 5, bytesEach: 100 },
+    });
+
+    expect(summary.totals.requests).toBe(2);
+    expect(summary.bandwidth?.requests).toBe(5);
+
+    const built = buildBaselineRecord(summary);
+    expect(built).not.toBeNull();
+    expect(built?.requests).toBe(5);
+    expect(built?.avgBytesPerRequest).toBeCloseTo(100);
+  });
+
+  it('builds a complete record from a normally measured run', () => {
+    const summary = summaryWithBandwidth({
+      totalsRequests: 3,
+      bandwidth: { samples: 3, bytesEach: 1_000 },
+    });
+
+    expect(buildBaselineRecord(summary)).toEqual({
+      runId: summary.run_id,
+      finishedAt: summary.finished_at,
+      requests: 3,
+      totalBytes: 3_000,
+      avgBytesPerRequest: 1_000,
+    });
+  });
+});
+
 describe('appendBaseline / readBaselines', () => {
   let dir: string;
   let filePath: string;
@@ -104,33 +233,35 @@ describe('appendBaseline / readBaselines', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('returns an empty array when no history file exists yet', async () => {
-    const records = await readBaselines(filePath);
-    expect(records).toEqual([]);
+  it('returns an empty array and no skipped lines when no history file exists yet', async () => {
+    const result = await readBaselines(filePath);
+    expect(result.records).toEqual([]);
+    expect(result.skippedLines).toBe(0);
   });
 
   it('round-trips one appended record', async () => {
     const entry = record('1', 10, 1_000);
     await appendBaseline(filePath, entry);
 
-    const records = await readBaselines(filePath);
-    expect(records).toEqual([entry]);
+    const result = await readBaselines(filePath);
+    expect(result.records).toEqual([entry]);
+    expect(result.skippedLines).toBe(0);
   });
 
   it('appends rather than overwriting on repeated calls', async () => {
     await appendBaseline(filePath, record('1', 10, 1_000));
     await appendBaseline(filePath, record('2', 20, 2_000));
 
-    const records = await readBaselines(filePath);
-    expect(records.map((r) => r.runId)).toEqual(['1', '2']);
+    const result = await readBaselines(filePath);
+    expect(result.records.map((r) => r.runId)).toEqual(['1', '2']);
   });
 
   it('creates missing parent directories', async () => {
     const nested = path.join(dir, 'nested', 'deeper', 'bandwidth-baselines.jsonl');
     await appendBaseline(nested, record('1', 10, 1_000));
 
-    const records = await readBaselines(nested);
-    expect(records).toHaveLength(1);
+    const result = await readBaselines(nested);
+    expect(result.records).toHaveLength(1);
   });
 
   it('skips a truncated final line left by a run killed mid-write', async () => {
@@ -141,8 +272,9 @@ describe('appendBaseline / readBaselines', () => {
     const { writeFile } = await import('node:fs/promises');
     await writeFile(filePath, contents, 'utf8');
 
-    const records = await readBaselines(filePath);
-    expect(records).toEqual([good]);
+    const result = await readBaselines(filePath);
+    expect(result.records).toEqual([good]);
+    expect(result.skippedLines).toBe(1);
   });
 
   it('skips a line that parses but is missing required fields', async () => {
@@ -150,7 +282,28 @@ describe('appendBaseline / readBaselines', () => {
     const { writeFile } = await import('node:fs/promises');
     await writeFile(filePath, `${JSON.stringify(good)}\n${JSON.stringify({ foo: 'bar' })}\n`, 'utf8');
 
-    const records = await readBaselines(filePath);
-    expect(records).toEqual([good]);
+    const result = await readBaselines(filePath);
+    expect(result.records).toEqual([good]);
+    expect(result.skippedLines).toBe(1);
+  });
+
+  /**
+   * The other corruption tests each mix one good line with one bad, so an
+   * empty `records` array always came with a non-zero `skippedLines` there.
+   * A *wholly* corrupt file — every non-blank line unusable — is the case
+   * that used to be indistinguishable from "no history file at all": both
+   * returned `[]`. `skippedLines` is what tells them apart now.
+   */
+  it('reports every line as skipped when the whole file is corrupt, distinguishing it from no history at all', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(filePath, 'not json\n{"still": "not a baseline record"}\n{{{malformed\n', 'utf8');
+
+    const result = await readBaselines(filePath);
+    expect(result.records).toEqual([]);
+    expect(result.skippedLines).toBe(3);
+
+    const missing = await readBaselines(path.join(dir, 'does-not-exist.jsonl'));
+    expect(missing.records).toEqual([]);
+    expect(missing.skippedLines).toBe(0);
   });
 });

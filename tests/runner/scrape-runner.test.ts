@@ -289,6 +289,7 @@ describe('ScrapeRunner', () => {
 
     expect(result.summary.bandwidth).not.toBeNull();
     expect(result.summary.bandwidth).toEqual({
+      requests: 2,
       request_bytes: 200,
       response_bytes: 1_800,
       total_bytes: 2_000,

@@ -72,6 +72,7 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
       metrics.bandwidth === null
         ? null
         : {
+            requests: metrics.bandwidth.requests,
             request_bytes: metrics.bandwidth.requestBytes,
             response_bytes: metrics.bandwidth.responseBytes,
             total_bytes: metrics.bandwidth.totalBytes,

@@ -259,6 +259,8 @@ export const RunSummarySchema = z.object({
   /** `null` when METRICS_BANDWIDTH is off or nothing was measured. */
   bandwidth: z
     .object({
+      /** True count of measured wire round trips: the correct denominator for byte averages. */
+      requests: z.number().int().nonnegative(),
       request_bytes: z.number().int().nonnegative(),
       response_bytes: z.number().int().nonnegative(),
       total_bytes: z.number().int().nonnegative(),
