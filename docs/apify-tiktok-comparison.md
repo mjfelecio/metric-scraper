@@ -375,6 +375,10 @@ saves that we cannot otherwise get."
 Changing the production acquisition path is out of scope for this experiment and
 nothing here does it.
 
+The design that follows from these results — when to call an Actor, what to do
+when it fails, and why a rounded value must never overwrite an exact one — is in
+[view-precision-strategy.md](view-precision-strategy.md).
+
 ## 10. After the smoke test
 
 The four-URL set covers <10K and 1M+ but **not** the 10K–999,999 middle band,
