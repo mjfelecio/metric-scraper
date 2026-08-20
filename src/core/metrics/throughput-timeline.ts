@@ -25,6 +25,8 @@ export interface TimelineCounts {
   inFlight: number;
   /** Cycle in progress when the sample was taken; `0` between cycles. */
   cycle: number;
+  /** Cumulative wire bytes for the run so far. */
+  bytes: number;
 }
 
 export interface ThroughputSample {
@@ -43,6 +45,10 @@ export interface ThroughputSample {
   failuresPerMinute: number;
   /** Kept separate from `requestsPerMinute` so retries can never inflate throughput. */
   retriesPerMinute: number;
+  /** Cumulative wire bytes at this sample. */
+  bytes: number;
+  /** Wire bytes over the window since the previous sample, per minute. */
+  bytesPerMinute: number;
 }
 
 export interface SustainedWindow {
@@ -78,6 +84,7 @@ export class ThroughputTimeline {
     retries: 0,
     inFlight: 0,
     cycle: 0,
+    bytes: 0,
   };
 
   constructor(options: ThroughputTimelineOptions) {
@@ -101,6 +108,8 @@ export class ThroughputTimeline {
     // whole window anyway.
     if (deltaMs <= 0) return null;
 
+    // Every input is cumulative and monotonic; a negative delta means that
+    // upstream invariant already failed, so no rate should expose the dip.
     const perMinute = (delta: number): number => Math.max(0, (delta / deltaMs) * 60_000);
 
     const sample: ThroughputSample = {
@@ -116,6 +125,8 @@ export class ThroughputTimeline {
       successesPerMinute: perMinute(counts.successes - this.lastCounts.successes),
       failuresPerMinute: perMinute(counts.failures - this.lastCounts.failures),
       retriesPerMinute: perMinute(counts.retries - this.lastCounts.retries),
+      bytes: counts.bytes,
+      bytesPerMinute: perMinute(counts.bytes - this.lastCounts.bytes),
     };
 
     this.lastAtMs = atMs;

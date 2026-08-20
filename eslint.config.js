@@ -44,5 +44,27 @@ export default tseslint.config(
       globals: globals.browser,
     },
   },
+  {
+    // R9: the repo-wide `fixStyle: 'inline-type-imports'` above autofixes a
+    // type-only import to `import { type X } from '...'`. Under
+    // `verbatimModuleSyntax` that per-specifier form is not guaranteed to be
+    // fully erased — TypeScript can still emit a bare, side-effecting
+    // `import '...'` for it — whereas a whole-clause `import type { X }` is
+    // always erased completely. That distinction is silent everywhere except
+    // here: these are the files a Node-only module (e.g.
+    // `bandwidth-baselines.ts`'s `node:fs`/`node:path` imports, reached via
+    // `RunSummary`/`BaselineSummary`) could leak into the browser bundle
+    // through, and only `vite build` — never `tsc`, which this repo has no CI
+    // step for — catches it. This changes how autofix writes new type imports;
+    // it does not reject a manually written `import { type X }`, so Vite remains
+    // the enforcement gate for browser/Node import separation.
+    files: ['src/web/**/*.ts', 'src/app/types.ts'],
+    rules: {
+      '@typescript-eslint/consistent-type-imports': [
+        'error',
+        { prefer: 'type-imports', fixStyle: 'separate-type-imports' },
+      ],
+    },
+  },
   prettier,
 );

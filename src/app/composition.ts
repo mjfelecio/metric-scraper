@@ -1,6 +1,11 @@
 import { type AppConfig, resolveTargetCapacity } from '../config/env.js';
-import { ProxyAgent } from 'undici';
+import { Agent, ProxyAgent, type Dispatcher } from 'undici';
 import { type Logger } from '../core/logging/logger.js';
+import {
+  BandwidthAggregator,
+  nullBandwidthSink,
+  type BandwidthSink,
+} from '../core/metrics/bandwidth.js';
 import { MetricsCollector } from '../core/metrics/metrics-collector.js';
 import { type SnapshotSink } from '../core/output/snapshot-sink.js';
 import { RetryPolicy, type RetryPolicyOptions } from '../core/retry/retry-policy.js';
@@ -12,10 +17,11 @@ import {
 } from '../core/scraper/pool-ports.js';
 import { ScrapeRunner } from '../core/runner/scrape-runner.js';
 import { type UrlNormalizerRegistry } from '../core/url/normalizer-registry.js';
+import { createCountingInterceptor } from '../infrastructure/http/counting-dispatcher.js';
 import { FetchHttpClient } from '../infrastructure/http/fetch-http-client.js';
 import { RateLimitedHttpClient } from '../infrastructure/http/rate-limited-http-client.js';
 import { InMemoryProxyPool, NullProxyPool } from '../infrastructure/proxy/in-memory-proxy-pool.js';
-import { parseProxyList } from '../infrastructure/proxy/proxy-config.js';
+import { parseProxyList, proxyId } from '../infrastructure/proxy/proxy-config.js';
 import { ProxyScrapeSource } from '../infrastructure/proxy/proxyscrape-source.js';
 import { ProxySourceManager } from '../infrastructure/proxy/proxy-source-manager.js';
 import { HttpCanaryProxyProbe } from '../infrastructure/proxy/http-canary-proxy-probe.js';
@@ -45,6 +51,8 @@ export interface BuiltRunner {
   normalizers: UrlNormalizerRegistry;
   concurrency: number;
   targetRpm: number;
+  /** `null` when `METRICS_BANDWIDTH` is off; otherwise holds the run's wire-byte totals. */
+  bandwidth: BandwidthAggregator | null;
 }
 
 /**
@@ -85,9 +93,24 @@ export async function buildRunner(options: {
   const sessionPool = options.sessionPool ?? (await createSessionPool(config, logger));
   const metrics = new MetricsCollector();
 
+  // `dispatcherFactory` is consulted only when a request has a proxy assigned,
+  // so the direct path needs its own composed dispatcher passed explicitly —
+  // otherwise every proxy-less run reports zero bandwidth. Passed explicitly
+  // rather than via `setGlobalDispatcher`, which would silently capture
+  // traffic elsewhere in the process.
+  const bandwidth = config.metricsBandwidth ? new BandwidthAggregator() : null;
+  const bandwidthSink: BandwidthSink = bandwidth ?? nullBandwidthSink;
+
   const transport = new FetchHttpClient({
     defaultTimeoutMs: config.requestTimeoutMs,
-    dispatcherFactory: createProxyAgentFactory(config),
+    dispatcherFactory: createProxyAgentFactory(config, bandwidthSink),
+    ...(bandwidth === null
+      ? {}
+      : {
+          defaultDispatcher: new Agent().compose(
+            createCountingInterceptor({ sink: bandwidthSink, proxyId: null }),
+          ),
+        }),
   });
 
   // Egress limiting wraps the transport, so retries and the multi-hop calls a
@@ -110,6 +133,7 @@ export async function buildRunner(options: {
     sessionPool,
     sink,
     metrics,
+    bandwidth,
     retryPolicy: new RetryPolicy({ ...config.retry, ...options.overrides?.retry }),
     logger,
     config: {
@@ -129,6 +153,7 @@ export async function buildRunner(options: {
     normalizers: createDefaultUrlNormalizerRegistry(),
     concurrency,
     targetRpm,
+    bandwidth,
   };
 }
 
@@ -141,8 +166,11 @@ export async function buildRunner(options: {
  * never gets the chance to fire, and the dominant cost of scraping through a
  * partly-dead pool.
  */
-export function createProxyAgentFactory(config: AppConfig): (target: ProxyTarget) => unknown {
-  const proxyAgents = new Map<string, ProxyAgent>();
+export function createProxyAgentFactory(
+  config: AppConfig,
+  sink: BandwidthSink,
+): (target: ProxyTarget) => unknown {
+  const proxyAgents = new Map<string, ProxyAgent | Dispatcher>();
   return (target) => {
     if (target.protocol !== 'http' && target.protocol !== 'https') {
       throw new Error(
@@ -151,7 +179,14 @@ export function createProxyAgentFactory(config: AppConfig): (target: ProxyTarget
     }
     let agent = proxyAgents.get(target.url);
     if (agent === undefined) {
-      agent = new ProxyAgent({ uri: target.url, connectTimeout: config.proxy.connectTimeoutMs });
+      const base = new ProxyAgent({
+        uri: target.url,
+        connectTimeout: config.proxy.connectTimeoutMs,
+      });
+      // Composed per target so the proxy id is captured for attribution.
+      agent = config.metricsBandwidth
+        ? base.compose(createCountingInterceptor({ sink, proxyId: proxyId(target) }))
+        : base;
       proxyAgents.set(target.url, agent);
     }
     return agent;

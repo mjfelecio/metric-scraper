@@ -32,6 +32,7 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
         saturated: true,
       },
     },
+    bandwidth: null,
     queue: { max_depth: 5, wait_p50_ms: 10, wait_p95_ms: 20, wait_max_ms: 25 },
     waits: {
       admission_ms: 0,
@@ -203,6 +204,7 @@ describe('buildSessionSummary', () => {
         retries: 0,
         inFlight: 0,
         cycle: 1,
+        bytes: 0,
       });
     }
 
@@ -324,6 +326,8 @@ describe('buildSessionSummary proxies', () => {
               last_error_code: null,
               by_platform: { tiktok: { requests: 5, failures } },
               by_error_code: failures === 0 ? {} : { [errorCode]: failures },
+              request_bytes: null,
+              response_bytes: null,
             },
           ],
         },

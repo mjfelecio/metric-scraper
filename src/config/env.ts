@@ -48,6 +48,13 @@ export const AppConfigSchema = z.object({
 
   outputDir: z.string().min(1),
 
+  /**
+   * Counts wire bytes per request in an undici dispatcher interceptor and
+   * feeds the dashboard's Bandwidth panel. `false` disables the interceptor
+   * entirely rather than just hiding the panel.
+   */
+  metricsBandwidth: z.boolean(),
+
   proxy: z.object({
     /** Raw `PROXY_POOL` value; parsed by `parseProxyList`. Never logged. */
     pool: z.string(),
@@ -190,6 +197,8 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     },
 
     outputDir: str(env.OUTPUT_DIR) ?? './output',
+
+    metricsBandwidth: bool(env, 'METRICS_BANDWIDTH', true),
 
     proxy: {
       pool: str(env.PROXY_POOL) ?? '',

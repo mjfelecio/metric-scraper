@@ -26,6 +26,7 @@ function counts(overrides: Partial<TimelineCounts> = {}): TimelineCounts {
     retries: 0,
     inFlight: 0,
     cycle: 1,
+    bytes: 0,
     ...overrides,
   };
 }
@@ -155,5 +156,40 @@ describe('ThroughputTimeline', () => {
 
       expect(t.sustained(0).windowMs).toBe(0);
     });
+  });
+
+  it('reports bandwidth as a rate over the sample window', () => {
+    let clock = 1_000;
+    const t = new ThroughputTimeline({ now: () => clock, startedAtMs: 1_000 });
+
+    clock = 61_000; // exactly one minute later
+    const sample = t.record({
+      cycle: 1,
+      completed: 10,
+      successes: 10,
+      failures: 0,
+      retries: 0,
+      inFlight: 0,
+      bytes: 600_000,
+    });
+
+    expect(sample?.bytes).toBe(600_000);
+    // 600,000 bytes in 60s is 600,000 bytes/minute.
+    expect(sample?.bytesPerMinute).toBeCloseTo(600_000, 0);
+  });
+
+  it('measures bytes for the window, not the run, on the second sample', () => {
+    let clock = 1_000;
+    const t = new ThroughputTimeline({ now: () => clock, startedAtMs: 1_000 });
+    const base = { cycle: 1, successes: 0, failures: 0, retries: 0, inFlight: 0 };
+
+    clock = 61_000;
+    t.record({ ...base, completed: 10, bytes: 600_000 });
+    clock = 121_000;
+    const second = t.record({ ...base, completed: 20, bytes: 700_000 });
+
+    // Only the 100,000 bytes added during the second window count toward the rate.
+    expect(second?.bytesPerMinute).toBeCloseTo(100_000, 0);
+    expect(second?.bytes).toBe(700_000);
   });
 });

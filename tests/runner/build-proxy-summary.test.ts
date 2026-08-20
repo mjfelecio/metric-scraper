@@ -73,6 +73,8 @@ function usage(overrides: Partial<ProxyUsageView> = {}): ProxyUsageView {
     blocked: false,
     byPlatform: {},
     byErrorCode: {},
+    requestBytes: null,
+    responseBytes: null,
     ...overrides,
   };
 }
@@ -189,6 +191,21 @@ describe('buildProxySummary', () => {
     expect(summary.per_proxy[0]?.requests).toBe(0);
   });
 
+  it('carries measured request/response bytes onto the proxy row', () => {
+    const summary = buildProxySummary(stats([health()]), [
+      usage({ requests: 4, requestBytes: 400, responseBytes: 6_000 }),
+    ]);
+
+    expect(summary.per_proxy[0]).toMatchObject({ request_bytes: 400, response_bytes: 6_000 });
+  });
+
+  it('reports null bytes for a proxy the bandwidth aggregator never measured', () => {
+    const summary = buildProxySummary(stats([health()]), [usage({ requests: 4 })]);
+
+    expect(summary.per_proxy[0]?.request_bytes).toBeNull();
+    expect(summary.per_proxy[0]?.response_bytes).toBeNull();
+  });
+
   it('falls back to the pool counters when the metrics have nothing to say', () => {
     // The session summary uses this: the pool has counted all session long,
     // while a cycle's metrics start empty.
@@ -229,6 +246,8 @@ describe('mergeProxyUsage', () => {
       last_error_code: null,
       by_platform: { tiktok: { requests: 10, failures: 1 } },
       by_error_code: { http_error: 1 },
+      request_bytes: null,
+      response_bytes: null,
       ...overrides,
     };
   }
@@ -266,5 +285,39 @@ describe('mergeProxyUsage', () => {
   it('keeps proxies apart', () => {
     const merged = mergeProxyUsage([row(), row({ proxy_id: 'http://b:8000', label: 'p2' })]);
     expect(merged.map((entry) => entry.proxy_id)).toEqual(['http://a:8000', 'http://b:8000']);
+  });
+
+  it('sums measured bytes across cycles for the same proxy', () => {
+    const merged = mergeProxyUsage([
+      row({ request_bytes: 100, response_bytes: 900 }),
+      row({ request_bytes: 50, response_bytes: 450 }),
+      row({ request_bytes: 25, response_bytes: 225 }),
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ request_bytes: 175, response_bytes: 1_575 });
+  });
+
+  it('stays null when no contributing cycle ever measured bandwidth', () => {
+    // Both cycles have request_bytes/response_bytes: null — metrics were off,
+    // or this proxy simply never appeared in the bandwidth aggregator. The
+    // merge must not turn that into a measured zero.
+    const merged = mergeProxyUsage([row(), row()]);
+
+    expect(merged[0]?.request_bytes).toBeNull();
+    expect(merged[0]?.response_bytes).toBeNull();
+  });
+
+  it('treats an unmeasured cycle as contributing nothing once another cycle has real bytes', () => {
+    // One cycle measured (100/900), the other didn't (null/null) — e.g. the
+    // proxy carried no traffic that cycle, so the bandwidth aggregator has no
+    // row for it. The merged total must be the real cycle's bytes, not null
+    // and not a value inflated by treating "unmeasured" as some other number.
+    const merged = mergeProxyUsage([
+      row({ request_bytes: 100, response_bytes: 900 }),
+      row({ request_bytes: null, response_bytes: null }),
+    ]);
+
+    expect(merged[0]).toMatchObject({ request_bytes: 100, response_bytes: 900 });
   });
 });

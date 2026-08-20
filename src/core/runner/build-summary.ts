@@ -68,6 +68,17 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
       },
     },
 
+    bandwidth:
+      metrics.bandwidth === null
+        ? null
+        : {
+            requests: metrics.bandwidth.requests,
+            request_bytes: metrics.bandwidth.requestBytes,
+            response_bytes: metrics.bandwidth.responseBytes,
+            total_bytes: metrics.bandwidth.totalBytes,
+            bytes_per_request: metrics.bandwidth.bytesPerRequest,
+          },
+
     queue: {
       max_depth: metrics.queue.maxDepth,
       wait_p50_ms: metrics.queue.waitP50Ms,

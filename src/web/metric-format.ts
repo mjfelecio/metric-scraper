@@ -97,6 +97,41 @@ export function toPlotPoints(
   });
 }
 
+const BYTE_UNITS = [
+  { threshold: 1_000_000_000, suffix: 'GB' },
+  { threshold: 1_000_000, suffix: 'MB' },
+  { threshold: 1_000, suffix: 'KB' },
+] as const;
+
+/**
+ * Human-scaled byte figure, e.g. `1.4 MB`.
+ *
+ * Decimal (1000-based) units, not binary (1024-based) ones: proxies bill by
+ * the decimal byte, and this figure exists to predict that bill.
+ */
+export function formatBytes(value: number): string {
+  const magnitude = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+
+  for (let i = 0; i < BYTE_UNITS.length; i += 1) {
+    const unit = BYTE_UNITS[i];
+    if (unit === undefined || magnitude < unit.threshold) continue;
+
+    const rounded = Math.round((magnitude / unit.threshold) * 10) / 10;
+    // The unit was chosen from the *unrounded* magnitude, so rounding to one
+    // decimal can still carry the value across the next unit's boundary
+    // (999,999 -> naive "1000.0 KB"). Re-express with the unit one size up
+    // rather than ever displaying a mantissa of 1000.
+    const bigger = BYTE_UNITS[i - 1];
+    if (bigger !== undefined && rounded >= 1000) {
+      return `${sign}${(magnitude / bigger.threshold).toFixed(1)} ${bigger.suffix}`;
+    }
+    return `${sign}${rounded.toFixed(1)} ${unit.suffix}`;
+  }
+
+  return `${sign}${String(magnitude)} B`;
+}
+
 /** `Aug 19, 2026 16:42:18` — the tooltip's timestamp. */
 export function formatTimestamp(iso: string): string {
   const date = new Date(iso);

@@ -170,3 +170,46 @@ describe('FetchHttpClient — successful requests are unaffected', () => {
     expect(response.body).toBe('body');
   });
 });
+
+describe('FetchHttpClient default dispatcher', () => {
+  it('passes the default dispatcher on a request with no proxy', async () => {
+    const seen: unknown[] = [];
+    const marker = { id: 'default-dispatcher' };
+    const client = new FetchHttpClient({
+      defaultTimeoutMs: 1_000,
+      defaultDispatcher: marker,
+      fetchImpl: (_url, init) => {
+        seen.push((init as Record<string, unknown>).dispatcher);
+        return Promise.resolve(new Response('ok', { status: 200 }));
+      },
+    });
+
+    await client.request({ url: 'https://example.test/', method: 'GET' });
+
+    // Without this the direct path is unmeasured and the dashboard reads zero.
+    expect(seen[0]).toBe(marker);
+  });
+
+  it('prefers the proxy dispatcher when a proxy is assigned', async () => {
+    const seen: unknown[] = [];
+    const fallback = { id: 'default' };
+    const viaProxy = { id: 'proxy' };
+    const client = new FetchHttpClient({
+      defaultTimeoutMs: 1_000,
+      defaultDispatcher: fallback,
+      dispatcherFactory: () => viaProxy,
+      fetchImpl: (_url, init) => {
+        seen.push((init as Record<string, unknown>).dispatcher);
+        return Promise.resolve(new Response('ok', { status: 200 }));
+      },
+    });
+
+    await client.request({
+      url: 'https://example.test/',
+      method: 'GET',
+      proxy: { url: 'http://user:pass@127.0.0.1:8000', protocol: 'http' } as never,
+    });
+
+    expect(seen[0]).toBe(viaProxy);
+  });
+});

@@ -73,6 +73,10 @@ export const ProxyUsageSchema = z.object({
   by_platform: z.record(z.string(), ProxyPlatformUsageSchema),
   /** Failure reasons keyed by `ScrapeErrorCode`, including neutral outcomes. */
   by_error_code: z.record(z.string(), z.number().int().nonnegative()),
+  /** Wire bytes sent through this proxy. `null` when `METRICS_BANDWIDTH` is off or unmeasured. */
+  request_bytes: z.number().int().nonnegative().nullable(),
+  /** Wire bytes received through this proxy. `null` when `METRICS_BANDWIDTH` is off or unmeasured. */
+  response_bytes: z.number().int().nonnegative().nullable(),
 });
 export type ProxyUsage = z.infer<typeof ProxyUsageSchema>;
 
@@ -251,6 +255,23 @@ export const RunSummarySchema = z.object({
     target_rpm: z.number().nonnegative(),
     concurrency: ConcurrencySummarySchema,
   }),
+
+  /**
+   * `null` when METRICS_BANDWIDTH is off or nothing was measured.
+   * Includes direct traffic; on a non-proxied run, `proxies.per_proxy` is empty
+   * and therefore cannot be summed to reproduce this top-level total.
+   */
+  bandwidth: z
+    .object({
+      /** True count of measured wire round trips: the correct denominator for byte averages. */
+      requests: z.number().int().nonnegative(),
+      request_bytes: z.number().int().nonnegative(),
+      response_bytes: z.number().int().nonnegative(),
+      total_bytes: z.number().int().nonnegative(),
+      /** `null` rather than 0 when no request was measured. */
+      bytes_per_request: z.number().nonnegative().nullable(),
+    })
+    .nullable(),
 
   queue: QueueSummarySchema,
   waits: WaitSummarySchema,

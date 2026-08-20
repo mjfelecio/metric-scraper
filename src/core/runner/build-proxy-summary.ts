@@ -109,10 +109,27 @@ export function mergeProxyUsage(rows: readonly ProxyUsage[]): ProxyUsage[] {
       first_used_at: previous.first_used_at ?? row.first_used_at,
       by_platform: addPlatforms(previous.by_platform, row.by_platform),
       by_error_code: addCounts(previous.by_error_code, row.by_error_code),
+      request_bytes: addNullableBytes(previous.request_bytes, row.request_bytes),
+      response_bytes: addNullableBytes(previous.response_bytes, row.response_bytes),
     });
   }
 
   return [...merged.values()];
+}
+
+/**
+ * Sums two nullable byte counts, keeping the null-vs-0 distinction: `null`
+ * means "not measured this cycle", not "measured zero".
+ *
+ * A cycle that never measured bandwidth (metrics off, or this proxy carried
+ * no traffic that cycle) contributes nothing, not a zero that would otherwise
+ * be indistinguishable from a cycle that measured and truly saw no bytes.
+ * Only when every contributing cycle is null does the merged total stay
+ * null; as soon as one cycle has a real measurement, the total is real.
+ */
+function addNullableBytes(a: number | null, b: number | null): number | null {
+  if (a === null && b === null) return null;
+  return (a ?? 0) + (b ?? 0);
 }
 
 function toRow(health: ProxyHealth, usage: ProxyUsageView | undefined): ProxyUsage {
@@ -143,6 +160,10 @@ function toRow(health: ProxyHealth, usage: ProxyUsageView | undefined): ProxyUsa
     last_error_code: health.lastErrorCode,
     by_platform: { ...(usage?.byPlatform ?? {}) },
     by_error_code: { ...(usage?.byErrorCode ?? {}) },
+    // `null` rather than falling back to a pool counter: the pool has no notion
+    // of bytes, so there is no "since the session began" figure to fall back to.
+    request_bytes: usage?.requestBytes ?? null,
+    response_bytes: usage?.responseBytes ?? null,
   };
 }
 

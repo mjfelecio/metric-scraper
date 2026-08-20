@@ -2,6 +2,7 @@ import { type Platform } from '../models/platform.js';
 import { SCRAPE_STATUSES, type ScrapeStatus } from '../models/status.js';
 import { type ProxyOutcome } from '../scraper/lease-ports.js';
 
+import { type BandwidthView } from './bandwidth.js';
 import { max as maxOf, mean, percentileOfSorted } from './percentiles.js';
 
 export interface LatencyView {
@@ -49,6 +50,10 @@ export interface ProxyUsageView {
    * but they are exactly the evidence that the proxy is not the culprit.
    */
   byErrorCode: Record<string, number>;
+  /** Wire bytes sent through this proxy. `null` when unmeasured. */
+  requestBytes: number | null;
+  /** Wire bytes received through this proxy. `null` when unmeasured. */
+  responseBytes: number | null;
 }
 
 /** Everything an attempt says about the proxy beyond the outcome itself. */
@@ -58,7 +63,10 @@ export interface ProxyOutcomeContext {
   errorCode?: string | null | undefined;
 }
 
-interface ProxyUsageEntry extends Omit<ProxyUsageView, 'byPlatform' | 'byErrorCode'> {
+interface ProxyUsageEntry extends Omit<
+  ProxyUsageView,
+  'byPlatform' | 'byErrorCode' | 'requestBytes' | 'responseBytes'
+> {
   byPlatform: Map<Platform, ProxyPlatformUsage>;
   byErrorCode: Map<string, number>;
 }
@@ -126,6 +134,8 @@ export interface MetricsView {
   concurrency: ConcurrencyView;
   queue: QueueView;
   waits: WaitView;
+  /** `null` when measurement is off or nothing was observed. */
+  bandwidth: BandwidthView | null;
 }
 
 export interface RecordResultInput {
@@ -184,6 +194,7 @@ export class MetricsCollector {
   private httpRateLimitWaitMs = 0;
   private proxyAcquireMs = 0;
   private retryBackoffMs = 0;
+  private bandwidth: BandwidthView | null = null;
 
   constructor(options: { now?: (() => number) | undefined } = {}) {
     this.now = options.now ?? (() => Date.now());
@@ -222,6 +233,11 @@ export class MetricsCollector {
 
   recordRetryBackoff(ms: number): void {
     this.retryBackoffMs += Math.max(0, ms);
+  }
+
+  /** Replaces the last-known bandwidth snapshot with a fresh one from the aggregator. */
+  recordBandwidth(view: BandwidthView): void {
+    this.bandwidth = view;
   }
 
   start(): void {
@@ -327,15 +343,27 @@ export class MetricsCollector {
   view(): MetricsView {
     const elapsedMs = this.elapsedMs();
     const sorted = [...this.latencies].sort((a, b) => a - b);
+    // Keyed by proxy id, so each row can look up its own measured bytes below.
+    const bandwidthByProxy = new Map(
+      (this.bandwidth?.perProxy ?? [])
+        .filter((entry) => entry.proxyId !== null)
+        .map((entry) => [entry.proxyId as string, entry]),
+    );
+
     // Copied out rather than shared: a view is a snapshot, and handing out the
     // live maps would let a caller watch (or mutate) the collector's own state.
-    const proxyUsage: ProxyUsageView[] = [...this.proxyUsage.values()].map((usage) => ({
-      ...usage,
-      byPlatform: Object.fromEntries(
-        [...usage.byPlatform].map(([platform, counts]) => [platform, { ...counts }]),
-      ),
-      byErrorCode: Object.fromEntries(usage.byErrorCode),
-    }));
+    const proxyUsage: ProxyUsageView[] = [...this.proxyUsage.values()].map((usage) => {
+      const bandwidth = bandwidthByProxy.get(usage.proxyId);
+      return {
+        ...usage,
+        byPlatform: Object.fromEntries(
+          [...usage.byPlatform].map(([platform, counts]) => [platform, { ...counts }]),
+        ),
+        byErrorCode: Object.fromEntries(usage.byErrorCode),
+        requestBytes: bandwidth?.requestBytes ?? null,
+        responseBytes: bandwidth?.responseBytes ?? null,
+      };
+    });
     const sortedWaits = [...this.queueWaits].sort((a, b) => a - b);
     const configured = this.configuredConcurrency;
 
@@ -382,6 +410,7 @@ export class MetricsCollector {
         proxyAcquireMs: this.proxyAcquireMs,
         retryBackoffMs: this.retryBackoffMs,
       },
+      bandwidth: this.bandwidth,
     };
   }
 }

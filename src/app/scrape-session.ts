@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { type AppConfig } from '../config/env.js';
 import { type Logger, nullLogger } from '../core/logging/logger.js';
+import { type BandwidthAggregator } from '../core/metrics/bandwidth.js';
 import { ThroughputTimeline, type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { ScrapeError } from '../core/models/errors.js';
 import { type InputRecord } from '../core/models/input.js';
@@ -39,6 +40,16 @@ import {
 } from './composition.js';
 
 const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;
+
+/**
+ * The run id given to one cycle's own `ScrapeRunner.run` — distinct per
+ * cycle, so cycle N and cycle N+1 are never confused with one another (e.g.
+ * when excluding "this run" from its own bandwidth baseline — see R8 in
+ * `bandwidth-refresh.ts`, the other place this must be reproduced exactly).
+ */
+export function cycleRunId(sessionId: string, cycle: number): string {
+  return `${sessionId}-cycle-${String(cycle).padStart(3, '0')}`;
+}
 
 export interface SessionScheduleOptions {
   /** Time between cycle starts. `0` = back-to-back. */
@@ -101,6 +112,8 @@ export interface RunSessionOptions {
   onProgress?: ((progress: SessionProgress) => void) | undefined;
   onCycleStart?: ((context: CycleContext) => void) | undefined;
   onCycleEnd?: ((cycle: CycleSummary) => void) | undefined;
+  /** Test seam fired after one cycle's bytes are folded into the cumulative base. */
+  onBandwidthFold?: ((totalBytes: number) => void) | undefined;
   /**
    * Every finished URL, tagged with the cycle it belongs to.
    *
@@ -192,6 +205,18 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
   let retries = 0;
   const latenciesMs: number[] = [];
 
+  // `buildRunner` hands back a fresh `BandwidthAggregator` per cycle (proxy and
+  // session pools are reused across cycles, but the aggregator is not), so the
+  // running total has to be assembled by hand: `bandwidthBaseBytes` is what
+  // finished cycles already measured, and `currentBandwidth` is this cycle's
+  // live aggregator. `null` for the whole session when `METRICS_BANDWIDTH` is
+  // off, which keeps every live sample's `bytes` at the documented `0`
+  // sentinel rather than a measured-looking number.
+  let currentBandwidth: BandwidthAggregator | null = null;
+  let bandwidthBaseBytes = 0;
+  const liveBandwidthBytes = (): number =>
+    bandwidthBaseBytes + (currentBandwidth?.view().totalBytes ?? 0);
+
   const cycles: CycleSummary[] = [];
   let currentCycle = 0;
   let liveProgress: RunProgress | null = null;
@@ -255,6 +280,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
         retries,
         inFlight,
         cycle: currentCycle,
+        bytes: liveBandwidthBytes(),
       });
 
       if (sample !== null) {
@@ -322,8 +348,10 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
               })
             : await options.createRunner({ cycle: context.cycle, sink });
 
+        currentBandwidth = built.bandwidth;
+
         const result = await built.runner.run(records, {
-          runId: `${sessionId}-cycle-${String(context.cycle).padStart(3, '0')}`,
+          runId: cycleRunId(sessionId, context.cycle),
           platform: options.platform,
           counts: options.counts,
           summaryPath: cycleSummaryPath,
@@ -378,6 +406,15 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
       }
 
       liveProgress = null;
+      // The aggregator dies with the cycle's runner; fold what it saw into the
+      // session-cumulative base before dropping the reference, so a live
+      // sample taken between cycles keeps reading the run's true total instead
+      // of momentarily dropping back to whatever the next cycle has measured
+      // so far.
+      const finishedCycleBytes = currentBandwidth?.view().totalBytes ?? 0;
+      currentBandwidth = null;
+      bandwidthBaseBytes += finishedCycleBytes;
+      options.onBandwidthFold?.(bandwidthBaseBytes);
       const finishedAtMs = now();
       const cycleSummary: CycleSummary = {
         cycle: context.cycle,
@@ -417,6 +454,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     retries,
     inFlight: 0,
     cycle: 0,
+    bytes: liveBandwidthBytes(),
   });
   if (finalSample !== null) options.onSample?.(finalSample);
 

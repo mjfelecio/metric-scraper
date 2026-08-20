@@ -8,6 +8,7 @@ import { formatDuration } from '../core/schedule/duration.js';
 
 import {
   METRIC_LABELS,
+  formatBytes,
   formatClock,
   formatCompact,
   formatDelta,
@@ -83,6 +84,7 @@ export function render(state: AppState): void {
   renderThroughputChart(state);
   renderMetricSeriesChart(state);
   renderProxyPanel(state);
+  renderBandwidthPanel(state);
   renderResults(state);
   renderInputReport(state);
   renderSummary(state);
@@ -451,6 +453,162 @@ function proxyDetail(proxy: ProxyHealth, now: number): string {
     return `last ok ${formatDuration(Math.max(0, now - proxy.lastSuccessAt))} ago`;
   }
   return '';
+}
+
+// --- bandwidth ---------------------------------------------------------
+
+/**
+ * This run's wire bytes against the cross-run baseline, plus a small live
+ * sparkline.
+ *
+ * `state.bandwidth` is `null` whenever `METRICS_BANDWIDTH` is off or nothing
+ * has *ever* been measured — never a synthetic zero (see `BandwidthView`,
+ * `ThroughputSample.bytes`) — and the whole panel is gated on that.
+ *
+ * A second, narrower gate covers `current.bytesPerRequest === null`: this
+ * run measured nothing (zero wire requests), but the baseline and
+ * "average of all" sections below are cross-run history that does not depend
+ * on this run at all, so only the "this run" line and the sparkline are
+ * suppressed, not the whole panel (Minor #2) — a continuous session's prior
+ * history must stay visible even on a cycle that measured nothing.
+ *
+ * R5: a live sample's `bytes`/`bytesPerMinute` are fed `?? 0` when the run's
+ * bandwidth aggregator is absent, so a series drawn from an unmeasured run
+ * would otherwise render a flat, false "zero bandwidth" line. The sparkline
+ * is gated on `bytesPerRequest === null` exactly like the "this run" line,
+ * never on whether a figure happens to look like zero, so an unmeasured run
+ * still draws no line at all.
+ */
+function renderBandwidthPanel(state: AppState): void {
+  const panel = el('bandwidth-panel');
+  const data = state.bandwidth;
+
+  // Gated on `state.bandwidth` alone: the baseline and "average of all"
+  // sections below draw from cross-run history, not from this run, so a run
+  // that measured nothing must not hide history that is still informative
+  // (Minor #2). Only the "this run" line and the sparkline — both of which
+  // *do* depend on the current run — are gated further below, on
+  // `bytesPerRequest === null`.
+  if (data === null) {
+    panel.classList.add('hidden');
+    panel.innerHTML = '';
+    return;
+  }
+
+  panel.classList.remove('hidden');
+  const { current, baseline } = data;
+  // Bound to a local so the null check below narrows it for the rest of the
+  // function — TS does not carry a `data.current.bytesPerRequest !== null`
+  // guard across a destructure into `current.bytesPerRequest`.
+  const bytesPerRequest = current.bytesPerRequest;
+
+  // R5 (kept): a run that measured nothing this time (zero wire requests)
+  // must not claim a "this run" figure or draw the live sparkline — either
+  // would read as a real, if tiny, measurement rather than an absence of one.
+  const thisRunLine =
+    bytesPerRequest === null
+      ? ''
+      : `<div class="flex justify-between">
+          <dt>this run</dt>
+          <dd class="text-slate-200">
+            ${formatBytes(current.totalBytes)} over ${current.requests} reqs
+            &middot; ${formatBytes(bytesPerRequest)}/req
+          </dd>
+        </div>`;
+
+  const drift =
+    bytesPerRequest === null ||
+    baseline.baseline === null ||
+    baseline.baseline.avgBytesPerRequest === 0
+      ? null
+      : (bytesPerRequest / baseline.baseline.avgBytesPerRequest - 1) * 100;
+
+  panel.innerHTML = `
+    <h2 class="mb-1 text-sm font-semibold uppercase tracking-wider text-slate-400">Bandwidth</h2>
+    <dl class="mt-3 space-y-1.5 text-xs text-slate-400">
+      ${thisRunLine}
+      <div class="flex justify-between">
+        <dt>baseline</dt>
+        <dd class="text-slate-200">
+          ${
+            baseline.baseline === null
+              ? '<span class="text-slate-500">no previous run</span>'
+              : `${formatBytes(baseline.baseline.avgBytesPerRequest)}/req` +
+                (drift === null
+                  ? ''
+                  : ` <span class="${driftClass(drift)}">${formatDrift(drift)}</span>`)
+          }
+        </dd>
+      </div>
+    </dl>
+    ${bytesPerRequest === null ? '' : renderBandwidthSparkline(state)}
+    <h3 class="mt-4 border-t border-slate-800 pt-3 text-xs font-semibold text-slate-300">
+      average of all
+    </h3>
+    <dl class="mt-2 space-y-1.5 text-xs text-slate-400">
+      <div class="flex justify-between">
+        <dt>by request</dt>
+        <dd class="text-slate-200">
+          ${baseline.byRequest === null ? '—' : `${formatBytes(baseline.byRequest)}/req`}
+        </dd>
+      </div>
+      <div class="flex justify-between">
+        <dt>by run</dt>
+        <dd class="text-slate-200">
+          ${baseline.byRun === null ? '—' : `${formatBytes(baseline.byRun)}/req`}
+          <span class="text-slate-500">(${baseline.runs} runs)</span>
+        </dd>
+      </div>
+    </dl>
+  `;
+}
+
+function formatDrift(percent: number): string {
+  const arrow = percent >= 0 ? '▲' : '▼';
+  return `${arrow} ${percent >= 0 ? '+' : ''}${percent.toFixed(0)}%`;
+}
+
+function driftClass(percent: number): string {
+  return percent > 0 ? 'text-amber-400' : 'text-emerald-400';
+}
+
+/**
+ * Small live-bandwidth sparkline, on its own scale.
+ *
+ * Deliberately not a series on the shared-axis throughput chart: bytes per
+ * minute for a TikTok scrape (hundreds of KB/min) dwarfs request rate
+ * (tens/min), so sharing the axis would flatten one series or the other. Only
+ * ever called from inside `renderBandwidthPanel`, behind its own
+ * `bytesPerRequest === null` gate — so this can never draw a line for a run
+ * that measured nothing (R5).
+ */
+function renderBandwidthSparkline(state: AppState): string {
+  const samples = state.timeline;
+  if (samples.length < 2) return '';
+
+  const peak = samples.reduce((best, s) => Math.max(best, s.bytesPerMinute), 0);
+  if (peak <= 0) return '';
+
+  const width = 260;
+  const height = 40;
+  const firstMs = samples[0]?.tMs ?? 0;
+  const lastMs = samples[samples.length - 1]?.tMs ?? firstMs;
+  const spanMs = Math.max(1, lastMs - firstMs);
+
+  const points = samples.map(
+    (s) =>
+      [((s.tMs - firstMs) / spanMs) * width, height - (s.bytesPerMinute / peak) * height] as const,
+  );
+
+  return `
+    <div class="mt-3">
+      <div class="mb-1 text-[10px] uppercase tracking-wider text-slate-500">live bandwidth</div>
+      <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}"
+           role="img" aria-label="Bandwidth over time">
+        <path d="${pathFrom(points)}" fill="none" stroke="currentColor" class="text-violet-400"
+              stroke-width="1.5" stroke-linejoin="round" />
+      </svg>
+    </div>`;
 }
 
 function renderResults(state: AppState): void {
