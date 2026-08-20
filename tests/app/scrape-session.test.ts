@@ -86,7 +86,12 @@ function runnerFactory(options: {
         metrics,
         retryPolicy: new RetryPolicy({ maxAttempts: options.maxAttempts ?? 1, jitter: false }),
         logger: nullLogger,
-        config: { concurrency: 4, targetRpm: 0, maxQueueSize: 0, requestTimeoutMs: 5_000 },
+        config: {
+          concurrency: 4,
+          targetRpm: 0,
+          maxQueueSize: 0,
+          attemptTimeoutMsByPlatform: { tiktok: 5_000, instagram: 20_000 },
+        },
         sleep: () => Promise.resolve(),
       }),
       metrics,

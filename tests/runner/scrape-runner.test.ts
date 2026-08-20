@@ -29,10 +29,14 @@ const unusedHttp: HttpClient = {
 };
 
 function records(...urls: string[]): InputRecord[] {
+  return recordsFor('tiktok', ...urls);
+}
+
+function recordsFor(platform: Platform, ...urls: string[]): InputRecord[] {
   return urls.map((url, index) => ({
     raw_url: url,
     url,
-    platform: 'tiktok',
+    platform,
     position: index + 1,
   }));
 }
@@ -59,6 +63,8 @@ function buildRunner(options: {
   maxQueueSize?: number;
   proxyPool?: ProxyPool;
   sink?: MemorySnapshotSink;
+  attemptTimeoutMsByPlatform?: Readonly<Record<Platform, number>>;
+  createTimeoutSignal?: (delayMs: number) => AbortSignal;
 }) {
   const sink = options.sink ?? new MemorySnapshotSink();
   const metrics = new MetricsCollector();
@@ -79,10 +85,16 @@ function buildRunner(options: {
       targetRpm: options.targetRpm ?? 0,
       ...(options.burst === undefined ? {} : { burst: options.burst }),
       maxQueueSize: options.maxQueueSize ?? 0,
-      requestTimeoutMs: 5_000,
+      attemptTimeoutMsByPlatform: options.attemptTimeoutMsByPlatform ?? {
+        tiktok: 5_000,
+        instagram: 20_000,
+      },
     },
     // No real waiting in tests; the backoff schedule is covered by the retry tests.
     sleep: () => Promise.resolve(),
+    ...(options.createTimeoutSignal === undefined
+      ? {}
+      : { createTimeoutSignal: options.createTimeoutSignal }),
   });
 
   return { runner, sink, metrics };
@@ -255,6 +267,131 @@ describe('ScrapeRunner', () => {
     });
 
     expect(result.summary.input).toEqual({ candidates: 5, accepted: 1, rejected: 4 });
+  });
+
+  it.each([
+    ['tiktok', 15_000],
+    ['instagram', 60_000],
+  ] as const)('selects the %s attempt timeout', async (platform, expectedTimeoutMs) => {
+    const selectedTimeouts: number[] = [];
+    const scraper: Scraper = {
+      platform,
+      scrape: () => Promise.resolve(scrapeSuccess(EMPTY_VIDEO_DATA)),
+    };
+    const { runner } = buildRunner({
+      scraper,
+      attemptTimeoutMsByPlatform: { tiktok: 15_000, instagram: 60_000 },
+      createTimeoutSignal: (delayMs) => {
+        selectedTimeouts.push(delayMs);
+        return new AbortController().signal;
+      },
+    });
+
+    await runner.run(recordsFor(platform, `https://${platform}/1`));
+
+    expect(selectedTimeouts).toEqual([expectedTimeoutMs]);
+  });
+
+  it('allows a multi-request Instagram workflow to use one longer attempt budget', async () => {
+    const selectedTimeouts: number[] = [];
+    let completedRequests = 0;
+    const scraper: Scraper = {
+      platform: 'instagram',
+      async scrape(_url, context) {
+        for (let request = 0; request < 8; request += 1) {
+          expect(context.signal.aborted).toBe(false);
+          await Promise.resolve();
+          completedRequests += 1;
+        }
+        return scrapeSuccess(EMPTY_VIDEO_DATA);
+      },
+    };
+    const { runner, sink } = buildRunner({
+      scraper,
+      attemptTimeoutMsByPlatform: { tiktok: 15_000, instagram: 60_000 },
+      createTimeoutSignal: (delayMs) => {
+        selectedTimeouts.push(delayMs);
+        return new AbortController().signal;
+      },
+    });
+
+    await runner.run(recordsFor('instagram', 'https://instagram/1'));
+
+    expect(selectedTimeouts).toEqual([60_000]);
+    expect(completedRequests).toBe(8);
+    expect(sink.snapshots[0]?.status).toBe('ok');
+  });
+
+  it('stops an attempt when its platform deadline aborts', async () => {
+    const deadline = new AbortController();
+    const scraper: Scraper = {
+      platform: 'instagram',
+      scrape: (_url, context) =>
+        new Promise((resolve) => {
+          context.signal.addEventListener(
+            'abort',
+            () => {
+              resolve(
+                scrapeFailure('error', {
+                  code: 'timeout',
+                  message: 'attempt deadline reached',
+                  retryable: true,
+                }),
+              );
+            },
+            { once: true },
+          );
+          queueMicrotask(() => deadline.abort());
+        }),
+    };
+    const { runner, sink } = buildRunner({
+      scraper,
+      maxAttempts: 1,
+      createTimeoutSignal: () => deadline.signal,
+    });
+
+    const result = await runner.run(recordsFor('instagram', 'https://instagram/1'));
+
+    expect(sink.snapshots[0]?.error).toContain('timeout: attempt deadline reached');
+    expect(result.summary.retries.exhausted_requests).toBe(1);
+  });
+
+  it('preserves prompt operator cancellation alongside the attempt deadline', async () => {
+    const runController = new AbortController();
+    let attempts = 0;
+    const scraper: Scraper = {
+      platform: 'instagram',
+      scrape: (_url, context) =>
+        new Promise((resolve) => {
+          attempts += 1;
+          context.signal.addEventListener(
+            'abort',
+            () => {
+              resolve(
+                scrapeFailure('error', {
+                  code: 'cancelled',
+                  message: 'run cancelled',
+                  retryable: false,
+                }),
+              );
+            },
+            { once: true },
+          );
+          queueMicrotask(() => runController.abort());
+        }),
+    };
+    const { runner, sink } = buildRunner({
+      scraper,
+      createTimeoutSignal: () => new AbortController().signal,
+    });
+
+    await runner.run(recordsFor('instagram', 'https://instagram/1'), {
+      signal: runController.signal,
+    });
+
+    expect(attempts).toBe(1);
+    expect(sink.snapshots).toHaveLength(1);
+    expect(sink.snapshots[0]?.error).toContain('cancelled: run cancelled');
   });
 });
 
