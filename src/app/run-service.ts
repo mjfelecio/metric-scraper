@@ -287,7 +287,7 @@ export class RunService {
       // The metric time series is a single-video view by construction: with two
       // URLs in the batch there is no one series to plot. Gating here means a
       // multi-URL session never accumulates or ships a byte of it.
-      const trackMetrics = parsed.records.length === 1;
+      let trackMetrics = parsed.records.length === 1;
       // Held between the result landing and its cycle ending, so the point is
       // emitted by cycle completion rather than by the result itself.
       let pendingSnapshot: MetricSnapshot | null = null;
@@ -316,6 +316,7 @@ export class RunService {
           state.timelineCursor += 1;
         },
         onInputPrepared: (prepared) => {
+          trackMetrics = prepared.items.length === 1;
           state.input = {
             candidates: parsed.totalCandidates,
             accepted: prepared.items.length,

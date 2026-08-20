@@ -223,6 +223,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
 
   const cycles: CycleSummary[] = [];
   let currentCycle = 0;
+  let currentTotal = records.length;
   let liveProgress: RunProgress | null = null;
   // Read through a function: the only writer is a callback, so narrowing the
   // variable inline would let the compiler assume it is still null.
@@ -244,7 +245,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     cyclesCompleted: cycles.length,
     plannedCycles: schedule.maxCycles,
     processed: live()?.processed ?? 0,
-    total: live()?.total ?? records.length,
+    total: live()?.total ?? currentTotal,
     completed,
     successes,
     failures,
@@ -369,6 +370,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
                 ...(options.signal === undefined ? {} : { signal: options.signal }),
               });
         options.onInputPrepared?.(prepared);
+        currentTotal = prepared.items.length;
 
         const result = await built.runner.run(prepared.items, {
           runId: cycleRunId(sessionId, context.cycle),
