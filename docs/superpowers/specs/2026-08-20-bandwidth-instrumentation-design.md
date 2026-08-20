@@ -81,7 +81,9 @@ New:
   lengths for the body.
 - `src/core/metrics/bandwidth.ts` — a `BandwidthSink` port
   (`record({ proxyId, host, requestBytes, responseBytes })`) plus aggregation:
-  totals, per proxy, per host, bytes per request.
+  totals, per proxy, and bytes per request. The dispatcher captures `host`, but
+  no current reader needs a per-host breakdown, so the aggregator does not
+  retain one; adding that view is follow-up work if a real consumer appears.
 
 > **Implementation note.** Undici v7 renamed the handler callbacks
 > (`onResponseStart` / `onResponseData`, not `onHeaders` / `onData`) and the
@@ -125,6 +127,10 @@ Extended, not replaced:
 
 Absent measurements are `null`, never `0`. A zero would assert that a run used
 no bandwidth, which is a different claim from not having measured it.
+
+Top-level totals also include direct, non-proxied requests. Because
+`proxies.per_proxy` describes configured proxies only, summing those rows
+legitimately yields zero rather than `bandwidth.total_bytes` for a direct run.
 
 ### 3.5 Baseline store
 
@@ -202,6 +208,11 @@ All deterministic, no network, no proxy.
 
 ## 6. Known limits
 
+- This is **scraper-request bandwidth**, excluding proxy discovery and
+  validation. With `PROXY_SOURCE_URL` enabled, the canary probe writes CONNECT,
+  TLS, and HTTP directly through sockets and never reaches the bandwidth sink;
+  those validation attempts consume unreported traffic and can number in the
+  hundreds for a large candidate list.
 - TLS handshake and framing bytes are billed by a proxy but are invisible to a
   dispatcher-level counter. Expected to be small and amortised across keep-alive
   connections, but this makes the figure a slight undercount — stated rather than

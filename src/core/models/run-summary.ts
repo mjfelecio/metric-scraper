@@ -256,7 +256,11 @@ export const RunSummarySchema = z.object({
     concurrency: ConcurrencySummarySchema,
   }),
 
-  /** `null` when METRICS_BANDWIDTH is off or nothing was measured. */
+  /**
+   * `null` when METRICS_BANDWIDTH is off or nothing was measured.
+   * Includes direct traffic; on a non-proxied run, `proxies.per_proxy` is empty
+   * and therefore cannot be summed to reproduce this top-level total.
+   */
   bandwidth: z
     .object({
       /** True count of measured wire round trips: the correct denominator for byte averages. */

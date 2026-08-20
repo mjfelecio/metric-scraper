@@ -55,8 +55,9 @@ export default tseslint.config(
     // `bandwidth-baselines.ts`'s `node:fs`/`node:path` imports, reached via
     // `RunSummary`/`BaselineSummary`) could leak into the browser bundle
     // through, and only `vite build` — never `tsc`, which this repo has no CI
-    // step for — catches it. Autofix must never regenerate the broken form
-    // here, so it always writes the whole-clause style instead.
+    // step for — catches it. This changes how autofix writes new type imports;
+    // it does not reject a manually written `import { type X }`, so Vite remains
+    // the enforcement gate for browser/Node import separation.
     files: ['src/web/**/*.ts', 'src/app/types.ts'],
     rules: {
       '@typescript-eslint/consistent-type-imports': [
