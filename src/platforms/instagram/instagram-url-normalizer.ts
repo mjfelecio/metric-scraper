@@ -5,15 +5,17 @@ import { type UrlNormalizationResult, type UrlNormalizer } from '../../core/url/
 import { shortcodeToMediaId } from './instagram-shortcode.js';
 
 const INSTAGRAM_DOMAIN = 'instagram.com';
+const LEGACY_INSTAGRAM_DOMAIN = 'instagr.am';
 
 const POST_PATH = /^\/(reel|reels|p|tv)\/([A-Za-z0-9_-]+)\/?$/;
+const SHARE_PATH = /^\/share\/(?:(?:reel|p)\/)?([A-Za-z0-9_-]+)\/?$/;
 
 /** Canonicalizes supported Instagram Reel and video-post URLs. */
 export class InstagramUrlNormalizer implements UrlNormalizer {
   readonly platform: Platform = 'instagram';
 
   matches(url: URL): boolean {
-    return hostMatches(url, INSTAGRAM_DOMAIN);
+    return hostMatches(url, INSTAGRAM_DOMAIN) || hostMatches(url, LEGACY_INSTAGRAM_DOMAIN);
   }
 
   normalize(raw: string): UrlNormalizationResult {
@@ -29,6 +31,30 @@ export class InstagramUrlNormalizer implements UrlNormalizer {
         ok: false,
         code: 'unsupported_platform',
         message: `host "${generic.url.hostname}" is not an Instagram URL`,
+      };
+    }
+
+    const legacyShortLink = hostMatches(generic.url, LEGACY_INSTAGRAM_DOMAIN);
+    const shareLink =
+      hostMatches(generic.url, INSTAGRAM_DOMAIN) && SHARE_PATH.test(generic.url.pathname);
+
+    if (legacyShortLink || shareLink) {
+      const shortUrl = canonicalShortUrl(generic.url, legacyShortLink);
+      if (shortUrl === null) {
+        return {
+          ok: false,
+          code: 'invalid_url',
+          message:
+            'Instagram short links must use /share/{token}, /share/reel/{token}, /share/p/{token}, or an instagr.am post path',
+        };
+      }
+      return {
+        ok: true,
+        url: shortUrl,
+        platform: this.platform,
+        videoId: null,
+        requiresResolution: true,
+        changed: generic.changed || shortUrl !== generic.url.toString(),
       };
     }
 
@@ -59,6 +85,24 @@ export class InstagramUrlNormalizer implements UrlNormalizer {
       changed: generic.changed || canonical !== generic.url.toString(),
     };
   }
+}
+
+function canonicalShortUrl(url: URL, legacy: boolean): string | null {
+  if (legacy) {
+    const match = POST_PATH.exec(url.pathname);
+    const kind = match?.[1];
+    const shortcode = match?.[2];
+    if (kind === undefined || shortcode === undefined) return null;
+    return `https://instagr.am/${kind}/${shortcode}/`;
+  }
+
+  const match = SHARE_PATH.exec(url.pathname);
+  if (match === null) return null;
+  const segments = url.pathname.split('/').filter(Boolean);
+  const token = segments.at(-1);
+  if (token === undefined) return null;
+  const kind = segments.length === 3 ? `/${segments[1]}` : '';
+  return `https://www.instagram.com/share${kind}/${token}/`;
 }
 
 export interface ParsedInstagramUrl {

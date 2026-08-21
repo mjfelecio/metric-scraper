@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { normalizeUrlGeneric } from '../../src/core/url/generic.js';
-import { createDefaultUrlNormalizerRegistry } from '../../src/platforms/index.js';
+import {
+  createDefaultUrlNormalizerRegistry,
+  createDefaultUrlResolverRegistry,
+} from '../../src/platforms/index.js';
 import { InstagramUrlNormalizer } from '../../src/platforms/instagram/instagram-url-normalizer.js';
 import { TikTokUrlNormalizer } from '../../src/platforms/tiktok/tiktok-url-normalizer.js';
 
@@ -104,6 +107,12 @@ describe('TikTokUrlNormalizer', () => {
 describe('InstagramUrlNormalizer', () => {
   const normalizer = new InstagramUrlNormalizer();
 
+  it('claims Instagram and the legacy instagr.am short domain', () => {
+    expect(normalizer.matches(new URL('https://www.instagram.com/reel/ABC123/'))).toBe(true);
+    expect(normalizer.matches(new URL('https://instagr.am/p/ABC123/'))).toBe(true);
+    expect(normalizer.matches(new URL('https://notinstagram.com/reel/ABC123/'))).toBe(false);
+  });
+
   it('canonicalizes supported Instagram video URL forms', () => {
     const reel = normalizer.normalize('https://www.instagram.com/reel/ABC123/?utm_source=share');
     const post = normalizer.normalize('https://www.instagram.com/p/ABC123/');
@@ -121,10 +130,43 @@ describe('InstagramUrlNormalizer', () => {
     expect(result.ok && result.videoId).toMatch(/^\d+$/);
   });
 
+  it('flags every Instagram post short-link family for resolution', () => {
+    const links = [
+      'https://www.instagram.com/share/reel/SHARE123/',
+      'https://instagram.com/share/p/SHARE123?igsh=tracking',
+      'https://m.instagram.com/share/SHARE123/',
+      'https://instagr.am/p/ABC123/',
+      'https://www.instagr.am/reel/ABC123/',
+      'https://instagr.am/reels/ABC123/',
+      'https://instagr.am/tv/ABC123/',
+    ];
+
+    for (const link of links) {
+      const result = normalizer.normalize(link);
+      expect(result.ok && result.requiresResolution, link).toBe(true);
+      expect(result.ok && result.videoId, link).toBeNull();
+    }
+  });
+
+  it('canonicalizes Instagram short links before network resolution', () => {
+    const share = normalizer.normalize(
+      'http://m.instagram.com/share/reel/SHARE123/?igsh=tracking#comments',
+    );
+    const legacy = normalizer.normalize('http://www.instagr.am/p/ABC123/?utm_source=share');
+
+    expect(share.ok && share.url).toBe('https://www.instagram.com/share/reel/SHARE123/');
+    expect(legacy.ok && legacy.url).toBe('https://instagr.am/p/ABC123/');
+  });
+
   it('rejects profiles, explore pages and malformed post paths', () => {
     expect(normalizer.normalize('https://www.instagram.com/creator/').ok).toBe(false);
     expect(normalizer.normalize('https://www.instagram.com/explore/').ok).toBe(false);
     expect(normalizer.normalize('https://www.instagram.com/reel/').ok).toBe(false);
+    expect(normalizer.normalize('https://www.instagram.com/share/stories/creator/123/').ok).toBe(
+      false,
+    );
+    expect(normalizer.normalize('https://instagr.am/creator/').ok).toBe(false);
+    expect(normalizer.normalize('https://ig.me/p/ABC123/').ok).toBe(false);
   });
 });
 
@@ -134,6 +176,8 @@ describe('UrlNormalizerRegistry', () => {
   it('routes by host', () => {
     expect(registry.detect('https://www.tiktok.com/@a/video/1')).toBe('tiktok');
     expect(registry.detect('https://www.instagram.com/reel/A/')).toBe('instagram');
+    expect(registry.detect('https://www.instagram.com/share/reel/SHORT/')).toBe('instagram');
+    expect(registry.detect('https://instagr.am/p/A/')).toBe('instagram');
     expect(registry.detect('https://example.com/video/1')).toBeNull();
   });
 
@@ -146,5 +190,14 @@ describe('UrlNormalizerRegistry', () => {
 
     expect(invalid.ok).toBe(false);
     if (!invalid.ok) expect(invalid.code).toBe('invalid_url');
+  });
+});
+
+describe('default URL resolvers', () => {
+  it('registers redirect resolution for both platforms', () => {
+    const registry = createDefaultUrlResolverRegistry();
+
+    expect(registry.get('tiktok')?.platform).toBe('tiktok');
+    expect(registry.get('instagram')?.platform).toBe('instagram');
   });
 });

@@ -136,5 +136,15 @@ describe('normalization during parsing', () => {
     const parsed = parse('  WWW.TIKTOK.COM/@a/video/1?utm_source=share  ');
     expect(parsed.records[0]?.raw_url).toBe('WWW.TIKTOK.COM/@a/video/1?utm_source=share');
     expect(parsed.records[0]?.url).toBe('https://www.tiktok.com/@a/video/1');
+    expect(parsed.records[0]?.requires_resolution).toBe(false);
+  });
+
+  it('preserves the need for network resolution on TikTok short links', () => {
+    const parsed = parse('https://vm.tiktok.com/ABC123/?utm_source=share');
+    expect(parsed.records[0]).toMatchObject({
+      url: 'https://vm.tiktok.com/ABC123/',
+      platform: 'tiktok',
+      requires_resolution: true,
+    });
   });
 });

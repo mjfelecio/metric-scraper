@@ -49,7 +49,10 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
   const logger = createLogger({ level: options.logLevel ?? config.logLevel });
 
   const parsed = await gatherInput(options);
-  reportInputIssues(parsed, options.strict ?? false);
+  const strict = options.strict ?? false;
+  if (parsed.issues.some(isFatalInputIssue) || (strict && parsed.issues.length > 0)) {
+    reportInputIssues(parsed, strict);
+  }
 
   const startedAt = new Date();
   const paths = resolveRunPaths({
@@ -71,60 +74,80 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
   );
   await proxySupply.source?.start();
 
-  const built = await buildRunner({
-    config,
-    logger,
-    sink,
-    overrides: options.overrides,
-    proxyProvider: proxySupply.provider,
-  });
+  try {
+    const built = await buildRunner({
+      config,
+      logger,
+      sink,
+      overrides: options.overrides,
+      proxyProvider: proxySupply.provider,
+    });
+    const prepared =
+      built.inputPreparer === undefined
+        ? {
+            items: parsed.records.map((record) => ({
+              kind: 'ready' as const,
+              record,
+              resolution: null,
+            })),
+            issues: [],
+          }
+        : await built.inputPreparer.prepare(parsed.records);
+    const preparedParsed: ParsedInput = {
+      ...parsed,
+      records: prepared.items.map((item) => item.record),
+      issues: [...parsed.issues, ...prepared.issues],
+    };
+    reportInputIssues(preparedParsed, strict);
 
-  const progress = new ProgressReporter({
-    enabled: options.progress !== false && options.json !== true,
-  });
+    const progress = new ProgressReporter({
+      enabled: options.progress !== false && options.json !== true,
+    });
 
-  process.stderr.write(
-    `\nScraping ${parsed.records.length} URL(s) ` +
-      `(platform: ${options.platform ?? 'auto'}, concurrency: ${built.concurrency}, ` +
-      `target: ${built.targetRpm} req/min)\n`,
-  );
+    process.stderr.write(
+      `\nScraping ${prepared.items.length} URL(s) ` +
+        `(platform: ${options.platform ?? 'auto'}, concurrency: ${built.concurrency}, ` +
+        `target: ${built.targetRpm} req/min)\n`,
+    );
 
-  const result = await built.runner.run(parsed.records, {
-    platform: options.platform,
-    summaryPath: paths.summary,
-    counts: {
-      candidates: parsed.totalCandidates,
-      accepted: parsed.records.length,
-      rejected: parsed.issues.length,
-    },
-    onProgress: (update) => progress.update(update),
-  });
-  progress.done();
-  proxySupply.source?.stop();
-  await proxyEvents.close();
+    const result = await built.runner.run(prepared.items, {
+      platform: options.platform,
+      summaryPath: paths.summary,
+      counts: {
+        candidates: parsed.totalCandidates,
+        accepted: prepared.items.length,
+        rejected: preparedParsed.issues.length,
+      },
+      onProgress: (update) => progress.update(update),
+    });
+    progress.done();
 
-  await writeRunSummary(paths.summary, result.summary);
-  // R8: the CLI path completes a `RunSummary` exactly like the web
-  // dashboard's one-shot run, so it earns a line in the same cross-run
-  // baseline history — design doc §3.5, "one line per completed run".
-  // `appendBandwidthBaseline` swallows its own errors (logging instead), so
-  // this can never turn a bad baseline write into a failed batch.
-  await appendBandwidthBaseline(result.summary, {
-    outputDir: options.outputDir ?? config.outputDir,
-    logger,
-  });
+    await writeRunSummary(paths.summary, result.summary);
+    // R8: the CLI path completes a `RunSummary` exactly like the web
+    // dashboard's one-shot run, so it earns a line in the same cross-run
+    // baseline history — design doc §3.5, "one line per completed run".
+    // `appendBandwidthBaseline` swallows its own errors (logging instead), so
+    // this can never turn a bad baseline write into a failed batch.
+    await appendBandwidthBaseline(result.summary, {
+      outputDir: options.outputDir ?? config.outputDir,
+      logger,
+    });
 
-  if (options.json === true) {
-    process.stdout.write(`${JSON.stringify(result.summary, null, 2)}\n`);
-  } else {
-    process.stdout.write(formatRunSummary(result.summary));
+    if (options.json === true) {
+      process.stdout.write(`${JSON.stringify(result.summary, null, 2)}\n`);
+    } else {
+      process.stdout.write(formatRunSummary(result.summary));
+    }
+
+    if (result.fatalError !== null) {
+      throw result.fatalError;
+    }
+
+    return { summary: result.summary, parsed: preparedParsed };
+  } finally {
+    proxySupply.source?.stop();
+    await proxyEvents.close();
   }
-
-  if (result.fatalError !== null) {
-    throw result.fatalError;
-  }
-
-  return { summary: result.summary, parsed };
 }
 
 /** Shared with `execute-session.ts` so watch mode parses input identically. */
