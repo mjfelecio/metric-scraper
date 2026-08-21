@@ -37,6 +37,8 @@ export interface BuildSessionSummaryInput {
   };
   concurrency: number;
   targetRpm: number;
+  /** Egress ceiling in force for this session's platform, rpm. `null` if none. */
+  httpRpmCeiling?: number | null | undefined;
   stalled: boolean;
   stallEpisodes: readonly StallEpisode[];
   /**
@@ -158,6 +160,7 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
   let queueWaitMaxMs: number | null = null;
   let admissionTotalMs = 0;
   let httpRateLimitTotalMs = 0;
+  let platformHttpRequestsTotal = 0;
   let proxyAcquireTotalMs = 0;
   let retryBackoffTotalMs = 0;
   let minimumProxyCapacity: number | null = null;
@@ -190,6 +193,7 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
     }
     admissionTotalMs += summary.waits.admission_total_ms;
     httpRateLimitTotalMs += summary.waits.http_rate_limit_total_ms;
+    platformHttpRequestsTotal += summary.totals.platform_http_requests;
     proxyAcquireTotalMs += summary.waits.proxy_acquire_total_ms;
     retryBackoffTotalMs += summary.waits.retry_backoff_total_ms;
     const cycleMinimum = summary.throughput.concurrency.minimum_proxy_capacity;
@@ -229,6 +233,10 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
     queueDemand: queueMaxDepth,
     proxyMode: proxyStats.mode,
     proxyCapacity: minimumProxyCapacity ?? proxyStats.capacity,
+    httpRpmCeiling: input.httpRpmCeiling,
+    platformHttpRequests: platformHttpRequestsTotal,
+    completedJobs: requests,
+    httpRateLimitWaitMs: httpRateLimitTotalMs,
   });
   for (const finding of diagnostic.findings) cycleFindingCodes.add(finding.code);
   diagnostic.findings = diagnostic.findings.filter(

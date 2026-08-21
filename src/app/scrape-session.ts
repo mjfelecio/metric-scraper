@@ -36,6 +36,7 @@ import {
 import {
   buildRunner,
   createManagedHttpTransport,
+  effectiveHttpRpmPerHost,
   createProxySupply,
   createSessionPool,
   type BuiltRunner,
@@ -584,6 +585,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     },
     concurrency,
     targetRpm,
+    httpRpmCeiling: sessionHttpRpmCeiling(config, options),
     stalled,
     stallEpisodes,
     proxyStats: proxyProvider.getStats(),
@@ -620,4 +622,18 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
   );
 
   return sessionSummary;
+}
+
+/**
+ * The egress ceiling that governed this session, or `null` when nothing single
+ * governed it.
+ *
+ * A mixed-platform session has two ceilings and no meaningful single one, and a
+ * platform with the ceiling disabled has none, so both report `null` rather
+ * than naming a limit the session did not run under.
+ */
+function sessionHttpRpmCeiling(config: AppConfig, options: RunSessionOptions): number | null {
+  if (options.platform === null) return null;
+  const rpm = effectiveHttpRpmPerHost(config, options.overrides)[options.platform];
+  return rpm > 0 ? rpm : null;
 }

@@ -15,6 +15,8 @@ export function formatConcurrencyFinding(
       return `Admission pacing bounds concurrency: ${values}, admission ceiling ${ceilings.admission}.`;
     case 'proxy_capacity_limited':
       return `Proxy capacity bounds concurrency: ${values}, known capacity ${ceilings.proxy ?? 'unknown'}.`;
+    case 'http_rate_limited':
+      return `HTTP egress ceiling bounds concurrency: ${values}, egress ceiling ${ceilings.http ?? 'unknown'}; jobs above it queue on the rate limiter rather than run. Raise the platform's *_HTTP_RPM_PER_HOST or lower concurrency.`;
     case 'serialized':
       return `Concurrency underused despite queued demand: ${values}, ${concurrency.max_observed} observed${concurrency.effective < 1.5 ? '; this run was effectively sequential' : ''}.`;
     case 'proxy_capacity_unknown':

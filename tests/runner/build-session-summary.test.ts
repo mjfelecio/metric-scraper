@@ -33,7 +33,7 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
         utilization: 1,
         saturated: true,
         achievable: 5,
-        ceilings: { configured: 5, input: 10, admission: 9, proxy: null },
+        ceilings: { configured: 5, input: 10, admission: 9, proxy: null, http: null },
         minimum_proxy_capacity: null,
         findings: [],
       },

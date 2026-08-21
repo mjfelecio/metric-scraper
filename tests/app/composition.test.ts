@@ -39,6 +39,7 @@ import {
   createManagedHttpTransport,
   createProxyAgentFactory,
   createProxySupply,
+  maxWaitForHost,
   rpmForHost,
 } from '../../src/app/composition.js';
 import { loadConfig } from '../../src/config/env.js';
@@ -142,6 +143,40 @@ describe('rpmForHost', () => {
 
   it('leaves an unrecognized host unlimited when neither platform is limited', () => {
     expect(rpmForHost('example.net', { tiktok: 0, instagram: 0 })).toBe(0);
+  });
+});
+
+describe('maxWaitForHost', () => {
+  const byPlatform = { tiktok: 7_500, instagram: 12_000 };
+
+  it('routes each platform to its own queue budget', () => {
+    expect(maxWaitForHost('www.tiktok.com', byPlatform)).toBe(7_500);
+    expect(maxWaitForHost('vm.tiktok.com', byPlatform)).toBe(7_500);
+    expect(maxWaitForHost('www.instagram.com', byPlatform)).toBe(12_000);
+    expect(maxWaitForHost('instagr.am', byPlatform)).toBe(12_000);
+  });
+
+  it('classifies hosts the same way rpmForHost does', () => {
+    // The two must agree, or a host could be paced by one platform's ceiling
+    // while being bounded by the other platform's budget.
+    for (const host of ['www.tiktok.com', 'i.instagram.com', 'instagr.am', 'example.net']) {
+      const pacedBy = rpmForHost(host, { tiktok: 1, instagram: 2 });
+      const boundedBy = maxWaitForHost(host, { tiktok: 1, instagram: 2 });
+      if (host === 'example.net') continue;
+      expect(boundedBy).toBe(pacedBy);
+    }
+  });
+
+  it('gives an unrecognized host the most generous budget', () => {
+    // The opposite of rpmForHost's fallback, on purpose: the stricter rate
+    // protects upstream, but a hasty *budget* just fails work that would have
+    // gone through.
+    expect(maxWaitForHost('example.net', byPlatform)).toBe(12_000);
+  });
+
+  it('treats 0 as unbounded', () => {
+    expect(maxWaitForHost('www.tiktok.com', { tiktok: 0, instagram: 12_000 })).toBeUndefined();
+    expect(maxWaitForHost('example.net', { tiktok: 0, instagram: 0 })).toBeUndefined();
   });
 });
 

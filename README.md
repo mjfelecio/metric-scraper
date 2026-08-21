@@ -375,7 +375,10 @@ survive one measured run.
 
 The cost is throughput: at `300`/`180` neither run sustains the 500 rpm
 `stress-test acceptance` target, because the HTTP ceiling — not admission — is
-now the bottleneck. That is the tradeoff these knobs exist to make explicit
+now the bottleneck. A run pays that cost visibly: when the ceiling is what
+bounds achievable concurrency, the summary reports an `http` entry in
+`throughput.concurrency.ceilings` and an `http_rate_limited` finding, so a run
+that is queueing rather than working says so instead of just looking slow. That is the tradeoff these knobs exist to make explicit
 rather than hide: raising them trades pool survival for throughput, and the
 right value depends on proxy pool size and upstream tolerance on the day,
 which is exactly why they stay independently configurable per platform rather

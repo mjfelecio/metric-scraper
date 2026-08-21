@@ -28,6 +28,8 @@ export interface BuildSummaryInput {
   rowsWritten: number;
   minimumProxyCapacity?: number | null | undefined;
   burst?: number | undefined;
+  /** Egress ceiling in force for this run's platform, rpm. `null` if none. */
+  httpRpmCeiling?: number | null | undefined;
 }
 
 /**
@@ -50,6 +52,10 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
     queueDemand: metrics.queue.maxDepth,
     proxyMode: input.proxyStats.mode,
     proxyCapacity: input.minimumProxyCapacity ?? input.proxyStats.capacity,
+    httpRpmCeiling: input.httpRpmCeiling,
+    platformHttpRequests: metrics.platformHttpRequests,
+    completedJobs: metrics.totalRequests,
+    httpRateLimitWaitMs: metrics.waits.httpRateLimitTotalMs,
   });
 
   return {

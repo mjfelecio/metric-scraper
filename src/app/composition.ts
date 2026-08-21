@@ -288,6 +288,10 @@ export async function buildRunner(options: {
       ...(burst > 0 ? { burst } : {}),
       maxQueueSize: config.maxQueueSize,
       attemptTimeoutMsByPlatform: config.attemptTimeoutMsByPlatform,
+      // Reported, not enforced, here: the limiting happens in `http` above.
+      // Carried so the summary can name the egress ceiling as the binding
+      // constraint when concurrency is configured above what it can serve.
+      httpRpmPerHostByPlatform: effectiveHttpRpmPerHost(config, options.overrides),
     },
   });
   const inputPreparer = new InputPreparer({
@@ -342,6 +346,24 @@ export function rpmForHost(host: string, byPlatform: Record<Platform, number>): 
   if (platform !== null) return byPlatform[platform];
   const configured = [byPlatform.tiktok, byPlatform.instagram].filter((rpm) => rpm > 0);
   return configured.length > 0 ? Math.min(...configured) : 0;
+}
+
+/**
+ * The egress ceiling actually in force per platform, once an override is
+ * applied.
+ *
+ * `--http-rpm-per-host` overrides both platforms uniformly, so anything that
+ * reports the ceiling — the run summary's concurrency diagnostic — has to read
+ * it through here rather than off the config, or an overridden run describes
+ * limits it is not running under.
+ */
+export function effectiveHttpRpmPerHost(
+  config: AppConfig,
+  overrides?: RunnerOverrides,
+): Record<Platform, number> {
+  const override = overrides?.httpRpmPerHost;
+  if (override === undefined) return { ...config.httpRpmPerHostByPlatform };
+  return { tiktok: override, instagram: override };
 }
 
 /**

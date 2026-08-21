@@ -49,7 +49,7 @@ export function fakeSummary(
         utilization: 1,
         saturated: true,
         achievable: 10,
-        ceilings: { configured: 10, input: requests, admission: 10, proxy: configured },
+        ceilings: { configured: 10, input: requests, admission: 10, proxy: configured, http: null },
         minimum_proxy_capacity: configured,
         findings: [],
       },
