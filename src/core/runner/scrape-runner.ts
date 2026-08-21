@@ -240,6 +240,10 @@ export class ScrapeRunner {
       if (signal.aborted) break;
 
       submit(record);
+      // Expose newly started/queued work immediately. Waiting until the first
+      // completion leaves the session watchdog blind when the initial batch
+      // itself stalls.
+      emitProgress();
     }
 
     await queue.onIdle();

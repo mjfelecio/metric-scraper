@@ -109,6 +109,7 @@ function build(options: {
     concurrency: 5,
     targetRpm: options.targetRpm ?? 500,
     stalled: false,
+    stallEpisodes: [],
     ...(options.proxyStats === undefined ? {} : { proxyStats: options.proxyStats }),
     snapshotsPath: null,
     summaryPath: null,

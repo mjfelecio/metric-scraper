@@ -160,9 +160,12 @@ export function formatSessionSummary(summary: SessionSummary): string {
     }
   }
 
-  if (summary.stalled) {
+  if (summary.stall_episodes.length > 0) {
     lines.push('');
-    lines.push('  ⚠ a cycle stopped making progress while work was still in flight');
+    lines.push(
+      `  ${summary.stalled ? '⚠' : '✓'} ${num(summary.stall_episodes.length)} stall episode(s)` +
+        `${summary.stalled ? '; the latest is still active' : '; all recovered'}`,
+    );
   }
 
   lines.push('');

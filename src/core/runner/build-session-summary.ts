@@ -4,6 +4,7 @@ import { type Platform } from '../models/platform.js';
 import {
   type CycleSummary,
   type SessionSummary,
+  type StallEpisode,
   type StopReasonValue,
   type ThroughputSampleRecord,
 } from '../models/session-summary.js';
@@ -33,6 +34,7 @@ export interface BuildSessionSummaryInput {
   concurrency: number;
   targetRpm: number;
   stalled: boolean;
+  stallEpisodes: readonly StallEpisode[];
   /**
    * The pool as it stood when the session ended.
    *
@@ -253,6 +255,7 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
     proxies: sessionProxies(input.proxyStats, input.cycles),
 
     stalled: input.stalled,
+    stall_episodes: [...input.stallEpisodes],
 
     timeline: input.timeline.samples().map((sample): ThroughputSampleRecord => ({
       t_ms: sample.tMs,

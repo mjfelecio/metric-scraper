@@ -56,6 +56,14 @@ export const CycleSummarySchema = z.object({
 });
 export type CycleSummary = z.infer<typeof CycleSummarySchema>;
 
+export const StallEpisodeSchema = z.object({
+  cycle: z.number().int().positive(),
+  started_at: z.string(),
+  recovered_at: z.string().nullable(),
+  duration_ms: z.number().nonnegative(),
+});
+export type StallEpisode = z.infer<typeof StallEpisodeSchema>;
+
 export const SessionSummarySchema = z.object({
   session_id: z.string(),
   platform: PlatformSchema.nullable(),
@@ -122,8 +130,10 @@ export const SessionSummarySchema = z.object({
    */
   proxies: ProxySummarySchema,
 
-  /** True if any cycle stopped making progress while work was still in flight. */
+  /** True only when the session ended with an active stall. */
   stalled: z.boolean(),
+  /** Distinct periods without completions while work remained in flight. */
+  stall_episodes: z.array(StallEpisodeSchema),
 
   timeline: z.array(ThroughputSampleSchema),
 

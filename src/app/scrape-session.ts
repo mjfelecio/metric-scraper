@@ -13,6 +13,7 @@ import { type RunSummary } from '../core/models/run-summary.js';
 import {
   type CycleSummary,
   type SessionSummary,
+  type StallEpisode,
   type StopReasonValue,
 } from '../core/models/session-summary.js';
 import { realSleep } from '../core/retry/sleep.js';
@@ -231,6 +232,9 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
   let nextCycleAt: number | null = null;
   let rowsWritten = 0;
   let stalled = false;
+  const stallEpisodes: StallEpisode[] = [];
+  let activeStall: StallEpisode | null = null;
+  const currentStall = (): StallEpisode | null => activeStall;
   let latestRpm = 0;
 
   // Stall watchdog state. A cycle is stalled when work is in flight but nothing
@@ -238,6 +242,51 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
   const stallThresholdMs = Math.max(30_000, config.requestTimeoutMs * 3);
   let lastProgressAtMs = startedAtMs;
   let lastCompletedSeen = 0;
+
+  const observeStall = (at: number, inFlight: number): void => {
+    const closeActiveStall = (): void => {
+      if (activeStall === null) return;
+      activeStall.recovered_at = new Date(at).toISOString();
+      activeStall.duration_ms = Math.max(0, at - Date.parse(activeStall.started_at));
+      sessionLogger.info(
+        { cycle: activeStall.cycle, stalled_for_ms: activeStall.duration_ms },
+        'session progress resumed after stall',
+      );
+      activeStall = null;
+      stalled = false;
+    };
+
+    if (completed !== lastCompletedSeen) {
+      lastCompletedSeen = completed;
+      lastProgressAtMs = at;
+      closeActiveStall();
+      return;
+    }
+
+    // A cancelled or failed job can drain the cycle without producing a
+    // completion event. It is no longer a current stall once no work remains.
+    if (inFlight === 0 && activeStall !== null) {
+      closeActiveStall();
+      return;
+    }
+
+    if (inFlight > 0 && at - lastProgressAtMs >= stallThresholdMs && activeStall === null) {
+      stalled = true;
+      activeStall = {
+        cycle: currentCycle,
+        started_at: new Date(lastProgressAtMs).toISOString(),
+        recovered_at: null,
+        duration_ms: Math.max(0, at - lastProgressAtMs),
+      };
+      stallEpisodes.push(activeStall);
+      sessionLogger.warn(
+        { cycle: currentCycle, in_flight: inFlight, stalled_for_ms: at - lastProgressAtMs },
+        'session appears stalled: work in flight but nothing completing',
+      );
+    } else if (activeStall !== null) {
+      activeStall.duration_ms = Math.max(0, at - Date.parse(activeStall.started_at));
+    }
+  };
 
   const buildProgress = (): SessionProgress => ({
     state: live() === null ? 'waiting' : 'running',
@@ -293,17 +342,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
         options.onSample?.(sample);
       }
 
-      const at = now();
-      if (completed !== lastCompletedSeen) {
-        lastCompletedSeen = completed;
-        lastProgressAtMs = at;
-      } else if (inFlight > 0 && at - lastProgressAtMs >= stallThresholdMs && !stalled) {
-        stalled = true;
-        sessionLogger.warn(
-          { cycle: currentCycle, in_flight: inFlight, stalled_for_ms: at - lastProgressAtMs },
-          'session appears stalled: work in flight but nothing completing',
-        );
-      }
+      observeStall(now(), inFlight);
 
       options.onProgress?.(buildProgress());
     }
@@ -387,6 +426,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
           },
           onResult: (event) => {
             completed += 1;
+            observeStall(now(), live()?.inFlight ?? 0);
             if (event.snapshot.status === 'ok') successes += 1;
             else failures += 1;
             // Accumulated apart from `completed` so no throughput figure can
@@ -432,6 +472,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
       }
 
       liveProgress = null;
+      observeStall(now(), 0);
       // The aggregator dies with the cycle's runner; fold what it saw into the
       // session-cumulative base before dropping the reference, so a live
       // sample taken between cycles keeps reading the run's true total instead
@@ -486,6 +527,13 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
 
   nextCycleAt = null;
   const finishedAt = new Date(now());
+  const unfinishedStall = currentStall();
+  if (unfinishedStall !== null) {
+    unfinishedStall.duration_ms = Math.max(
+      0,
+      finishedAt.getTime() - Date.parse(unfinishedStall.started_at),
+    );
+  }
 
   const sessionSummary = buildSessionSummary({
     sessionId,
@@ -505,6 +553,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     concurrency,
     targetRpm,
     stalled,
+    stallEpisodes,
     proxyStats: proxyProvider.getStats(),
     snapshotsPath: paths.snapshots,
     summaryPath: paths.summary,
