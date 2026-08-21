@@ -566,6 +566,22 @@ cycle in flight, and the summary is still written — a second Ctrl-C exits imme
 Run configs carry the same settings (`watch`, `interval`, `duration`, `maxCycles`), and
 precedence is unchanged: **CLI > run config > environment**.
 
+### 6.2 Stress testing
+
+`pnpm stress-test --profile acceptance --platform mixed` load-tests the real runner,
+proxy pool, retry policy and scrapers against a deterministic, in-process mock upstream —
+never real TikTok/Instagram traffic, and there is no flag that makes it otherwise. It
+answers whether the scraper's own plumbing holds up at the required rate before any real
+(rate-limited, detection-risky) platform traffic is spent confirming it. Named profiles:
+`baseline`, `acceptance` (the take-home spec's own 500 rpm / 10 min numbers), `sustained`,
+`burst`, `failure-heavy`. See [`docs/stress-testing.md`](docs/stress-testing.md) for the
+full flag reference, mock scenario catalog, and how this relates to the real acceptance
+benchmark (§6.1's `--watch` flow against `data/acceptance/*-valid-100.txt`, unchanged).
+
+Behavior a run actually catches — capacity limits, cascades, misconfigurations, and
+whether each one is a real problem or just a config choice — is tracked in
+[`docs/failure-points.md`](docs/failure-points.md), kept up to date as new ones are found.
+
 ## 7. Running the web UI
 
 ```bash
@@ -665,6 +681,11 @@ waits on real time.
 
 Automated tests do not call TikTok or Instagram. Platform implementations receive a stub
 `HttpClient` through `ScrapeContext`, so the suite stays deterministic and offline.
+
+`pnpm test:stress` runs the stress-testing harness's own suite (mock upstream scenarios,
+workload determinism, the load generator, the report/verdict layer) — kept separate from
+`pnpm test` because it drives real concurrency and real multi-second `AbortSignal.timeout`
+waits, still fully offline. See [§6.2](#62-stress-testing).
 
 ## 9. Building
 

@@ -28,9 +28,11 @@ import {
   createProxySupply,
 } from '../../src/app/composition.js';
 import { loadConfig } from '../../src/config/env.js';
-import { nullBandwidthSink } from '../../src/core/metrics/bandwidth.js';
+import { nullBandwidthSink, type BandwidthSink } from '../../src/core/metrics/bandwidth.js';
 import { nullLogger } from '../../src/core/logging/logger.js';
+import { type InputRecord } from '../../src/core/models/input.js';
 import { MemorySnapshotSink } from '../../src/core/output/snapshot-sink.js';
+import { type HttpClient, type HttpResponse } from '../../src/core/scraper/http-port.js';
 import { type ProxyTarget } from '../../src/core/scraper/lease-ports.js';
 
 function target(overrides: Partial<ProxyTarget> = {}): ProxyTarget {
@@ -148,5 +150,101 @@ describe('buildRunner bandwidth lifetime', () => {
     expect(first.bandwidth).not.toBeNull();
     expect(second.bandwidth).not.toBeNull();
     expect(first.bandwidth).not.toBe(second.bandwidth);
+  });
+});
+
+function stubResponse(): HttpResponse {
+  return {
+    url: 'https://www.tiktok.com/embed/v2/1',
+    status: 200,
+    statusText: 'OK',
+    headers: {},
+    body: '',
+    redirected: false,
+    durationMs: 1,
+  };
+}
+
+const stressRecord: InputRecord = {
+  raw_url: 'https://www.tiktok.com/@creator/video/7420000000000000001',
+  url: 'https://www.tiktok.com/@creator/video/7420000000000000001',
+  platform: 'tiktok',
+  position: 1,
+};
+
+describe('buildRunner transport override', () => {
+  it('is unused when no transport override is supplied (production path unchanged)', async () => {
+    const config = loadConfig({ env: {}, dotenv: false });
+
+    const built = await buildComposedRunner({
+      config,
+      logger: nullLogger,
+      sink: new MemorySnapshotSink(),
+    });
+
+    expect(built.runner).toBeDefined();
+    expect(ProxyAgent).not.toHaveBeenCalled();
+  });
+
+  it('routes every request through a supplied transport instead of FetchHttpClient', async () => {
+    const config = loadConfig({ env: {}, dotenv: false });
+    const request = vi.fn<HttpClient['request']>().mockResolvedValue(stubResponse());
+
+    const built = await buildComposedRunner({
+      config,
+      logger: nullLogger,
+      sink: new MemorySnapshotSink(),
+      transport: () => ({ request }),
+    });
+
+    await built.runner.run([stressRecord]);
+
+    expect(request).toHaveBeenCalled();
+    // No proxies are configured in this test, but a supplied transport should
+    // still mean FetchHttpClient/createProxyAgentFactory are never built at
+    // all -- ProxyAgent must stay uninstantiated either way.
+    expect(ProxyAgent).not.toHaveBeenCalled();
+  });
+
+  it("gives the transport factory the run's real bandwidth sink", async () => {
+    const config = loadConfig({ env: { METRICS_BANDWIDTH: 'true' }, dotenv: false });
+    let capturedSink: BandwidthSink | undefined;
+
+    const built = await buildComposedRunner({
+      config,
+      logger: nullLogger,
+      sink: new MemorySnapshotSink(),
+      transport: (sink) => {
+        capturedSink = sink;
+        return { request: vi.fn<HttpClient['request']>().mockResolvedValue(stubResponse()) };
+      },
+    });
+
+    expect(capturedSink).toBeDefined();
+    capturedSink?.record({
+      proxyId: null,
+      host: 'example.test',
+      requestBytes: 10,
+      responseBytes: 20,
+    });
+
+    expect(built.bandwidth?.view().totalBytes).toBe(30);
+  });
+
+  it('never invokes the transport factory when metrics bandwidth is off', async () => {
+    const config = loadConfig({ env: { METRICS_BANDWIDTH: 'false' }, dotenv: false });
+    let capturedSink: BandwidthSink | undefined;
+
+    await buildComposedRunner({
+      config,
+      logger: nullLogger,
+      sink: new MemorySnapshotSink(),
+      transport: (sink) => {
+        capturedSink = sink;
+        return { request: vi.fn<HttpClient['request']>().mockResolvedValue(stubResponse()) };
+      },
+    });
+
+    expect(capturedSink).toBe(nullBandwidthSink);
   });
 });

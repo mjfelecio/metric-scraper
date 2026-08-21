@@ -16,6 +16,7 @@ import {
   type SessionPool,
 } from '../core/scraper/pool-ports.js';
 import { type ProxyProvider } from '../core/scraper/provider-ports.js';
+import { type HttpClient } from '../core/scraper/http-port.js';
 import { ScrapeRunner } from '../core/runner/scrape-runner.js';
 import { type UrlNormalizerRegistry } from '../core/url/normalizer-registry.js';
 import { createCountingInterceptor } from '../infrastructure/http/counting-dispatcher.js';
@@ -93,6 +94,16 @@ export async function buildRunner(options: {
   onProxyEvent?: ProxyEventListener | undefined;
   /** Successful short-link resolutions shared across continuous-session cycles. */
   resolutionCache?: Map<string, ResolvedUrl> | undefined;
+  /**
+   * Overrides the transport instead of building `FetchHttpClient` against real
+   * proxy/direct dispatchers.
+   *
+   * Receives the same `bandwidthSink` production wiring already owns, so a
+   * substituted transport still feeds real wire-byte accounting into this
+   * run's `BandwidthAggregator` rather than leaving it empty. Test/tooling
+   * seam only — omitted, this is byte-for-byte the production path.
+   */
+  transport?: ((bandwidthSink: BandwidthSink) => HttpClient) | undefined;
 }): Promise<BuiltRunner> {
   const { config, logger, sink } = options;
   const concurrency = options.overrides?.concurrency ?? config.concurrency;
@@ -113,17 +124,19 @@ export async function buildRunner(options: {
   const bandwidth = config.metricsBandwidth ? new BandwidthAggregator() : null;
   const bandwidthSink: BandwidthSink = bandwidth ?? nullBandwidthSink;
 
-  const transport = new FetchHttpClient({
-    defaultTimeoutMs: config.requestTimeoutMs,
-    dispatcherFactory: createProxyAgentFactory(config, bandwidthSink),
-    ...(bandwidth === null
-      ? {}
-      : {
-          defaultDispatcher: new Agent().compose(
-            createCountingInterceptor({ sink: bandwidthSink, proxyId: null }),
-          ),
-        }),
-  });
+  const transport =
+    options.transport?.(bandwidthSink) ??
+    new FetchHttpClient({
+      defaultTimeoutMs: config.requestTimeoutMs,
+      dispatcherFactory: createProxyAgentFactory(config, bandwidthSink),
+      ...(bandwidth === null
+        ? {}
+        : {
+            defaultDispatcher: new Agent().compose(
+              createCountingInterceptor({ sink: bandwidthSink, proxyId: null }),
+            ),
+          }),
+    });
 
   // Egress limiting wraps the transport, so retries and the multi-hop calls a
   // platform scraper makes internally are all counted. A job-level limit cannot
