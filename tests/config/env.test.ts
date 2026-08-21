@@ -212,7 +212,12 @@ describe('redactConfig', () => {
 
     expect(redacted).not.toContain('secret');
     expect(redacted).not.toContain('proxy-a.example.net');
-    expect(redactConfig(config)['proxy']).toEqual({ configured: 2, source: null });
+    expect(redactConfig(config)['proxy']).toEqual({
+      mode: 'static',
+      configured: 2,
+      source: null,
+      residential: null,
+    });
   });
 
   it('reports the supply target it resolved, not the raw setting', () => {
@@ -222,8 +227,10 @@ describe('redactConfig', () => {
     });
 
     expect(redactConfig(config)['proxy']).toEqual({
+      mode: 'static',
       configured: 0,
       source: { target_capacity: 32 },
+      residential: null,
     });
   });
 });

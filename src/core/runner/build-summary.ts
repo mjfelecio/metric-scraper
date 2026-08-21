@@ -1,7 +1,8 @@
 import { type MetricsView } from '../metrics/metrics-collector.js';
 import { type Platform } from '../models/platform.js';
 import { type RunSummary } from '../models/run-summary.js';
-import { type ProxyPoolStats, type SessionPoolStats } from '../scraper/pool-ports.js';
+import { type SessionPoolStats } from '../scraper/pool-ports.js';
+import { type ProxyProviderStats } from '../scraper/provider-ports.js';
 
 import { buildProxySummary } from './build-proxy-summary.js';
 import { type RunCounts } from './types.js';
@@ -14,7 +15,7 @@ export interface BuildSummaryInput {
   finishedAt: Date;
   counts: RunCounts;
   metrics: MetricsView;
-  proxyStats: ProxyPoolStats;
+  proxyStats: ProxyProviderStats;
   sessionStats: SessionPoolStats;
   concurrency: number;
   targetRpm: number;

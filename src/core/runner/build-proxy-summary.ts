@@ -4,22 +4,27 @@ import {
   type ProxySummary,
   type ProxyUsage,
 } from '../models/run-summary.js';
-import { type ProxyHealth, type ProxyPoolStats } from '../scraper/pool-ports.js';
+import { type ProxyHealth } from '../scraper/pool-ports.js';
+import { type ProxyProviderStats } from '../scraper/provider-ports.js';
 import { type ProxySourceStats } from '../scraper/proxy-source-ports.js';
 
 /**
- * Joins what the pool knows (state, timestamps, why it benched something) with
- * what the metrics counted (requests, and which platform and error code they
- * came from) into the proxy section of a summary.
+ * Joins what the provider knows (state, timestamps, why it benched something)
+ * with what the metrics counted (requests, and which platform and error code
+ * they came from) into the proxy section of a summary.
  *
- * The pool is the authority on *which* proxies exist, so a proxy that was
+ * The provider is the authority on *which* proxies exist, so a proxy that was
  * configured and never used still gets a row — "10 configured, 6 usable, 2
  * cooling" is only readable if the quiet ones are listed too. The tallies come
  * from the metrics, which are fed by the same classification the pool rotates
  * on, so the two halves of a row can never disagree.
+ *
+ * `mode` is carried through unchanged and decides how the result reads: under
+ * `rotating-residential` there is exactly one row, and it is the gateway rather
+ * than a proxy.
  */
 export function buildProxySummary(
-  stats: ProxyPoolStats,
+  stats: ProxyProviderStats,
   usage: readonly ProxyUsageView[],
 ): ProxySummary {
   const byId = new Map(usage.map((entry) => [entry.proxyId, entry]));
@@ -34,6 +39,7 @@ export function buildProxySummary(
   }
 
   return {
+    mode: stats.mode,
     configured: stats.configured,
     used: perProxy.filter((proxy) => proxy.requests > 0).length,
     available: stats.available,

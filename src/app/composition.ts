@@ -22,7 +22,8 @@ import { createCountingInterceptor } from '../infrastructure/http/counting-dispa
 import { FetchHttpClient } from '../infrastructure/http/fetch-http-client.js';
 import { RateLimitedHttpClient } from '../infrastructure/http/rate-limited-http-client.js';
 import { InMemoryProxyPool, NullProxyPool } from '../infrastructure/proxy/in-memory-proxy-pool.js';
-import { parseProxyList, proxyId } from '../infrastructure/proxy/proxy-config.js';
+import { buildProxyTarget, parseProxyList, proxyId } from '../infrastructure/proxy/proxy-config.js';
+import { RotatingResidentialProxyProvider } from '../infrastructure/proxy/rotating-residential-proxy-provider.js';
 import { StaticProxyProvider } from '../infrastructure/proxy/static-proxy-provider.js';
 import { ProxyScrapeSource } from '../infrastructure/proxy/proxyscrape-source.js';
 import { ProxySourceManager } from '../infrastructure/proxy/proxy-source-manager.js';
@@ -230,6 +231,12 @@ export function createProxySupply(
    */
   concurrency: number = config.concurrency,
 ): ProxySupply {
+  if (config.proxy.mode === 'rotating-residential') {
+    // No source, ever: the candidate list, the canary probe and the eviction
+    // loop all exist to keep a roster stocked, and a gateway has no roster.
+    return { provider: createProxyProvider(config, logger, onProxyEvent), source: null };
+  }
+
   const sourceUrl = config.proxy.source.url;
   const pool = createProxyPool(config, logger, onProxyEvent, sourceUrl !== '');
   if (sourceUrl === '' || !(pool instanceof InMemoryProxyPool)) {
@@ -283,14 +290,60 @@ export function createProxySupply(
  * Resolves configuration into the one provider the run goes out through.
  *
  * The single place that decides which proxy implementation is in play. Callers
- * downstream hold a `ProxyProvider` and never ask which kind it is.
+ * downstream hold a `ProxyProvider` and never ask which kind it is, which is
+ * what keeps `PROXY_MODE` from spreading into the runner and the CLI.
  */
 export function createProxyProvider(
   config: AppConfig,
   logger: Logger,
   onProxyEvent?: ProxyEventListener,
 ): ProxyProvider {
+  if (config.proxy.mode === 'rotating-residential') {
+    return createRotatingResidentialProvider(config, logger);
+  }
   return new StaticProxyProvider(createProxyPool(config, logger, onProxyEvent));
+}
+
+function createRotatingResidentialProvider(
+  config: AppConfig,
+  logger: Logger,
+): RotatingResidentialProxyProvider {
+  const { residential } = config.proxy;
+  const target = buildProxyTarget({
+    protocol: residential.protocol,
+    host: residential.host,
+    port: residential.port,
+    username: residential.username,
+    password: residential.password,
+  });
+
+  // Warned rather than rejected. Static settings left in a `.env` are exactly
+  // what someone switching modes to compare the two will have, and failing on
+  // their mere presence would make that comparison awkward to run.
+  if (config.proxy.source.url !== '') {
+    logger.warn(
+      'PROXY_SOURCE_URL is set but PROXY_MODE is rotating-residential; the candidate source is ignored',
+    );
+  }
+  if (config.proxy.pool !== '') {
+    logger.warn(
+      'PROXY_POOL is set but PROXY_MODE is rotating-residential; the static pool is ignored',
+    );
+  }
+
+  const provider = new RotatingResidentialProxyProvider({ target });
+  logger.info(
+    {
+      // The credential-free id, which is the only form of the gateway that is
+      // ever logged.
+      gateway: provider.id,
+      // Not the pool's ceiling: a gateway imposes none of its own, so what
+      // bounds the run is the configured concurrency alone.
+      concurrency: config.concurrency,
+    },
+    'rotating residential proxy configured',
+  );
+  return provider;
 }
 
 export function createProxyPool(
