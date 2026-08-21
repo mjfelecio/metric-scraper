@@ -415,6 +415,7 @@ function emptyProxies(): ProxySummary {
     capacity: null,
     pool_exhausted: 0,
     total_failures: 0,
+    eviction_count: 0,
     source: null,
     per_proxy: [],
   };
