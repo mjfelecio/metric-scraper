@@ -24,6 +24,7 @@ import {
 } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
 import { StaticProxyProvider } from '../../src/infrastructure/proxy/static-proxy-provider.js';
 import { NullSessionPool } from '../../src/infrastructure/session/in-memory-session-pool.js';
+import { FetchHttpClient } from '../../src/infrastructure/http/fetch-http-client.js';
 import { createDefaultScraperRegistry } from '../../src/platforms/index.js';
 
 const unusedHttp: HttpClient = {
@@ -68,6 +69,7 @@ function buildRunner(options: {
   bandwidth?: BandwidthAggregator | null;
   attemptTimeoutMsByPlatform?: Readonly<Record<Platform, number>>;
   createTimeoutSignal?: (delayMs: number) => AbortSignal;
+  http?: HttpClient;
 }) {
   const sink = options.sink ?? new MemorySnapshotSink();
   const metrics = new MetricsCollector();
@@ -76,7 +78,7 @@ function buildRunner(options: {
       options.scraper === undefined
         ? createDefaultScraperRegistry()
         : createScraperRegistry([options.scraper]),
-    http: unusedHttp,
+    http: options.http ?? unusedHttp,
     // Wrapped rather than replaced: these tests exercise the real static pool
     // through the runner, which is what proves the provider port did not change
     // static behaviour.
@@ -471,6 +473,69 @@ describe('ScrapeRunner', () => {
     expect(attempts).toBe(1);
     expect(sink.snapshots).toHaveLength(1);
     expect(sink.snapshots[0]?.error).toContain('cancelled: run cancelled');
+  });
+
+  it('propagates operator cancellation through fetch without retrying or counting an outcome', async () => {
+    const runController = new AbortController();
+    let attempts = 0;
+    const http = new FetchHttpClient({
+      defaultTimeoutMs: 5_000,
+      fetchImpl: (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () =>
+              reject(
+                init.signal?.reason instanceof Error
+                  ? init.signal.reason
+                  : new Error('request aborted'),
+              ),
+            { once: true },
+          );
+          queueMicrotask(() =>
+            runController.abort(
+              new ScrapeError({ code: 'cancelled', message: 'interrupted by operator' }),
+            ),
+          );
+        }),
+    });
+    const scraper: Scraper = {
+      platform: 'instagram',
+      async scrape(url, context) {
+        attempts += 1;
+        await context.http.request({ url, signal: context.signal });
+        return scrapeSuccess(EMPTY_VIDEO_DATA);
+      },
+    };
+    const { runner, sink } = buildRunner({
+      scraper,
+      http,
+      createTimeoutSignal: () => new AbortController().signal,
+    });
+
+    const result = await runner.run(recordsFor('instagram', 'https://instagram/1'), {
+      signal: runController.signal,
+    });
+
+    expect(attempts).toBe(1);
+    expect(sink.snapshots).toHaveLength(1);
+    expect(sink.snapshots[0]?.error).toBe('cancelled: interrupted by operator');
+    expect(result.summary.output.rows_written).toBe(1);
+    expect(result.summary.totals).toMatchObject({
+      requests: 0,
+      platform_http_requests: 1,
+      successes: 0,
+      failures: 0,
+      success_rate: 0,
+    });
+    expect(result.summary.retries).toEqual({
+      total_retries: 0,
+      retried_requests: 0,
+      exhausted_requests: 0,
+    });
+    expect(result.summary.latency.count).toBe(0);
+    expect(result.summary.status_breakdown.error).toBe(0);
+    expect(result.summary.error_breakdown).toEqual({});
   });
 });
 

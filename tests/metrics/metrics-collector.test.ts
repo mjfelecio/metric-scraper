@@ -99,6 +99,33 @@ describe('MetricsCollector', () => {
     expect(view.exhaustedRequests).toBe(1);
   });
 
+  it('keeps cancelled audit rows out of logical outcomes while retaining HTTP activity', () => {
+    const metrics = new MetricsCollector();
+    metrics.start();
+    metrics.recordRetry();
+    metrics.recordResult({
+      status: 'error',
+      latencyMs: 200,
+      retries: 1,
+      exhausted: false,
+      errorCode: 'cancelled',
+      platformHttpRequests: 2,
+    });
+
+    const view = metrics.view();
+    expect(view.totalRequests).toBe(0);
+    expect(view.successfulRequests).toBe(0);
+    expect(view.failedRequests).toBe(0);
+    expect(view.successRate).toBe(0);
+    expect(view.latency.count).toBe(0);
+    expect(view.statusCounts.error).toBe(0);
+    expect(view.errorCounts).toEqual({});
+    expect(view.totalRetries).toBe(1);
+    expect(view.retriedRequests).toBe(0);
+    expect(view.exhaustedRequests).toBe(0);
+    expect(view.platformHttpRequests).toBe(2);
+  });
+
   it('computes latency percentiles across recorded requests', () => {
     const metrics = new MetricsCollector();
     metrics.start();

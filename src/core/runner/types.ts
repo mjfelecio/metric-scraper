@@ -1,8 +1,11 @@
+import { type ScrapeErrorCode } from '../models/errors.js';
 import { type MetricSnapshot } from '../models/snapshot.js';
 
 /** Emitted once per finished URL (success or failure). */
 export interface JobCompletedEvent {
   snapshot: MetricSnapshot;
+  /** Structured failure code; never recovered by parsing the JSONL error string. */
+  errorCode: ScrapeErrorCode | null;
   /** Attempts used, including the first. */
   attempts: number;
   /** `attempts - 1`. Kept explicit because summaries report it separately. */

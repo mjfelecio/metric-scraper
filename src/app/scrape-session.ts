@@ -263,8 +263,8 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
       return;
     }
 
-    // A cancelled or failed job can drain the cycle without producing a
-    // completion event. It is no longer a current stall once no work remains.
+    // A cancellation audit row does not advance completed outcomes. It is no
+    // longer a current stall once the aborted in-flight work has drained.
     if (inFlight === 0 && activeStall !== null) {
       closeActiveStall();
       return;
@@ -425,14 +425,20 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
             liveProgress = progress;
           },
           onResult: (event) => {
-            completed += 1;
+            if (event.errorCode !== 'cancelled') {
+              completed += 1;
+              if (event.snapshot.status === 'ok') successes += 1;
+              else failures += 1;
+            }
             observeStall(now(), live()?.inFlight ?? 0);
-            if (event.snapshot.status === 'ok') successes += 1;
-            else failures += 1;
             // Accumulated apart from `completed` so no throughput figure can
             // ever be inflated by retry volume.
             retries += event.retries;
-            latenciesMs.push(event.snapshot.latency_ms);
+            // Cancellation rows are durable audit records, not completed
+            // outcomes, so they do not contribute to session latency.
+            if (event.errorCode !== 'cancelled') {
+              latenciesMs.push(event.snapshot.latency_ms);
+            }
             options.onResult?.(event, context);
           },
         });

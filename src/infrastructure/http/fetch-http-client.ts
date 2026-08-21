@@ -1,3 +1,4 @@
+import { ScrapeError } from '../../core/models/errors.js';
 import {
   HttpError,
   type HttpClient,
@@ -116,8 +117,11 @@ export class FetchHttpClient implements HttpClient {
 /** Connect-phase codes: the socket never opened, so this is a `timeout`, not a `network_error`. */
 const CONNECT_TIMEOUT_CODES = new Set(['UND_ERR_CONNECT_TIMEOUT', 'ETIMEDOUT']);
 
-function toHttpError(error: unknown, url: string): HttpError {
-  if (error instanceof HttpError) return error;
+function toHttpError(error: unknown, url: string): ScrapeError {
+  // Structured errors may be used as AbortSignal reasons. Preserve them by
+  // identity so cancellation and any future cross-layer classification reach
+  // the runner without losing metadata or being relabelled as a network error.
+  if (error instanceof ScrapeError) return error;
   const name = error instanceof Error ? error.name : '';
   if (name === 'TimeoutError' || name === 'AbortError') {
     return new HttpError({

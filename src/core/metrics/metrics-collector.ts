@@ -251,8 +251,12 @@ export class MetricsCollector {
 
   /** One completed request (one URL), after all retries have been exhausted. */
   recordResult(input: RecordResultInput): void {
-    this.totalRequests += 1;
     this.platformHttpRequests += input.platformHttpRequests ?? 0;
+    // Cancellation is an audit row, not a completed scrape outcome. Wire work
+    // already performed remains factual and is retained above.
+    if (input.errorCode === 'cancelled') return;
+
+    this.totalRequests += 1;
     if (input.status === 'ok') {
       this.successfulRequests += 1;
     } else {

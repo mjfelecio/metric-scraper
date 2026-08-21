@@ -72,15 +72,15 @@ export async function executeSession(options: ExecuteSessionOptions): Promise<Se
         schedule.intervalMs === 0 ? 'back-to-back' : formatDuration(schedule.intervalMs)
       }${limits.length === 0 ? '' : `, ${limits.join(', ')}`})\n` +
       `Output: ${paths.snapshots}\n` +
-      `Press Ctrl-C to stop; the cycle in flight finishes and the session still reports.\n`,
+      `Press Ctrl-C to stop; in-flight work is aborted, cancellation rows are retained, and the session still reports.\n`,
   );
 
   const reporter = new SessionProgressReporter({
     enabled: options.progress !== false && options.json !== true,
   });
 
-  // First Ctrl-C asks the session to wind down so the in-flight cycle finishes
-  // and the summary is still written; a second one is taken to mean "now".
+  // First Ctrl-C aborts in-flight work while retaining cancellation audit rows
+  // and writing the summary; a second one is taken to mean "now".
   const controller = new AbortController();
   let interrupted = false;
   const onInterrupt = (): void => {
@@ -90,7 +90,7 @@ export async function executeSession(options: ExecuteSessionOptions): Promise<Se
     }
     interrupted = true;
     reporter.done();
-    process.stderr.write('\nStopping after the current cycle…\n');
+    process.stderr.write('\nStopping — aborting in-flight work and retaining cancellation rows…\n');
     controller.abort(new ScrapeError({ code: 'cancelled', message: 'interrupted by operator' }));
   };
   process.on('SIGINT', onInterrupt);
