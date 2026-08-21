@@ -15,13 +15,16 @@ import {
   type ProxyPool,
   type SessionPool,
 } from '../core/scraper/pool-ports.js';
+import { type ProxyProvider } from '../core/scraper/provider-ports.js';
 import { ScrapeRunner } from '../core/runner/scrape-runner.js';
 import { type UrlNormalizerRegistry } from '../core/url/normalizer-registry.js';
 import { createCountingInterceptor } from '../infrastructure/http/counting-dispatcher.js';
 import { FetchHttpClient } from '../infrastructure/http/fetch-http-client.js';
 import { RateLimitedHttpClient } from '../infrastructure/http/rate-limited-http-client.js';
 import { InMemoryProxyPool, NullProxyPool } from '../infrastructure/proxy/in-memory-proxy-pool.js';
-import { parseProxyList, proxyId } from '../infrastructure/proxy/proxy-config.js';
+import { buildProxyTarget, parseProxyList, proxyId } from '../infrastructure/proxy/proxy-config.js';
+import { RotatingResidentialProxyProvider } from '../infrastructure/proxy/rotating-residential-proxy-provider.js';
+import { StaticProxyProvider } from '../infrastructure/proxy/static-proxy-provider.js';
 import { ProxyScrapeSource } from '../infrastructure/proxy/proxyscrape-source.js';
 import { ProxySourceManager } from '../infrastructure/proxy/proxy-source-manager.js';
 import { HttpCanaryProxyProbe } from '../infrastructure/proxy/http-canary-proxy-probe.js';
@@ -48,7 +51,7 @@ export interface RunnerOverrides {
 export interface BuiltRunner {
   runner: ScrapeRunner;
   metrics: MetricsCollector;
-  proxyPool: ProxyPool;
+  proxyProvider: ProxyProvider;
   sessionPool: SessionPool;
   normalizers: UrlNormalizerRegistry;
   /** Optional only for lightweight test-built runners; production always supplies it. */
@@ -72,18 +75,20 @@ export async function buildRunner(options: {
   sink: SnapshotSink;
   overrides?: RunnerOverrides | undefined;
   /**
-   * Reuse pools across calls instead of building fresh ones.
+   * Reuse the provider and session pool across calls instead of building fresh
+   * ones.
    *
-   * A continuous session builds a runner per cycle but must keep one set of
-   * pools for its whole life: proxy and session cooldowns are measured in
-   * minutes, so rebuilding them every cycle would silently un-bench every
-   * proxy that had just been benched for failing.
+   * A continuous session builds a runner per cycle but must keep one provider
+   * for its whole life: proxy and session cooldowns are measured in minutes, so
+   * rebuilding them every cycle would silently un-bench every proxy that had
+   * just been benched for failing.
    */
-  proxyPool?: ProxyPool | undefined;
+  proxyProvider?: ProxyProvider | undefined;
   sessionPool?: SessionPool | undefined;
   /**
-   * Notified on every proxy health transition. Ignored when `proxyPool` is
-   * supplied — a caller that brought its own pool already chose its listener.
+   * Notified on every proxy health transition. Ignored when `proxyProvider` is
+   * supplied — a caller that brought its own already chose its listener — and
+   * never fired in `rotating-residential` mode, which has no health to report.
    */
   onProxyEvent?: ProxyEventListener | undefined;
   /** Successful short-link resolutions shared across continuous-session cycles. */
@@ -95,7 +100,8 @@ export async function buildRunner(options: {
   const burst = options.overrides?.burst ?? config.burst;
   const httpRpmPerHost = options.overrides?.httpRpmPerHost ?? config.httpRpmPerHost;
 
-  const proxyPool = options.proxyPool ?? createProxyPool(config, logger, options.onProxyEvent);
+  const proxyProvider =
+    options.proxyProvider ?? createProxyProvider(config, logger, options.onProxyEvent);
   const sessionPool = options.sessionPool ?? (await createSessionPool(config, logger));
   const metrics = new MetricsCollector();
 
@@ -136,7 +142,7 @@ export async function buildRunner(options: {
   const runner = new ScrapeRunner({
     scrapers: createDefaultScraperRegistry({ instagram: config.instagram }),
     http,
-    proxyPool,
+    proxyProvider,
     sessionPool,
     sink,
     metrics,
@@ -154,7 +160,7 @@ export async function buildRunner(options: {
   const inputPreparer = new InputPreparer({
     resolvers: createDefaultUrlResolverRegistry(),
     http,
-    proxyPool,
+    proxyProvider,
     retryPolicy,
     logger,
     metrics,
@@ -166,7 +172,7 @@ export async function buildRunner(options: {
   return {
     runner,
     metrics,
-    proxyPool,
+    proxyProvider,
     sessionPool,
     normalizers: createDefaultUrlNormalizerRegistry(),
     inputPreparer,
@@ -213,19 +219,19 @@ export function createProxyAgentFactory(
 }
 
 /**
- * A pool plus, when configured, the service that keeps it stocked.
+ * The provider plus, when configured, the service that keeps it stocked.
  *
  * Returned together because their lifetimes are the same: the manager holds
- * timers and must be stopped wherever the pool stops being used.
+ * timers and must be stopped wherever the provider stops being used.
  */
 export interface ProxySupply {
-  pool: ProxyPool;
-  /** `null` unless `PROXY_SOURCE_URL` is set. */
+  provider: ProxyProvider;
+  /** `null` unless `PROXY_SOURCE_URL` is set — and always `null` off `static`. */
   source: ProxySourceManager | null;
 }
 
 /**
- * Builds the proxy pool and, if a candidate source is configured, wires it in.
+ * Builds the proxy provider and, if a candidate source is configured, wires it in.
  *
  * The static `PROXY_POOL` list keeps working exactly as before: its entries are
  * seeded first and marked `config`, which is what exempts them from the
@@ -244,10 +250,16 @@ export function createProxySupply(
    */
   concurrency: number = config.concurrency,
 ): ProxySupply {
+  if (config.proxy.mode === 'rotating-residential') {
+    // No source, ever: the candidate list, the canary probe and the eviction
+    // loop all exist to keep a roster stocked, and a gateway has no roster.
+    return { provider: createProxyProvider(config, logger, onProxyEvent), source: null };
+  }
+
   const sourceUrl = config.proxy.source.url;
   const pool = createProxyPool(config, logger, onProxyEvent, sourceUrl !== '');
   if (sourceUrl === '' || !(pool instanceof InMemoryProxyPool)) {
-    return { pool, source: null };
+    return { provider: new StaticProxyProvider(pool), source: null };
   }
 
   // Direct transport, deliberately: fetching the list of proxies through a
@@ -290,7 +302,67 @@ export function createProxySupply(
     },
     'dynamic proxy source configured',
   );
-  return { pool, source };
+  return { provider: new StaticProxyProvider(pool), source };
+}
+
+/**
+ * Resolves configuration into the one provider the run goes out through.
+ *
+ * The single place that decides which proxy implementation is in play. Callers
+ * downstream hold a `ProxyProvider` and never ask which kind it is, which is
+ * what keeps `PROXY_MODE` from spreading into the runner and the CLI.
+ */
+export function createProxyProvider(
+  config: AppConfig,
+  logger: Logger,
+  onProxyEvent?: ProxyEventListener,
+): ProxyProvider {
+  if (config.proxy.mode === 'rotating-residential') {
+    return createRotatingResidentialProvider(config, logger);
+  }
+  return new StaticProxyProvider(createProxyPool(config, logger, onProxyEvent));
+}
+
+function createRotatingResidentialProvider(
+  config: AppConfig,
+  logger: Logger,
+): RotatingResidentialProxyProvider {
+  const { residential } = config.proxy;
+  const target = buildProxyTarget({
+    protocol: residential.protocol,
+    host: residential.host,
+    port: residential.port,
+    username: residential.username,
+    password: residential.password,
+  });
+
+  // Warned rather than rejected. Static settings left in a `.env` are exactly
+  // what someone switching modes to compare the two will have, and failing on
+  // their mere presence would make that comparison awkward to run.
+  if (config.proxy.source.url !== '') {
+    logger.warn(
+      'PROXY_SOURCE_URL is set but PROXY_MODE is rotating-residential; the candidate source is ignored',
+    );
+  }
+  if (config.proxy.pool !== '') {
+    logger.warn(
+      'PROXY_POOL is set but PROXY_MODE is rotating-residential; the static pool is ignored',
+    );
+  }
+
+  const provider = new RotatingResidentialProxyProvider({ target });
+  logger.info(
+    {
+      // The credential-free id, which is the only form of the gateway that is
+      // ever logged.
+      gateway: provider.id,
+      // Not the pool's ceiling: a gateway imposes none of its own, so what
+      // bounds the run is the configured concurrency alone.
+      concurrency: config.concurrency,
+    },
+    'rotating residential proxy configured',
+  );
+  return provider;
 }
 
 export function createProxyPool(

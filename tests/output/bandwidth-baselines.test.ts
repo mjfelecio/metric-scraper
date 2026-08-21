@@ -16,6 +16,7 @@ import {
   type BandwidthBaselineRecord,
 } from '../../src/infrastructure/output/bandwidth-baselines.js';
 import { NullProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
+import { StaticProxyProvider } from '../../src/infrastructure/proxy/static-proxy-provider.js';
 import { NullSessionPool } from '../../src/infrastructure/session/in-memory-session-pool.js';
 
 function record(runId: string, requests: number, totalBytes: number): BandwidthBaselineRecord {
@@ -74,7 +75,7 @@ function summaryWithBandwidth(options: {
       rejected: 0,
     },
     metrics: metrics.view(),
-    proxyStats: new NullProxyPool().getStats(),
+    proxyStats: new StaticProxyProvider(new NullProxyPool()).getStats(),
     sessionStats: new NullSessionPool().getStats(),
     concurrency: 1,
     targetRpm: 0,

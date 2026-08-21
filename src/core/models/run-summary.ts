@@ -139,6 +139,19 @@ export const ProxySourceSummarySchema = z.object({
 export type ProxySourceSummary = z.infer<typeof ProxySourceSummarySchema>;
 
 export const ProxySummarySchema = z.object({
+  /**
+   * Which proxy implementation the run went out through.
+   *
+   * The field that makes two runs comparable, and the one that says how to read
+   * the rest of this object. Under `rotating-residential`, `per_proxy` holds a
+   * single row describing **the gateway, not a physical proxy roster**: the exit
+   * IPs behind it are chosen per request by the provider and are never visible
+   * here, so `configured` is always 1 however many IPs were really used, and
+   * `cooling`, `retired`, `saturated` and `capacity` do not apply — nothing in
+   * that mode can bench a gateway or ration its slots, so they stay at their
+   * inert values rather than reporting a health model that does not exist.
+   */
+  mode: z.enum(['static', 'rotating-residential']),
   configured: z.number().int().nonnegative(),
   /** Proxies that handled at least one request. */
   used: z.number().int().nonnegative(),

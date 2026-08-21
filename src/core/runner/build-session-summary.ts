@@ -9,7 +9,7 @@ import {
 } from '../models/session-summary.js';
 import { type ProxySummary, type ProxyUsage } from '../models/run-summary.js';
 import { SCRAPE_STATUSES, type ScrapeStatus } from '../models/status.js';
-import { type ProxyPoolStats } from '../scraper/pool-ports.js';
+import { type ProxyProviderStats } from '../scraper/provider-ports.js';
 
 import { buildProxySummary, mergeProxyUsage } from './build-proxy-summary.js';
 import { type RunCounts } from './types.js';
@@ -40,7 +40,7 @@ export interface BuildSessionSummaryInput {
    * for the whole session, so its counters are already cumulative, and its
    * state is only meaningful at a point in time.
    */
-  proxyStats?: ProxyPoolStats | undefined;
+  proxyStats?: ProxyProviderStats | undefined;
   snapshotsPath: string | null;
   summaryPath: string | null;
   cyclesDir: string | null;
@@ -56,7 +56,7 @@ export interface BuildSessionSummaryInput {
  * the cycle summaries.
  */
 function sessionProxies(
-  stats: ProxyPoolStats | undefined,
+  stats: ProxyProviderStats | undefined,
   cycles: readonly CycleSummary[],
 ): ProxySummary {
   const base = buildProxySummary(stats ?? emptyProxyStats(), []);
@@ -83,8 +83,11 @@ function sessionProxies(
   };
 }
 
-function emptyProxyStats(): ProxyPoolStats {
+function emptyProxyStats(): ProxyProviderStats {
   return {
+    // A session that never built a provider ran with no proxies at all, which
+    // is the static pool's own empty case.
+    mode: 'static',
     configured: 0,
     available: 0,
     inUse: 0,

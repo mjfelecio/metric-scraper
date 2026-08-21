@@ -6,6 +6,7 @@ import { type InputRecord } from '../../src/core/models/input.js';
 import { RetryPolicy } from '../../src/core/retry/retry-policy.js';
 import { type HttpClient } from '../../src/core/scraper/http-port.js';
 import { NullProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
+import { StaticProxyProvider } from '../../src/infrastructure/proxy/static-proxy-provider.js';
 import { type UrlResolver } from '../../src/core/url/resolver.js';
 import { createUrlResolverRegistry } from '../../src/core/url/resolver.js';
 
@@ -25,7 +26,7 @@ function preparer(resolver: UrlResolver, cache?: Map<string, ResolvedUrl>): Inpu
   return new InputPreparer({
     resolvers: createUrlResolverRegistry([resolver]),
     http: { request: vi.fn<HttpClient['request']>() },
-    proxyPool: new NullProxyPool(),
+    proxyProvider: new StaticProxyProvider(new NullProxyPool()),
     retryPolicy: new RetryPolicy({
       maxAttempts: 3,
       initialDelayMs: 0,

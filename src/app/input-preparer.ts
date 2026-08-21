@@ -13,13 +13,13 @@ import { realSleep, type Sleep } from '../core/retry/sleep.js';
 import { classifyProxyOutcome } from '../core/runner/proxy-outcome.js';
 import { type HttpClient } from '../core/scraper/http-port.js';
 import { type ProxyLease, type ProxyOutcome } from '../core/scraper/lease-ports.js';
-import { type ProxyPool } from '../core/scraper/pool-ports.js';
+import { type ProxyProvider } from '../core/scraper/provider-ports.js';
 import { type UrlResolutionResult, type UrlResolverRegistry } from '../core/url/resolver.js';
 
 export interface InputPreparerOptions {
   resolvers: UrlResolverRegistry;
   http: HttpClient;
-  proxyPool: ProxyPool;
+  proxyProvider: ProxyProvider;
   retryPolicy: RetryPolicy;
   logger: Logger;
   metrics?: MetricsCollector | undefined;
@@ -197,7 +197,11 @@ export class InputPreparer {
 
     try {
       const acquireStartedAt = this.now();
-      lease = await this.options.proxyPool.acquire(signal);
+      lease = await this.options.proxyProvider.acquire({
+        platform: record.platform,
+        attempt: 1,
+        signal,
+      });
       this.options.metrics?.recordProxyAcquire(this.now() - acquireStartedAt);
       const attemptSignal = AbortSignal.any([
         signal,
@@ -248,11 +252,9 @@ export class InputPreparer {
       errorCode: code ?? null,
     });
 
-    if (outcome === 'success') this.options.proxyPool.reportSuccess(lease);
-    else if (outcome === 'blocked') this.options.proxyPool.markBlocked(lease, reason, code);
-    else if (outcome === 'unsuitable') this.options.proxyPool.reportUnsuitable(lease, reason, code);
-    else if (outcome === 'failure') this.options.proxyPool.reportFailure(lease, reason, code);
-    this.options.proxyPool.release(lease);
+    // The provider owns what an outcome means for proxy health: the static
+    // pool benches on it, a rotating gateway deliberately does not.
+    this.options.proxyProvider.release(lease, outcome, { reason, errorCode: code });
   }
 }
 

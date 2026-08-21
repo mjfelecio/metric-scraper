@@ -22,6 +22,7 @@ import {
   InMemoryProxyPool,
   NullProxyPool,
 } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
+import { StaticProxyProvider } from '../../src/infrastructure/proxy/static-proxy-provider.js';
 import { NullSessionPool } from '../../src/infrastructure/session/in-memory-session-pool.js';
 import { createDefaultScraperRegistry } from '../../src/platforms/index.js';
 
@@ -76,7 +77,10 @@ function buildRunner(options: {
         ? createDefaultScraperRegistry()
         : createScraperRegistry([options.scraper]),
     http: unusedHttp,
-    proxyPool: options.proxyPool ?? new NullProxyPool(),
+    // Wrapped rather than replaced: these tests exercise the real static pool
+    // through the runner, which is what proves the provider port did not change
+    // static behaviour.
+    proxyProvider: new StaticProxyProvider(options.proxyPool ?? new NullProxyPool()),
     sessionPool: new NullSessionPool(),
     sink,
     metrics,

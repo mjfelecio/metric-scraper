@@ -194,7 +194,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     },
     concurrency,
   );
-  const proxyPool = proxySupply.pool;
+  const proxyProvider = proxySupply.provider;
   // Stocked before the first cycle so it does not start against an empty pool,
   // then topped up in the background for the rest of the session.
   await proxySupply.source?.start();
@@ -257,7 +257,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     sustainedTargetMs: timeline.sustained(targetRpm).windowMs,
     nextCycleAt,
     stalled,
-    proxies: proxyPool.getStats(),
+    proxies: proxyProvider.getStats(),
   });
 
   // The sampler runs on its own fixed cadence rather than off `onProgress`.
@@ -348,7 +348,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
                 logger: sessionLogger,
                 sink,
                 ...(options.overrides === undefined ? {} : { overrides: options.overrides }),
-                proxyPool,
+                proxyProvider,
                 sessionPool,
                 resolutionCache,
               })
@@ -505,7 +505,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     concurrency,
     targetRpm,
     stalled,
-    proxyStats: proxyPool.getStats(),
+    proxyStats: proxyProvider.getStats(),
     snapshotsPath: paths.snapshots,
     summaryPath: paths.summary,
     cyclesDir: paths.cyclesDir,

@@ -5,6 +5,14 @@ import { ScrapeError } from '../core/models/errors.js';
 
 const LogLevelSchema = z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']);
 
+const ProxyModeSchema = z.enum(['static', 'rotating-residential']);
+
+/**
+ * The gateway protocol. Narrower than `ProxyProtocol` because the fetch
+ * transport dispatches through `ProxyAgent`, which only speaks http(s).
+ */
+const ResidentialProtocolSchema = z.enum(['http', 'https']);
+
 export const AppConfigSchema = z.object({
   logLevel: LogLevelSchema,
 
@@ -56,6 +64,14 @@ export const AppConfigSchema = z.object({
   metricsBandwidth: z.boolean(),
 
   proxy: z.object({
+    /**
+     * Which proxy implementation the run goes out through.
+     *
+     * Everything else under `proxy` except `connectTimeoutMs` and `residential`
+     * describes the static pool and is ignored in `rotating-residential` mode —
+     * a gateway has no roster to keep health for.
+     */
+    mode: ProxyModeSchema,
     /** Raw `PROXY_POOL` value; parsed by `parseProxyList`. Never logged. */
     pool: z.string(),
     maxConsecutiveFailures: z.number().int().min(1),
@@ -125,6 +141,23 @@ export const AppConfigSchema = z.object({
       validateConcurrency: z.number().int().min(1),
       validateTimeoutMs: z.number().int().min(1),
       maxCandidates: z.number().int().min(1),
+    }),
+
+    /**
+     * The rotating residential gateway. Read only when `mode` is
+     * `rotating-residential`, and required in full at that point — a half-set
+     * gateway would otherwise fail on the first request rather than at startup.
+     *
+     * `username`/`password` are credentials: they reach `ProxyTarget` and
+     * nothing else, and are excluded from `redactConfig`.
+     */
+    residential: z.object({
+      protocol: ResidentialProtocolSchema,
+      host: z.string(),
+      /** `0` means unset, so a `static` run never has to supply one. */
+      port: z.number().int().min(0).max(65_535),
+      username: z.string(),
+      password: z.string(),
     }),
   }),
 
@@ -201,6 +234,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     metricsBandwidth: bool(env, 'METRICS_BANDWIDTH', true),
 
     proxy: {
+      mode: str(env.PROXY_MODE) ?? 'static',
       pool: str(env.PROXY_POOL) ?? '',
       maxConsecutiveFailures: int(env, 'PROXY_MAX_FAILURES', 3),
       cooldownMs: int(env, 'PROXY_COOLDOWN_MS', 60_000),
@@ -217,6 +251,13 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
         validateConcurrency: int(env, 'PROXY_SOURCE_VALIDATE_CONCURRENCY', 10),
         validateTimeoutMs: int(env, 'PROXY_SOURCE_VALIDATE_TIMEOUT_MS', 5_000),
         maxCandidates: int(env, 'PROXY_SOURCE_MAX_CANDIDATES', 5_000),
+      },
+      residential: {
+        protocol: str(env.RESIDENTIAL_PROXY_PROTOCOL) ?? 'http',
+        host: str(env.RESIDENTIAL_PROXY_HOST) ?? '',
+        port: int(env, 'RESIDENTIAL_PROXY_PORT', 0),
+        username: str(env.RESIDENTIAL_PROXY_USERNAME) ?? '',
+        password: str(env.RESIDENTIAL_PROXY_PASSWORD) ?? '',
       },
     },
 
@@ -257,6 +298,22 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     });
   }
 
+  // Checked at startup rather than on the first request: a gateway missing its
+  // credentials fails every job in the run, and finding that out from a batch of
+  // proxy_error rows is a much worse way to learn it. Only checked in
+  // residential mode — a static run must never be made to supply these.
+  if (parsed.data.proxy.mode === 'rotating-residential') {
+    const missing = residentialGaps(parsed.data.proxy.residential);
+    if (missing.length > 0) {
+      throw new ScrapeError({
+        code: 'config_error',
+        message:
+          'invalid configuration — PROXY_MODE=rotating-residential requires ' +
+          `${missing.join(', ')}`,
+      });
+    }
+  }
+
   // Candidate validation spends the same connect budget as a real request, then
   // still has a tunnel, a handshake and a round trip to pay for. A total budget
   // at or below the connect budget leaves nothing for any of it, so every
@@ -270,6 +327,16 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   }
 
   return parsed.data;
+}
+
+/** Which residential settings are still unset, named as the operator wrote them. */
+function residentialGaps(residential: AppConfig['proxy']['residential']): string[] {
+  const missing: string[] = [];
+  if (residential.host === '') missing.push('RESIDENTIAL_PROXY_HOST');
+  if (residential.port === 0) missing.push('RESIDENTIAL_PROXY_PORT');
+  if (residential.username === '') missing.push('RESIDENTIAL_PROXY_USERNAME');
+  if (residential.password === '') missing.push('RESIDENTIAL_PROXY_PASSWORD');
+  return missing;
 }
 
 /**
@@ -332,6 +399,7 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
     retry: config.retry,
     outputDir: config.outputDir,
     proxy: {
+      mode: config.proxy.mode,
       configured: proxyCount,
       // The URL itself stays out: it is operator-supplied and may one day carry
       // an API key, and nothing downstream needs to read it back.
@@ -339,6 +407,16 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
         config.proxy.source.url === ''
           ? null
           : { target_capacity: resolveTargetCapacity(config, config.concurrency) },
+      // Host and port only. The gateway username and password are credentials
+      // and never appear here, for the same reason the source URL does not.
+      residential:
+        config.proxy.residential.host === ''
+          ? null
+          : {
+              configured: residentialGaps(config.proxy.residential).length === 0,
+              host: config.proxy.residential.host,
+              port: config.proxy.residential.port,
+            },
     },
     session: { configured: config.session.storePath !== null },
     instagram: { ...config.instagram },

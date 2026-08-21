@@ -4,7 +4,8 @@ import { ThroughputTimeline } from '../../src/core/metrics/throughput-timeline.j
 import { type RunSummary } from '../../src/core/models/run-summary.js';
 import { type CycleSummary } from '../../src/core/models/session-summary.js';
 import { buildSessionSummary } from '../../src/core/runner/build-session-summary.js';
-import { type ProxyHealth, type ProxyPoolStats } from '../../src/core/scraper/pool-ports.js';
+import { type ProxyHealth } from '../../src/core/scraper/pool-ports.js';
+import { type ProxyProviderStats } from '../../src/core/scraper/provider-ports.js';
 
 function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
   return {
@@ -45,6 +46,7 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
     error_breakdown: { rate_limited: 1, network_error: 1 },
     retries: { total_retries: 4, retried_requests: 3, exhausted_requests: 1 },
     proxies: {
+      mode: 'static',
       configured: 0,
       used: 0,
       available: 0,
@@ -86,7 +88,7 @@ function build(options: {
   timeline?: ThroughputTimeline;
   durationMs?: number;
   targetRpm?: number;
-  proxyStats?: ProxyPoolStats;
+  proxyStats?: ProxyProviderStats;
 }) {
   const startedAt = new Date('2026-08-18T00:00:00.000Z');
   return buildSessionSummary({
@@ -263,8 +265,9 @@ describe('buildSessionSummary proxies', () => {
     };
   }
 
-  function proxyStats(perProxy: ProxyHealth[]): ProxyPoolStats {
+  function proxyStats(perProxy: ProxyHealth[]): ProxyProviderStats {
     return {
+      mode: 'static',
       configured: perProxy.length,
       available: 0,
       inUse: 0,
@@ -287,6 +290,7 @@ describe('buildSessionSummary proxies', () => {
     return cycle(n, {
       summary: runSummary({
         proxies: {
+          mode: 'static',
           configured: 1,
           used: 1,
           available: 1,

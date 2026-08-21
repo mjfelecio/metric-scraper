@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { type ProxyUsageView } from '../../src/core/metrics/metrics-collector.js';
 import { type ProxyUsage } from '../../src/core/models/run-summary.js';
 import { buildProxySummary, mergeProxyUsage } from '../../src/core/runner/build-proxy-summary.js';
-import { type ProxyHealth, type ProxyPoolStats } from '../../src/core/scraper/pool-ports.js';
+import { type ProxyHealth } from '../../src/core/scraper/pool-ports.js';
+import { type ProxyProviderStats } from '../../src/core/scraper/provider-ports.js';
 import { type ProxySourceStats } from '../../src/core/scraper/proxy-source-ports.js';
 
 const COOLING_UNTIL = Date.parse('2026-08-18T19:26:00.000Z');
@@ -41,8 +42,12 @@ function health(overrides: Partial<ProxyHealth> = {}): ProxyHealth {
   };
 }
 
-function stats(perProxy: ProxyHealth[], overrides: Partial<ProxyPoolStats> = {}): ProxyPoolStats {
+function stats(
+  perProxy: ProxyHealth[],
+  overrides: Partial<ProxyProviderStats> = {},
+): ProxyProviderStats {
   return {
+    mode: 'static',
     configured: perProxy.length,
     available: perProxy.filter((entry) => entry.state !== 'cooling' && entry.state !== 'retired')
       .length,
