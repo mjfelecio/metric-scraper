@@ -3,6 +3,10 @@ import { describe, expect, it } from 'vitest';
 import { parseInstagramClipsResponse } from '../../src/platforms/instagram/instagram-clips-parser.js';
 import { parseInstagramMediaInfoResponse } from '../../src/platforms/instagram/instagram-media-info-parser.js';
 import { parseInstagramPostResponse } from '../../src/platforms/instagram/instagram-post-parser.js';
+import {
+  InstagramMediaUnavailableError,
+  InstagramParseError,
+} from '../../src/platforms/instagram/instagram-parser-utils.js';
 import { shortcodeToMediaId } from '../../src/platforms/instagram/instagram-shortcode.js';
 
 const CODE = 'DcBr7X4SL3h';
@@ -49,6 +53,63 @@ describe('Instagram response parsers', () => {
       mediaType: 2,
       posted_at: '2023-11-14T22:13:20.000Z',
     });
+  });
+
+  it('distinguishes a valid empty media list from a malformed response', () => {
+    expect(() =>
+      parseInstagramPostResponse(
+        JSON.stringify({
+          data: { xdt_api__v1__media__shortcode__web_info: { items: [] } },
+          status: 'ok',
+        }),
+        CODE,
+        MEDIA_ID,
+      ),
+    ).toThrow(InstagramMediaUnavailableError);
+  });
+
+  it('keeps invalid JSON and missing or malformed operation data as parse errors', () => {
+    const parse = (body: string): void => {
+      parseInstagramPostResponse(body, CODE, MEDIA_ID);
+    };
+
+    expect(() => parse('{not-json')).toThrow(InstagramParseError);
+    expect(() => parse(JSON.stringify({ data: {}, status: 'ok' }))).toThrow(
+      /missing operation data/,
+    );
+    expect(() =>
+      parse(
+        JSON.stringify({
+          data: { xdt_api__v1__media__shortcode__web_info: { items: {} } },
+          status: 'ok',
+        }),
+      ),
+    ).toThrow(/invalid shape/);
+  });
+
+  it('keeps a post shortcode mismatch as a parse error', () => {
+    expect(() =>
+      parseInstagramPostResponse(
+        JSON.stringify({
+          data: {
+            xdt_api__v1__media__shortcode__web_info: {
+              items: [
+                {
+                  code: 'different',
+                  media_type: 2,
+                  like_count: 1,
+                  comment_count: 2,
+                  user: { pk: '25025320', username: 'instagram' },
+                },
+              ],
+            },
+          },
+          status: 'ok',
+        }),
+        CODE,
+        MEDIA_ID,
+      ),
+    ).toThrow(InstagramParseError);
   });
 
   it('finds an exact play count in recent clips', () => {

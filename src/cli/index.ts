@@ -15,7 +15,10 @@ import { createDefaultUrlNormalizerRegistry } from '../platforms/index.js';
 
 import { executeBatch, type ExecuteBatchOptions } from './execute-batch.js';
 import { executeSession } from './execute-session.js';
+import { executeStress } from './execute-stress.js';
 import { type LogLevel } from '../infrastructure/logging/pino-logger.js';
+import { STRESS_PROFILE_NAMES } from '../stress/load-generator/profiles.js';
+import { NAMED_WORKLOAD_PROFILES } from '../stress/workload/workload-profile.js';
 
 interface CommonOptions {
   concurrency?: number | undefined;
@@ -197,6 +200,93 @@ withCommonOptions(
 
   await executeBatch(merged);
 });
+
+program
+  .command('stress-test')
+  .description(
+    [
+      'Load-test the scraper against a deterministic, in-process mock upstream --',
+      'never real TikTok/Instagram traffic. Exercises the real runner, proxy pool,',
+      'retry policy and scrapers; only the network socket is mocked.',
+    ].join('\n'),
+  )
+  .addOption(
+    new Option('-p, --profile <name>', 'named load profile')
+      .choices(STRESS_PROFILE_NAMES)
+      .default('baseline'),
+  )
+  .addOption(
+    new Option('--platform <platform>', 'which platform(s) to generate synthetic jobs for')
+      .choices(['tiktok', 'instagram', 'mixed'])
+      .default('mixed'),
+  )
+  .option('-c, --concurrency <n>', 'jobs in flight at once', parsePositiveInt)
+  .option(
+    '-r, --target-rpm <n>',
+    "overrides the profile's default rate (0 = unpaced)",
+    parseNonNegativeInt,
+  )
+  .option('--burst <n>', 'jobs admissible at once after idle', parseNonNegativeInt)
+  .option(
+    '--duration <duration>',
+    "overrides the profile's default duration, e.g. 10m",
+    parseDurationArg,
+  )
+  .option(
+    '--total-jobs <n>',
+    "overrides the profile's default injected-batch size (burst only)",
+    parsePositiveInt,
+  )
+  .option(
+    '--ramp-up <duration>',
+    'climb to the target rate over this long in a 5-step staircase before the steady phase (0 = no ramp)',
+    parseDurationArg,
+  )
+  .option('--seed <n>', 'deterministic scenario/latency seed', parseNonNegativeInt)
+  .addOption(
+    new Option('--workload <name>', "overrides the profile's default scenario mix").choices(
+      Object.keys(NAMED_WORKLOAD_PROFILES),
+    ),
+  )
+  .option(
+    '--residential',
+    'run in rotating-residential proxy mode with placeholder gateway credentials',
+  )
+  .option('-o, --output-dir <dir>', 'directory for the report, snapshots, and their timestamps')
+  .option('--json', 'print the stress report as JSON on stdout')
+  .option('--no-progress', 'suppress phase-by-phase progress lines')
+  .addOption(
+    new Option('--log-level <level>', 'structured log level (written to stderr)').choices([
+      'trace',
+      'debug',
+      'info',
+      'warn',
+      'error',
+      'fatal',
+      'silent',
+    ]),
+  )
+  .action(
+    async (options: {
+      profile: (typeof STRESS_PROFILE_NAMES)[number];
+      platform: 'tiktok' | 'instagram' | 'mixed';
+      concurrency?: number;
+      targetRpm?: number;
+      burst?: number;
+      duration?: number;
+      totalJobs?: number;
+      rampUp?: number;
+      seed?: number;
+      workload?: keyof typeof NAMED_WORKLOAD_PROFILES;
+      residential?: boolean;
+      outputDir?: string;
+      json?: boolean;
+      progress?: boolean;
+      logLevel?: LogLevel;
+    }) => {
+      await executeStress(options);
+    },
+  );
 
 program
   .command('validate')

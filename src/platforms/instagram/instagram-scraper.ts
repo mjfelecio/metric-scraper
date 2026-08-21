@@ -14,7 +14,7 @@ import { type Scraper } from '../../core/scraper/scraper.js';
 
 import { parseInstagramClipsResponse } from './instagram-clips-parser.js';
 import { parseInstagramMediaInfoResponse } from './instagram-media-info-parser.js';
-import { InstagramParseError } from './instagram-parser-utils.js';
+import { InstagramMediaUnavailableError, InstagramParseError } from './instagram-parser-utils.js';
 import { parseInstagramPostResponse, type InstagramPostData } from './instagram-post-parser.js';
 import { parseCanonicalInstagramUrl } from './instagram-url-normalizer.js';
 
@@ -266,7 +266,11 @@ export class InstagramScraper implements Scraper {
       /(?:^|[,;]\s*)csrftoken=([^;,]+)/i.exec(setCookie)?.[1] ??
       /["']csrf_token["']\s*:\s*["']([^"']+)/i.exec(response.body)?.[1];
     if (csrf === undefined || csrf.length === 0) {
-      throw new InstagramParseError('Instagram did not issue an anonymous CSRF cookie');
+      throw new ScrapeError({
+        code: 'blocked',
+        message: 'Instagram CSRF bootstrap succeeded but returned no token',
+        retryable: true,
+      });
     }
     return { csrf, cookie: cookieHeader(setCookie, csrf) };
   }
@@ -460,6 +464,14 @@ function parseOrThrownFailure(
   partial: Partial<ScrapedVideoData>,
   acquisition: AcquisitionMetadata,
 ): ScrapeResult {
+  if (error instanceof InstagramMediaUnavailableError) {
+    return scrapeFailure(
+      'not_found',
+      { code: 'not_found', message: error.message, retryable: false },
+      partial,
+      acquisition,
+    );
+  }
   if (error instanceof InstagramParseError) {
     return scrapeFailure(
       'error',
