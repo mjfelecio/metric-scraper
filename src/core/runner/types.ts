@@ -12,6 +12,8 @@ export interface JobCompletedEvent {
   retries: number;
   /** Credential-free proxy id used for the final attempt, if any. */
   proxyId: string | null;
+  /** Last platform response status received by the final attempt, if any. */
+  httpStatus: number | null;
   /** Raw platform HTTP calls across all attempts for this logical job. */
   platformHttpRequests: number;
 }

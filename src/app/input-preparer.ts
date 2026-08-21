@@ -43,6 +43,7 @@ interface ResolutionAttemptResult {
   result: UrlResolutionResult;
   proxyId: string | null;
   httpRequests: number;
+  httpStatus: number | null;
 }
 
 /** Resolves network-dependent URLs, then performs stable canonical de-duplication. */
@@ -135,6 +136,7 @@ export class InputPreparer {
     let retries = 0;
     let totalHttpRequests = 0;
     let lastProxyId: string | null = null;
+    let lastHttpStatus: number | null = null;
     let lastResult: UrlResolutionResult | null = null;
 
     while (attempts < this.options.retryPolicy.options.maxAttempts && !signal.aborted) {
@@ -142,6 +144,7 @@ export class InputPreparer {
       const attempt = await this.resolveAttempt(record, resolver, signal);
       lastResult = attempt.result;
       lastProxyId = attempt.proxyId;
+      lastHttpStatus = attempt.httpStatus;
       totalHttpRequests += attempt.httpRequests;
 
       if (attempt.result.outcome === 'ok') {
@@ -154,6 +157,7 @@ export class InputPreparer {
             attempts,
             retries,
             proxyId: lastProxyId,
+            httpStatus: lastHttpStatus,
             platformHttpRequests: totalHttpRequests,
             latencyMs: Math.max(0, this.now() - startedAt),
           },
@@ -180,6 +184,7 @@ export class InputPreparer {
         attempts,
         retries,
         proxyId: lastProxyId,
+        httpStatus: lastHttpStatus,
         platformHttpRequests: totalHttpRequests,
         latencyMs: Math.max(0, this.now() - startedAt),
       },
@@ -193,6 +198,7 @@ export class InputPreparer {
   ): Promise<ResolutionAttemptResult> {
     let lease: ProxyLease | null = null;
     let httpRequests = 0;
+    let httpStatus: number | null = null;
     let result: UrlResolutionResult;
 
     try {
@@ -209,9 +215,11 @@ export class InputPreparer {
       ]);
       result = await resolver.resolve(record.url, {
         http: {
-          request: (request) => {
+          request: async (request) => {
             httpRequests += 1;
-            return this.options.http.request(request);
+            const response = await this.options.http.request(request);
+            httpStatus = response.status;
+            return response;
           },
         },
         proxy: lease?.target ?? null,
@@ -228,7 +236,7 @@ export class InputPreparer {
     }
 
     if (lease !== null) this.reportProxyOutcome(lease, result, record.platform);
-    return { result, proxyId: lease?.id ?? null, httpRequests };
+    return { result, proxyId: lease?.id ?? null, httpRequests, httpStatus };
   }
 
   private reportProxyOutcome(
@@ -276,6 +284,7 @@ function resolutionFailure(
       attempts: 0,
       retries: 0,
       proxyId: null,
+      httpStatus: null,
       platformHttpRequests: 0,
       latencyMs: 0,
     },

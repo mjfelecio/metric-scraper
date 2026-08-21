@@ -605,6 +605,9 @@ export class RunService {
       error: event.snapshot.error,
       scrapedAt: event.snapshot.scraped_at,
       attempts: event.attempts,
+      retries: event.retries,
+      proxyId: event.proxyId,
+      httpStatus: event.httpStatus,
     };
     state.recentResults.unshift(entry);
     if (state.recentResults.length > RECENT_RESULTS_LIMIT) {

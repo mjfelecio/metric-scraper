@@ -343,6 +343,10 @@ export class ScrapeRunner {
             url: item.record.url,
             scrapedAt: this.now(),
             latencyMs: item.resolution.latencyMs,
+            attempts: item.resolution.attempts,
+            retries: item.resolution.retries,
+            proxyId: item.resolution.proxyId,
+            httpStatus: item.resolution.httpStatus,
           },
           item.status,
           item.error,
@@ -350,6 +354,7 @@ export class ScrapeRunner {
         attempts: item.resolution.attempts,
         retries: item.resolution.retries,
         proxyId: item.resolution.proxyId,
+        httpStatus: item.resolution.httpStatus,
         platformHttpRequests: item.resolution.platformHttpRequests,
         errorCode: item.error.code,
       };
@@ -357,15 +362,24 @@ export class ScrapeRunner {
 
     const event = await this.processRecord(item.record, signal, logger, runCache);
     if (item.resolution === null) return event;
+    const attempts = event.attempts + item.resolution.attempts;
+    const retries = event.retries + item.resolution.retries;
+    const proxyId = event.attempts > 0 ? event.proxyId : item.resolution.proxyId;
+    const httpStatus = event.attempts > 0 ? event.httpStatus : item.resolution.httpStatus;
     return {
       ...event,
       snapshot: {
         ...event.snapshot,
         latency_ms: event.snapshot.latency_ms + item.resolution.latencyMs,
+        attempts,
+        retries,
+        proxy_id: proxyId,
+        http_status: httpStatus,
       },
-      attempts: event.attempts + item.resolution.attempts,
-      retries: event.retries + item.resolution.retries,
-      proxyId: event.proxyId ?? item.resolution.proxyId,
+      attempts,
+      retries,
+      proxyId,
+      httpStatus,
       platformHttpRequests: event.platformHttpRequests + item.resolution.platformHttpRequests,
     };
   }
@@ -401,6 +415,7 @@ export class ScrapeRunner {
         attempts: 0,
         retries: 0,
         proxyId: null,
+        httpStatus: null,
         platformHttpRequests: 0,
         errorCode: error.code,
       };
@@ -411,6 +426,7 @@ export class ScrapeRunner {
     let lastProxyId: string | null = null;
     let lastResult: ScrapeResult | null = null;
     let platformHttpRequests = 0;
+    let lastHttpStatus: number | null = null;
 
     while (attempt < retryPolicy.options.maxAttempts) {
       attempt += 1;
@@ -419,6 +435,7 @@ export class ScrapeRunner {
       let sessionLease: SessionLease | null = null;
       let result: ScrapeResult;
       let attemptHttpRequests = 0;
+      let attemptHttpStatus: number | null = null;
 
       try {
         // Timed so that a provider which starts blocking (per-proxy capacity,
@@ -429,14 +446,13 @@ export class ScrapeRunner {
           attempt,
           signal,
         });
+        lastProxyId = proxyLease?.id ?? null;
         sessionLease = await this.deps.sessionPool.acquire(
           record.platform,
           signal,
           proxyLease?.id ?? null,
         );
         metrics.recordProxyAcquire(Date.now() - acquireStart);
-        lastProxyId = proxyLease?.id ?? null;
-
         // One request and one attempt are different budgets. The HTTP client
         // applies a fresh request timeout to every outbound call; this signal
         // bounds the whole platform workflow and preserves run cancellation.
@@ -448,9 +464,11 @@ export class ScrapeRunner {
           maxAttempts: retryPolicy.options.maxAttempts,
           signal: attemptSignal,
           http: {
-            request: (request) => {
+            request: async (request) => {
               attemptHttpRequests += 1;
-              return this.deps.http.request(request);
+              const response = await this.deps.http.request(request);
+              attemptHttpStatus = response.status;
+              return response;
             },
           },
           proxy: proxyLease,
@@ -471,6 +489,7 @@ export class ScrapeRunner {
 
       lastResult = result;
       platformHttpRequests += attemptHttpRequests;
+      lastHttpStatus = attemptHttpStatus;
       if (proxyLease !== null) {
         // Classified once, then reported to both the provider and the metrics,
         // so rotation state and the summary can never disagree about what this
@@ -530,6 +549,10 @@ export class ScrapeRunner {
       url: record.url,
       scrapedAt,
       latencyMs,
+      attempts: attempt,
+      retries,
+      proxyId: lastProxyId,
+      httpStatus: lastHttpStatus,
     };
 
     const snapshot: MetricSnapshot =
@@ -552,6 +575,7 @@ export class ScrapeRunner {
       attempts: attempt,
       retries,
       proxyId: lastProxyId,
+      httpStatus: lastHttpStatus,
       platformHttpRequests,
     };
   }

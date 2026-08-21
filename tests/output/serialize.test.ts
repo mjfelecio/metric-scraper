@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 import {
   createFailureSnapshot,
@@ -55,7 +56,7 @@ describe('serializeSnapshotLine', () => {
   });
 
   it('round-trips a snapshot', () => {
-    const snapshot = createSuccessSnapshot(context, {
+    const snapshot = createSuccessSnapshot({ ...context, attempts: 3, retries: 2, proxyId: 'proxy-a', httpStatus: 200 }, {
       ...EMPTY_VIDEO_DATA,
       video_id: 'abc',
       views: 10,
@@ -73,6 +74,20 @@ describe('serializeSnapshotLine', () => {
 });
 
 describe('parseSnapshotLine', () => {
+  it('parses every synthetic example with the additive diagnostics', () => {
+    const lines = readFileSync(new URL('../../data/examples/sample-output.jsonl', import.meta.url), 'utf8')
+      .trim()
+      .split('\n');
+    const snapshots = lines.map(parseSnapshotLine);
+    expect(snapshots).toHaveLength(5);
+    expect(snapshots[2]).toMatchObject({
+      attempts: 2,
+      retries: 1,
+      proxy_id: 'http://proxy-a.example.net:8000',
+      http_status: 200,
+    });
+  });
+
   it('rejects a line that is not JSON', () => {
     expect(() => parseSnapshotLine('{not json')).toThrow(/not valid JSON/);
   });

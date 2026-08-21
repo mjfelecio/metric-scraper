@@ -628,7 +628,9 @@ function renderResults(state: AppState): void {
           <th class="px-2 py-2 font-medium">Status</th>
           <th class="px-2 py-2 font-medium">URL</th>
           <th class="px-2 py-2 text-right font-medium">Latency</th>
-          <th class="px-2 py-2 text-right font-medium">Attempts</th>
+          <th class="px-2 py-2 text-right font-medium">Attempts / retries</th>
+          <th class="px-2 py-2 text-right font-medium">Proxy</th>
+          <th class="px-2 py-2 text-right font-medium">HTTP</th>
           <th class="px-2 py-2 text-right font-medium">Time</th>
         </tr>
       </thead>
@@ -656,7 +658,9 @@ function resultRow(result: RecentResultDto): string {
       }
     </td>
     <td class="px-2 py-2 text-right align-top font-mono text-slate-400">${result.latencyMs} ms</td>
-    <td class="px-2 py-2 text-right align-top font-mono text-slate-400">${result.attempts}</td>
+    <td class="px-2 py-2 text-right align-top font-mono text-slate-400">${result.attempts} / ${result.retries}</td>
+    <td class="px-2 py-2 text-right align-top font-mono text-slate-400">${escapeHtml(result.proxyId ?? '—')}</td>
+    <td class="px-2 py-2 text-right align-top font-mono text-slate-400">${result.httpStatus ?? '—'}</td>
     <td class="px-2 py-2 text-right align-top font-mono text-slate-500"
         title="${escapeHtml(result.scrapedAt)}">${escapeHtml(formatClock(Date.parse(result.scrapedAt)))}</td>
   </tr>`;

@@ -128,6 +128,9 @@ describe('recent results', () => {
       error: status === 'ok' ? null : 'http_error: boom',
       scrapedAt,
       attempts: 1,
+      retries: 0,
+      proxyId: null,
+      httpStatus: status === 'ok' ? 200 : null,
     };
   }
 
@@ -154,6 +157,9 @@ describe('recent results', () => {
     expect(html).toContain('2026-08-19T16:40:18.000Z');
     // A failed cycle is still a result.
     expect(html).toContain('http_error: boom');
+    expect(html).toContain('1 / 0');
+    expect(html).toContain('200');
+    expect(html).toContain('—');
   });
 
   it('prompts for the first result rather than showing an empty table', async () => {

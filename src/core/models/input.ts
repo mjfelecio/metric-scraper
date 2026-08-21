@@ -27,6 +27,7 @@ export interface InputResolutionStats {
   attempts: number;
   retries: number;
   proxyId: string | null;
+  httpStatus: number | null;
   platformHttpRequests: number;
   latencyMs: number;
 }

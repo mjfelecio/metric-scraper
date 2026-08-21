@@ -36,6 +36,10 @@ function snapshot(overrides: Partial<MetricSnapshot> = {}): MetricSnapshot {
     status: 'ok',
     error: null,
     latency_ms: 400,
+    attempts: 1,
+    retries: 0,
+    proxy_id: null,
+    http_status: 200,
     ...overrides,
   };
 }

@@ -56,6 +56,18 @@ describe('MetricSnapshotSchema', () => {
     expect(MetricSnapshotSchema.safeParse({ ...base, likes: 1.5 }).success).toBe(false);
   });
 
+  it('validates request diagnostics and preserves nullable terminal details', () => {
+    const base = createSuccessSnapshot(
+      { ...context, attempts: 2, retries: 1, proxyId: null, httpStatus: 200 },
+      EMPTY_VIDEO_DATA,
+    );
+    expect(base).toMatchObject({ attempts: 2, retries: 1, proxy_id: null, http_status: 200 });
+    expect(MetricSnapshotSchema.safeParse({ ...base, attempts: -1 }).success).toBe(false);
+    expect(MetricSnapshotSchema.safeParse({ ...base, retries: 0.5 }).success).toBe(false);
+    expect(MetricSnapshotSchema.safeParse({ ...base, http_status: 99 }).success).toBe(false);
+    expect(MetricSnapshotSchema.safeParse({ ...base, proxy_id: '' }).success).toBe(false);
+  });
+
   it('rejects an unparseable scraped_at', () => {
     const base = createSuccessSnapshot(context, EMPTY_VIDEO_DATA);
     expect(MetricSnapshotSchema.safeParse({ ...base, scraped_at: 'yesterday' }).success).toBe(

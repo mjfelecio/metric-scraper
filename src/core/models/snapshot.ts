@@ -47,6 +47,14 @@ export const MetricSnapshotSchema = z.object({
   error: z.string().nullable(),
   /** Wall-clock duration of the acquisition attempt chain, including retries. */
   latency_ms: z.number().int().nonnegative(),
+  /** Attempts used for this logical job, including the first attempt. */
+  attempts: z.number().int().nonnegative(),
+  /** Attempts beyond the first. */
+  retries: z.number().int().nonnegative(),
+  /** Credential-free proxy id used by the terminal attempt, if any. */
+  proxy_id: z.string().min(1).nullable(),
+  /** Last platform response status received by the terminal attempt, if any. */
+  http_status: z.number().int().min(100).max(599).nullable(),
 });
 
 export type MetricSnapshot = z.infer<typeof MetricSnapshotSchema>;
@@ -100,6 +108,10 @@ export const SNAPSHOT_FIELD_ORDER = [
   'status',
   'error',
   'latency_ms',
+  'attempts',
+  'retries',
+  'proxy_id',
+  'http_status',
 ] as const satisfies readonly (keyof MetricSnapshot)[];
 
 export function formatErrorField(error: ScrapeErrorInfo): string {
@@ -111,6 +123,10 @@ export interface SnapshotContext {
   url: string;
   scrapedAt: Date;
   latencyMs: number;
+  attempts?: number | undefined;
+  retries?: number | undefined;
+  proxyId?: string | null | undefined;
+  httpStatus?: number | null | undefined;
 }
 
 export function createSuccessSnapshot(
@@ -133,6 +149,10 @@ export function createSuccessSnapshot(
     status: 'ok',
     error: null,
     latency_ms: context.latencyMs,
+    attempts: context.attempts ?? 0,
+    retries: context.retries ?? 0,
+    proxy_id: context.proxyId ?? null,
+    http_status: context.httpStatus ?? null,
   };
 }
 
@@ -163,5 +183,9 @@ export function createFailureSnapshot(
     status,
     error: formatErrorField(error),
     latency_ms: context.latencyMs,
+    attempts: context.attempts ?? 0,
+    retries: context.retries ?? 0,
+    proxy_id: context.proxyId ?? null,
+    http_status: context.httpStatus ?? null,
   };
 }

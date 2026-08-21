@@ -16,6 +16,7 @@ import { MemorySnapshotSink } from '../../src/core/output/snapshot-sink.js';
 import { RetryPolicy } from '../../src/core/retry/retry-policy.js';
 import { ScrapeRunner } from '../../src/core/runner/scrape-runner.js';
 import { type HttpClient } from '../../src/core/scraper/http-port.js';
+import { serializeSnapshotLine } from '../../src/core/output/serialize.js';
 import { createScraperRegistry, type Scraper } from '../../src/core/scraper/scraper.js';
 import { type ProxyPool } from '../../src/core/scraper/pool-ports.js';
 import {
@@ -70,6 +71,7 @@ function buildRunner(options: {
   attemptTimeoutMsByPlatform?: Readonly<Record<Platform, number>>;
   createTimeoutSignal?: (delayMs: number) => AbortSignal;
   http?: HttpClient;
+  now?: () => Date;
 }) {
   const sink = options.sink ?? new MemorySnapshotSink();
   const metrics = new MetricsCollector();
@@ -101,6 +103,7 @@ function buildRunner(options: {
     },
     // No real waiting in tests; the backoff schedule is covered by the retry tests.
     sleep: () => Promise.resolve(),
+    ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.createTimeoutSignal === undefined
       ? {}
       : { createTimeoutSignal: options.createTimeoutSignal }),
@@ -151,6 +154,7 @@ describe('ScrapeRunner', () => {
         attempts: 1,
         retries: 0,
         proxyId: null,
+        httpStatus: 404,
         platformHttpRequests: 1,
         latencyMs: 12,
       },
@@ -163,6 +167,10 @@ describe('ScrapeRunner', () => {
       url: 'https://vm.tiktok.com/GONE/',
       status: 'not_found',
       latency_ms: 12,
+      attempts: 1,
+      retries: 0,
+      proxy_id: null,
+      http_status: 404,
     });
     expect(result.summary.totals.failures).toBe(1);
     expect(result.summary.totals.platform_http_requests).toBe(1);
@@ -221,6 +229,84 @@ describe('ScrapeRunner', () => {
     expect(result.summary.retries.total_retries).toBe(2);
     expect(result.summary.retries.retried_requests).toBe(1);
     expect(result.summary.retries.exhausted_requests).toBe(0);
+  });
+
+  it('attributes status only to the terminal attempt and keeps the logical start timestamp', async () => {
+    const statuses = [429, 200];
+    const http: HttpClient = {
+      request: (request) =>
+        Promise.resolve({
+          url: request.url,
+          status: statuses.shift() ?? 200,
+          statusText: 'test',
+          headers: {},
+          body: '',
+          redirected: false,
+          durationMs: 1,
+        }),
+    };
+    const scraper: Scraper = {
+      platform: 'tiktok',
+      async scrape(url, context) {
+        const response = await context.http.request({ url });
+        return response.status === 200
+          ? scrapeSuccess(EMPTY_VIDEO_DATA)
+          : scrapeFailure('rate_limited', {
+              code: 'rate_limited',
+              message: 'retry',
+              retryable: true,
+            });
+      },
+    };
+    const times = [
+      new Date('2026-08-21T00:00:00.000Z'),
+      new Date('2026-08-21T00:00:01.000Z'),
+      new Date('2026-08-21T00:00:09.000Z'),
+    ];
+    const { runner, sink } = buildRunner({
+      scraper,
+      http,
+      maxAttempts: 2,
+      now: () => times.shift() ?? new Date('2026-08-21T00:00:09.000Z'),
+    });
+
+    await runner.run(records('https://t/1'));
+
+    expect(sink.snapshots[0]).toMatchObject({
+      scraped_at: '2026-08-21T00:00:01.000Z',
+      attempts: 2,
+      retries: 1,
+      proxy_id: null,
+      http_status: 200,
+    });
+  });
+
+  it('does not serialize proxy credentials in request diagnostics', async () => {
+    const proxyPool = new InMemoryProxyPool({
+      targets: [
+        {
+          protocol: 'http',
+          host: 'proxy.example.net',
+          port: 8000,
+          username: 'secret-user',
+          password: 'secret-password',
+          url: 'http://secret-user:secret-password@proxy.example.net:8000/',
+        },
+      ],
+      maxConcurrentPerProxy: 1,
+    });
+    const { runner, sink } = buildRunner({
+      scraper: new FakeScraper(() => scrapeSuccess(EMPTY_VIDEO_DATA)),
+      proxyPool,
+    });
+
+    await runner.run(records('https://t/1'));
+
+    const line = serializeSnapshotLine(sink.snapshots[0]!);
+    expect(line).toContain('http://proxy.example.net:8000');
+    expect(line).not.toContain('secret-user');
+    expect(line).not.toContain('secret-password');
+    expect(line).not.toContain('@proxy.example.net');
   });
 
   it('stops after the attempt budget and marks the request exhausted', async () => {

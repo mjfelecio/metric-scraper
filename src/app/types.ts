@@ -77,6 +77,9 @@ export interface RecentResultDto {
   error: string | null;
   scrapedAt: string;
   attempts: number;
+  retries: number;
+  proxyId: string | null;
+  httpStatus: number | null;
 }
 
 export interface InputReportDto {

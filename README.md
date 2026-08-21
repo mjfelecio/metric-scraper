@@ -702,19 +702,29 @@ IDs are configurable because they are undocumented and volatile.
 
 One JSON object per line, appended, UTF-8, keys in a fixed order:
 
-| Field                                       | Type                                                  | Notes                                    |
-| ------------------------------------------- | ----------------------------------------------------- | ---------------------------------------- |
-| `platform`                                  | `"tiktok" \| "instagram"`                             |                                          |
-| `video_id`                                  | `string \| null`                                      | Platform-native id; not a unique row key |
-| `url`                                       | `string`                                              | The normalized URL that was requested    |
-| `scraped_at`                                | ISO-8601 `string`                                     |                                          |
-| `views` `likes` `comments` `shares` `saves` | `number \| null`                                      | `null` = not available, never `0`        |
-| `author_handle`                             | `string \| null`                                      |                                          |
-| `author_follower_count`                     | `number \| null`                                      |                                          |
-| `posted_at`                                 | ISO-8601 `string \| null`                             |                                          |
-| `status`                                    | `ok \| not_found \| private \| rate_limited \| error` |                                          |
-| `error`                                     | `string \| null`                                      | `"<error_code>: <message>"` on failure   |
-| `latency_ms`                                | `number`                                              | Whole attempt chain, including retries   |
+| Field                                       | Type                                                  | Notes                                                 |
+| ------------------------------------------- | ----------------------------------------------------- | ----------------------------------------------------- |
+| `platform`                                  | `"tiktok" \| "instagram"`                             |                                                       |
+| `video_id`                                  | `string \| null`                                      | Platform-native id; not a unique row key              |
+| `url`                                       | `string`                                              | The normalized URL that was requested                 |
+| `scraped_at`                                | ISO-8601 `string`                                     | Logical job-start time; unchanged across retries      |
+| `views` `likes` `comments` `shares` `saves` | `number \| null`                                      | `null` = not available, never `0`                     |
+| `author_handle`                             | `string \| null`                                      |                                                       |
+| `author_follower_count`                     | `number \| null`                                      |                                                       |
+| `posted_at`                                 | ISO-8601 `string \| null`                             |                                                       |
+| `status`                                    | `ok \| not_found \| private \| rate_limited \| error` |                                                       |
+| `error`                                     | `string \| null`                                      | `"<error_code>: <message>"` on failure                |
+| `latency_ms`                                | `number`                                              | Whole attempt chain, including retries                |
+| `attempts`                                  | nonnegative integer                                   | Attempts used, including the first                    |
+| `retries`                                   | nonnegative integer                                   | Attempts beyond the first                             |
+| `proxy_id`                                  | `string \| null`                                      | Credential-free terminal-attempt proxy id             |
+| `http_status`                               | integer `\| null`                                     | Last platform status received by the terminal attempt |
+
+The terminal diagnostics never include proxy URLs, headers, cookies, usernames, passwords,
+or tokens. A direct request has `proxy_id: null`; an attempt that received no HTTP response
+has `http_status: null`. Input/preflight failures that never start an attempt use zero for
+both attempt counters and `null` terminal details. `scraped_at` is the logical job-start
+timestamp, not response completion or metric-observation time.
 
 Runs also write `<name>.summary.json` next to the JSONL: totals, success rate, actual
 throughput, raw platform HTTP calls, latency p50/p95/max, status and error breakdowns,
