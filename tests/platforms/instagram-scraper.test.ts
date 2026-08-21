@@ -4,6 +4,7 @@ import { nullLogger } from '../../src/core/logging/logger.js';
 import { type HttpClient, type HttpResponse } from '../../src/core/scraper/http-port.js';
 import { type PlatformSession } from '../../src/core/scraper/lease-ports.js';
 import { type ScrapeContext } from '../../src/core/scraper/scrape-context.js';
+import { classifyProxyOutcome } from '../../src/core/runner/proxy-outcome.js';
 import { InstagramScraper } from '../../src/platforms/instagram/instagram-scraper.js';
 import { shortcodeToMediaId } from '../../src/platforms/instagram/instagram-shortcode.js';
 
@@ -57,6 +58,13 @@ function postBody(
         ],
       },
     },
+    status: 'ok',
+  });
+}
+
+function unavailablePostBody(): string {
+  return JSON.stringify({
+    data: { xdt_api__v1__media__shortcode__web_info: { items: [] } },
     status: 'ok',
   });
 }
@@ -159,6 +167,109 @@ describe('InstagramScraper', () => {
     expect(result.outcome).toBe('ok');
     expect(request.mock.calls[1]?.[0].headers?.['x-csrftoken']).toBe('html-csrf-token');
     expect(request.mock.calls[1]?.[0].cookie).toContain('csrftoken=html-csrf-token');
+  });
+
+  it('classifies a valid empty post response as publicly unavailable', async () => {
+    const request = vi
+      .fn<HttpClient['request']>()
+      .mockResolvedValueOnce(rootResponse())
+      .mockResolvedValueOnce(response(200, unavailablePostBody()));
+
+    const result = await new InstagramScraper().scrape(URL, context({ request }));
+
+    expect(result.outcome).toBe('failure');
+    if (result.outcome === 'failure') {
+      expect(result.status).toBe('not_found');
+      expect(result.error).toEqual({
+        code: 'not_found',
+        message: 'Instagram returned no publicly available media',
+        retryable: false,
+      });
+      expect(result.partial?.video_id).toBe(MEDIA_ID);
+      expect(classifyProxyOutcome(result)).toBe('success');
+    }
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['invalid JSON', '{not-json'],
+    ['missing operation data', JSON.stringify({ data: {}, status: 'ok' })],
+    [
+      'a malformed operation',
+      JSON.stringify({
+        data: { xdt_api__v1__media__shortcode__web_info: { items: {} } },
+        status: 'ok',
+      }),
+    ],
+  ])('keeps %s as a non-retryable parse error', async (_case, body) => {
+    const request = vi
+      .fn<HttpClient['request']>()
+      .mockResolvedValueOnce(rootResponse())
+      .mockResolvedValueOnce(response(200, body));
+
+    const result = await new InstagramScraper().scrape(URL, context({ request }));
+
+    expect(result.outcome).toBe('failure');
+    if (result.outcome === 'failure') {
+      expect(result.status).toBe('error');
+      expect(result.error.code).toBe('parse_error');
+      expect(result.error.retryable).toBe(false);
+      expect(classifyProxyOutcome(result)).toBe('neutral');
+    }
+  });
+
+  it('treats a successful CSRF bootstrap without a token as a retryable block', async () => {
+    const request = vi.fn<HttpClient['request']>().mockResolvedValueOnce(
+      response(200, '<html></html>', {
+        'set-cookie': 'mid=mid-test; Path=/; Secure',
+      }),
+    );
+
+    const result = await new InstagramScraper().scrape(URL, context({ request }));
+
+    expect(result.outcome).toBe('failure');
+    if (result.outcome === 'failure') {
+      expect(result.status).toBe('rate_limited');
+      expect(result.error.code).toBe('blocked');
+      expect(result.error.retryable).toBe(true);
+      expect(classifyProxyOutcome(result)).toBe('blocked');
+    }
+  });
+
+  it('evicts a failed CSRF bootstrap so the next scrape can bootstrap again', async () => {
+    const request = vi
+      .fn<HttpClient['request']>()
+      .mockResolvedValueOnce(response(200, '<html></html>'))
+      .mockResolvedValueOnce(rootResponse())
+      .mockResolvedValueOnce(response(200, postBody({ views: 123456 })));
+    const scraper = new InstagramScraper();
+
+    const first = await scraper.scrape(URL, context({ request }));
+    const second = await scraper.scrape(URL, context({ request }));
+
+    expect(first.outcome).toBe('failure');
+    expect(second.outcome).toBe('ok');
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request.mock.calls[1]?.[0].url).toBe('https://www.instagram.com/');
+  });
+
+  it('keeps authenticated fallback reachable for an anonymous empty media list', async () => {
+    const request = vi
+      .fn<HttpClient['request']>()
+      .mockResolvedValueOnce(rootResponse())
+      .mockResolvedValueOnce(response(200, unavailablePostBody()))
+      .mockResolvedValueOnce(response(200, mediaInfoBody()));
+
+    const result = await new InstagramScraper().scrape(URL, context({ request }, directSession));
+
+    expect(result.outcome).toBe('ok');
+    if (result.outcome === 'ok') {
+      expect(result.data.views).toBe(96047130);
+      expect(result.acquisition).toEqual({ httpRequests: 3, sessionUsed: true });
+    }
+    expect(request.mock.calls[2]?.[0].url).toBe(
+      `https://i.instagram.com/api/v1/media/${MEDIA_ID}/info/`,
+    );
   });
 
   it('looks up exact recent-Reel views through the anonymous clips operation', async () => {

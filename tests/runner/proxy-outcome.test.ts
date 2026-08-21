@@ -204,6 +204,20 @@ describe('proxy health classification', () => {
     expect(reported).toMatchObject({ blocked: true, failures: 1 });
   });
 
+  it('marks the proxy blocked when Instagram reports a missing CSRF bootstrap token', async () => {
+    const { health, reported } = await reportOne(
+      scrapeFailure('rate_limited', {
+        code: 'blocked',
+        message: 'Instagram CSRF bootstrap returned no token',
+        retryable: true,
+      }),
+    );
+
+    expect(health.blocked).toBe(true);
+    expect(health.cooldownUntil).not.toBeNull();
+    expect(reported).toMatchObject({ blocked: true, failures: 1 });
+  });
+
   it('records HTTP 451 as an unsuitable exit node, not as a plain failure', async () => {
     const { health, reported } = await reportOne(
       scrapeFailure('error', {
