@@ -18,6 +18,7 @@ import { type ProxyTarget } from '../../src/core/scraper/lease-ports.js';
 import { type ProxyHealth } from '../../src/core/scraper/pool-ports.js';
 import { createScraperRegistry, type Scraper } from '../../src/core/scraper/scraper.js';
 import { InMemoryProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
+import { StaticProxyProvider } from '../../src/infrastructure/proxy/static-proxy-provider.js';
 import { NullSessionPool } from '../../src/infrastructure/session/in-memory-session-pool.js';
 
 const unusedHttp: HttpClient = {
@@ -70,7 +71,7 @@ function runnerWith(options: {
   const runner = new ScrapeRunner({
     scrapers: createScraperRegistry([options.scraper]),
     http: unusedHttp,
-    proxyPool: pool,
+    proxyProvider: new StaticProxyProvider(pool),
     sessionPool: new NullSessionPool(),
     sink: new MemorySnapshotSink(),
     metrics: new MetricsCollector(),

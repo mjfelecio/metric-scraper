@@ -24,6 +24,7 @@ import { type HttpClient } from '../../src/core/scraper/http-port.js';
 import { createScraperRegistry, type Scraper } from '../../src/core/scraper/scraper.js';
 import { resolveSessionPaths } from '../../src/infrastructure/output/run-paths.js';
 import { NullProxyPool } from '../../src/infrastructure/proxy/in-memory-proxy-pool.js';
+import { StaticProxyProvider } from '../../src/infrastructure/proxy/static-proxy-provider.js';
 import { NullSessionPool } from '../../src/infrastructure/session/in-memory-session-pool.js';
 import { createDefaultUrlNormalizerRegistry } from '../../src/platforms/index.js';
 
@@ -81,7 +82,7 @@ function runnerFactory(options: {
       runner: new ScrapeRunner({
         scrapers: createScraperRegistry([options.scraper]),
         http: unusedHttp,
-        proxyPool: new NullProxyPool(),
+        proxyProvider: new StaticProxyProvider(new NullProxyPool()),
         sessionPool: new NullSessionPool(),
         sink: context.sink,
         metrics,
@@ -96,7 +97,7 @@ function runnerFactory(options: {
         sleep: () => Promise.resolve(),
       }),
       metrics,
-      proxyPool: new NullProxyPool(),
+      proxyProvider: new StaticProxyProvider(new NullProxyPool()),
       sessionPool: new NullSessionPool(),
       normalizers: createDefaultUrlNormalizerRegistry(),
       concurrency: 4,

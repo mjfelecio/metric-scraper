@@ -76,7 +76,7 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
     logger,
     sink,
     overrides: options.overrides,
-    proxyPool: proxySupply.pool,
+    proxyProvider: proxySupply.provider,
   });
 
   const progress = new ProgressReporter({

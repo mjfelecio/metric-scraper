@@ -24,8 +24,9 @@ import { type SnapshotSink } from '../output/snapshot-sink.js';
 import { realSleep, type Sleep } from '../retry/sleep.js';
 import { type RetryPolicy } from '../retry/retry-policy.js';
 import { type HttpClient } from '../scraper/http-port.js';
-import { type ProxyLease, type ProxyOutcome, type SessionLease } from '../scraper/lease-ports.js';
-import { type ProxyPool, type SessionPool } from '../scraper/pool-ports.js';
+import { type ProxyLease, type SessionLease } from '../scraper/lease-ports.js';
+import { type SessionPool } from '../scraper/pool-ports.js';
+import { type ProxyProvider } from '../scraper/provider-ports.js';
 import { type ScraperRegistry } from '../scraper/scraper.js';
 
 import { buildRunSummary } from './build-summary.js';
@@ -48,7 +49,7 @@ export interface ScrapeRunnerConfig {
 export interface ScrapeRunnerDeps {
   scrapers: ScraperRegistry;
   http: HttpClient;
-  proxyPool: ProxyPool;
+  proxyProvider: ProxyProvider;
   sessionPool: SessionPool;
   sink: SnapshotSink;
   metrics: MetricsCollector;
@@ -276,7 +277,7 @@ export class ScrapeRunner {
       finishedAt,
       counts,
       metrics: metrics.view(),
-      proxyStats: this.deps.proxyPool.getStats(),
+      proxyStats: this.deps.proxyProvider.getStats(),
       sessionStats: this.deps.sessionPool.getStats(),
       concurrency: config.concurrency,
       targetRpm: config.targetRpm,
@@ -348,10 +349,14 @@ export class ScrapeRunner {
       let attemptHttpRequests = 0;
 
       try {
-        // Timed so that a pool which starts blocking (per-proxy capacity, or a
-        // fully cooling-down pool) can never become an invisible serializer.
+        // Timed so that a provider which starts blocking (per-proxy capacity,
+        // or a fully cooling-down pool) can never become an invisible serializer.
         const acquireStart = Date.now();
-        proxyLease = await this.deps.proxyPool.acquire(signal);
+        proxyLease = await this.deps.proxyProvider.acquire({
+          platform: record.platform,
+          attempt,
+          signal,
+        });
         sessionLease = await this.deps.sessionPool.acquire(
           record.platform,
           signal,
@@ -391,11 +396,16 @@ export class ScrapeRunner {
       lastResult = result;
       platformHttpRequests += attemptHttpRequests;
       if (proxyLease !== null) {
-        // Classified once, then reported to both the pool and the metrics, so
-        // rotation state and the summary can never disagree about what this
+        // Classified once, then reported to both the provider and the metrics,
+        // so rotation state and the summary can never disagree about what this
         // attempt said about the proxy.
         const proxyOutcome = classifyProxyOutcome(result);
-        this.applyProxyOutcome(proxyLease, proxyOutcome, result);
+        this.deps.proxyProvider.release(proxyLease, proxyOutcome, {
+          reason: result.outcome === 'ok' ? undefined : result.error.message,
+          // Carried alongside the message so a provider can say *what kind* of
+          // failure this was, not just that something failed.
+          errorCode: result.outcome === 'ok' ? undefined : result.error.code,
+        });
         metrics.recordProxyOutcome(proxyLease.id, proxyOutcome, {
           platform: record.platform,
           errorCode: result.outcome === 'ok' ? null : result.error.code,
@@ -457,32 +467,6 @@ export class ScrapeRunner {
           );
 
     return { snapshot, attempts: attempt, retries, proxyId: lastProxyId, platformHttpRequests };
-  }
-
-  private applyProxyOutcome(lease: ProxyLease, outcome: ProxyOutcome, result: ScrapeResult): void {
-    const pool = this.deps.proxyPool;
-    const reason = result.outcome === 'ok' ? undefined : result.error.message;
-    // Carried alongside the message so the pool can say *what kind* of failure
-    // benched a proxy, not just that something did.
-    const errorCode = result.outcome === 'ok' ? undefined : result.error.code;
-    switch (outcome) {
-      case 'success':
-        pool.reportSuccess(lease);
-        break;
-      case 'blocked':
-        pool.markBlocked(lease, reason, errorCode);
-        break;
-      case 'unsuitable':
-        pool.reportUnsuitable(lease, reason, errorCode);
-        break;
-      case 'failure':
-        pool.reportFailure(lease, reason, errorCode);
-        break;
-      case 'neutral':
-        // Neither credited nor blamed: the lease just goes back.
-        break;
-    }
-    pool.release(lease);
   }
 
   private reportSessionOutcome(lease: SessionLease, result: ScrapeResult): void {

@@ -481,7 +481,7 @@ export class RunService {
         logger: this.logger,
         sink,
         overrides: { concurrency: request.concurrency, targetRpm: request.targetRpm },
-        proxyPool: proxySupply.pool,
+        proxyProvider: proxySupply.provider,
       });
 
       state.state = 'running';
@@ -494,7 +494,7 @@ export class RunService {
         const at = Date.now();
         if (at - proxiesSampledAt < PROXY_SAMPLE_INTERVAL_MS) return;
         proxiesSampledAt = at;
-        const stats = built.proxyPool.getStats();
+        const stats = built.proxyProvider.getStats();
         state.proxies = stats.configured === 0 ? null : stats;
       };
       sampleProxies();
