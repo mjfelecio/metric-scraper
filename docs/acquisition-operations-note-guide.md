@@ -69,6 +69,30 @@ media. It is recorded as non-retryable `not_found` after the existing authentica
 has had a chance to recover it. That observation cannot distinguish deletion from privacy,
 restriction, region limitation, or another form of anonymous unavailability.
 
+### Deleted, private, and publicly unavailable posts
+
+Neither platform exposes a reliable, universal field proving that a creator deleted a post.
+The collectors can only classify the response that the platform returned at scrape time:
+
+| Platform  | Observed signal                                    | Raw scraper status | What the signal proves                                     |
+| --------- | -------------------------------------------------- | ------------------ | ---------------------------------------------------------- |
+| TikTok    | HTTP 404                                           | `not_found`        | The requested post was not found through that public path  |
+| TikTok    | HTTP 400 from the public embed path                | `private`          | The post is not publicly readable or is creator-only       |
+| Instagram | HTTP 404                                           | `not_found`        | The requested post was not found through that public path  |
+| Instagram | Redirect to login                                  | `private`          | Anonymous access is not allowed                            |
+| Instagram | Valid post response with an explicit empty `items` | `not_found`        | Instagram returned no publicly available media anonymously |
+
+An absent post may have been deleted, made private, restricted, moderated, region-limited, or
+made unavailable for another reason. These cases can produce indistinguishable public
+responses, so the scraper must not claim a more specific reason than it observed.
+
+For the BloxClips product, map both raw `not_found` and `private` outcomes to the user-facing
+category **private/unavailable video**. This category includes deleted posts when deletion
+cannot be proven. Keep the raw status and error message in stored JSONL and internal reviews
+so engineering can still distinguish the platform signal, avoid unnecessary retries, and
+audit classification changes. Do not rewrite historical observations or replace either
+status with a fabricated `deleted` result.
+
 ## 3. Rate-limit and blocking evidence
 
 ### What the implementation recognizes
@@ -309,7 +333,9 @@ can change and still does not provide unrounded large views. Instagram's GraphQL
 IDs, clips response shape, and authenticated session behavior can change. Sessions can burn,
 and proxy effectiveness depends on provider exit quality and geographic consistency. These
 failures remain visible in JSONL and summaries rather than being replaced with zeroes or
-silently dropped.
+silently dropped. Neither platform reliably distinguishes a deleted post from every other
+form of public unavailability. BloxClips displays raw `not_found` and `private` outcomes as
+**private/unavailable video** while retaining the original status for internal evidence.
 ```
 
 ## 8. Completion checklist
