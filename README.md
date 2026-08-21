@@ -117,7 +117,11 @@ says which produced it, and totals, throughput, status breakdown, latency percen
 counts and error classification are all recorded identically. One caveat — the concurrency
 ceilings differ (see the table), so unless `PROXY_MAX_CONCURRENT` is raised until the static
 pool's earned `proxies.capacity` reaches `SCRAPER_CONCURRENCY`, a throughput comparison is
-measuring pool capacity as much as proxy quality.
+measuring pool capacity as much as proxy quality. Run and session summaries make that caveat
+auditable: `throughput.concurrency` records the configured, input, admission and known proxy
+ceilings, the resulting achievable concurrency, the minimum sampled proxy capacity, and
+structured findings. Residential `capacity: null` is reported as **unknown**, never as zero
+or unlimited.
 
 Sticky sessions are not implemented. `ProxyRequestContext` carries the platform and attempt
 number for a later session-id strategy to use, but nothing derives one today: providers
@@ -343,7 +347,8 @@ doubles its slots on each success up to `PROXY_MAX_CONCURRENT`, and halves them
 on each failure. What the pool can actually serve right now is the sum of that,
 reported as `proxies.capacity` in the run summary — and _that_ is the number to
 compare `SCRAPER_CONCURRENCY` against. If concurrency exceeds it, the pool is the
-binding constraint and the surplus shows up as `waits.proxy_acquire_ms`.
+binding constraint and the surplus shows up as aggregate job-time in
+`waits.proxy_acquire_total_ms`.
 
 The ramp exists because the earlier model was binary: full concurrency for a
 proxy whose last outcome was a success, one slot for everything else. Real
@@ -778,11 +783,19 @@ The CLI prints a warning whenever `max_observed < configured` while the queue ba
 was non-empty — capacity available but unused, which is the precise fingerprint of
 accidental serialization.
 
-Two further sections make a run's wall clock attributable rather than mysterious:
-`queue` (max depth, wait p50/p95/max) and `waits` (`admission_ms`,
-`http_rate_limit_ms`, `proxy_acquire_ms`, `retry_backoff_ms`). Retry backoff is
-recorded because it holds a concurrency slot while it sleeps, and an idle-looking
-slot must always be explainable.
+Two further sections explain delay without pretending every measurement is wall-clock time.
+`queue` describes enqueue-to-job-start delay (max depth plus wait count, total, mean,
+p50, p95, and max). `waits` reports aggregate job-time as `admission_total_ms`,
+`http_rate_limit_total_ms`, `proxy_acquire_total_ms`, and `retry_backoff_total_ms`.
+Concurrent observations can overlap, so these totals can exceed run duration and must never
+be used as wall-clock percentages. The older names without `_total` remain exact deprecated
+aliases in run JSON. Admission occurs outside concurrency slots but can overlap running jobs;
+HTTP limiting, proxy acquisition, and retry backoff occur within jobs, with backoff holding a
+slot. Separately, `duration_ms` is run wall clock and latency is each job's end-to-end time.
+
+Session JSON sums queue counts and totals, derives a weighted queue mean, and takes maximum
+depth and maximum wait. It deliberately omits queue percentiles because per-cycle percentiles
+cannot be combined. Its four canonical wait totals are sums across successful cycles.
 
 A continuous session writes one file per session instead, plus a summary per cycle:
 
@@ -828,10 +841,11 @@ including the case of the same video appearing twice with different `scraped_at`
 - **Sticky sessions are not implemented** (see [Proxy modes](#proxy-modes)). The port
   carries the context a session strategy would need; the provider-specific username
   format it would encode is deliberately not guessed at.
-- **The two proxy modes are not automatically comparable on throughput.** A static run is
-  bounded by the pool's earned capacity and a residential run by `SCRAPER_CONCURRENCY`, so
-  `PROXY_MAX_CONCURRENT` has to be raised until `proxies.capacity` reaches the configured
-  concurrency before a throughput difference can be attributed to the proxies themselves.
+- **Residential-specific automatic concurrency controls are deferred.** The shared
+  diagnostics expose differing ceilings so cross-mode comparisons are auditable, while a
+  static run remains bounded by earned pool capacity. Keep using `PROXY_MAX_CONCURRENT` and
+  compare configured, known and achievable concurrency; no residential ceiling is assumed
+  until a real provider limit is established.
 - **Proxy health lives for one process.** Cooldowns and retirement are in-memory and
   session-scoped: a new run starts with a fresh pool. That is deliberate — a cooldown is a
   statement about a 30-second-old observation, and restoring yesterday's would bench

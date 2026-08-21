@@ -147,6 +147,7 @@ function sourceStats(overrides: Partial<ProxySourceStats> = {}): ProxySourceStat
     admissionToFirstSuccessRate: null,
     targetCapacity: 10,
     ...overrides,
+    evictions: overrides.evictions ?? 0,
   };
 }
 
@@ -325,7 +326,7 @@ describe('InMemoryProxyPool capacity', () => {
     const suspect = first.id;
     proxies.reportFailure(first, 'timeout');
     proxies.release(first);
-    proxies.reportFailure(first, 'timeout');
+    proxies.reportFailure({ ...first, generation: first.generation + 1 }, 'timeout');
 
     const held = await drain(proxies);
     expect(held.filter((lease) => lease.id === suspect)).toHaveLength(1);
@@ -451,7 +452,7 @@ describe('InMemoryProxyPool earned capacity', () => {
     proxies.release(lease);
     const walk: (number | null)[] = [capacities(proxies).a!];
     for (let i = 0; i < 3; i += 1) {
-      proxies.reportFailure(lease, 'timeout');
+      proxies.reportFailure({ ...lease, generation: lease.generation + i }, 'timeout');
       walk.push(capacities(proxies).a!);
     }
     expect(walk).toEqual([8, 4, 2, 1]);
@@ -665,6 +666,53 @@ describe('InMemoryProxyPool exploration', () => {
 });
 
 describe('InMemoryProxyPool health', () => {
+  it('counts eight simultaneous failures once and does not extend their cooldown', async () => {
+    const { pool: proxies, advance } = pool({
+      names: ['a'],
+      maxConcurrentPerProxy: 8,
+      maxConsecutiveFailures: 1,
+      cooldownMs: 60_000,
+    });
+    await prove(proxies, 1, 3);
+
+    const leases = await Promise.all(Array.from({ length: 8 }, () => proxies.acquire()));
+    proxies.reportFailure(leases[0]!, 'first');
+    const deadline = proxies.getStats().perProxy[0]!.cooldownUntil;
+
+    advance(5_000);
+    for (const lease of leases.slice(1)) proxies.reportFailure(lease!, 'straggler');
+
+    const health = proxies.getStats().perProxy[0]!;
+    expect(health.failures).toBe(8);
+    expect(health.consecutiveFailures).toBe(1);
+    expect(health.cooldownUntil).toBe(deadline);
+  });
+
+  it('ignores stale success and failure health mutations after recovery', async () => {
+    const { pool: proxies, advance } = pool({
+      names: ['a'],
+      maxConcurrentPerProxy: 2,
+      maxConsecutiveFailures: 1,
+      cooldownMs: 1_000,
+    });
+    await prove(proxies, 1);
+    const stale = (await proxies.acquire())!;
+    const peer = (await proxies.acquire())!;
+
+    proxies.reportFailure(peer, 'bench');
+    advance(1_000);
+    expect(proxies.getStats().perProxy[0]!.state).not.toBe('cooling');
+
+    proxies.reportSuccess(stale);
+    proxies.reportFailure(stale, 'late');
+    const health = proxies.getStats().perProxy[0]!;
+    expect(health.state).not.toBe('cooling');
+    expect(health.consecutiveFailures).toBe(0);
+    expect(health.cooldownUntil).toBeNull();
+    expect(health.successes).toBe(2);
+    expect(health.failures).toBe(2);
+  });
+
   it('benches a proxy after repeated failures and restores it after the cooldown', async () => {
     const { pool: proxies, advance } = pool({
       names: ['a', 'b'],
@@ -678,7 +726,7 @@ describe('InMemoryProxyPool health', () => {
     const again = await proxies.acquire();
     // Force both failures onto the same proxy.
     const same = again!.id === lease!.id ? again! : lease!;
-    proxies.reportFailure(same, 'timeout');
+    proxies.reportFailure({ ...same, generation: same.generation + 1 }, 'timeout');
     proxies.release(again!);
 
     const benched = proxies.getStats().perProxy.filter((p) => p.cooldownUntil !== null);
@@ -723,7 +771,7 @@ describe('InMemoryProxyPool health', () => {
     // cancelled detected blocks outright.
     proxies.reportSuccess(lease!);
     expect(proxies.getStats().perProxy[0]?.successes).toBe(1);
-    expect(proxies.getStats().perProxy[0]?.consecutiveFailures).toBe(0);
+    expect(proxies.getStats().perProxy[0]?.consecutiveFailures).toBe(1);
     expect(proxies.getStats().perProxy[0]?.cooldownUntil).not.toBeNull();
     expect(proxies.getStats().perProxy[0]?.state).toBe('cooling');
 
@@ -740,7 +788,7 @@ describe('InMemoryProxyPool health', () => {
 
     const lease = (await proxies.acquire())!;
     proxies.reportFailure(lease, 'timeout');
-    proxies.reportFailure(lease, 'timeout');
+    proxies.reportFailure({ ...lease, generation: lease.generation + 1 }, 'timeout');
     expect(proxies.getStats().perProxy[0]?.state).toBe('cooling');
 
     advance(60_000);
@@ -1020,7 +1068,7 @@ describe('InMemoryProxyPool observability', () => {
     proxies.reportFailure(first, 'timeout', 'timeout');
     expect(stateOf(proxies, first.id)).toBe('probation');
 
-    proxies.reportFailure(first, 'timeout', 'timeout');
+    proxies.reportFailure({ ...first, generation: first.generation + 1 }, 'timeout', 'timeout');
     expect(stateOf(proxies, first.id)).toBe('cooling');
 
     // Still cooling one millisecond short of the deadline.
@@ -1244,6 +1292,32 @@ describe('InMemoryProxyPool roster', () => {
     expect(proxies.evict(lease.id)).toBe(true);
     expect(proxies.getStats().configured).toBe(1);
     expect(proxies.evict(lease.id)).toBe(false);
+  });
+
+  it('retains one credential-free tombstone for duplicate eviction attempts', async () => {
+    const { pool: proxies } = pool({ names: ['a'] });
+    const lease = (await proxies.acquire())!;
+    proxies.reportFailure(lease, 'http://user:secret@a.example.net failed', 'network_error');
+    proxies.release(lease);
+
+    expect(proxies.evict(lease.id)).toBe(true);
+    expect(proxies.evict(lease.id)).toBe(false);
+
+    const stats = proxies.getStats();
+    expect(stats.configured).toBe(0);
+    expect(stats.evictionCount).toBe(1);
+    expect(stats.evicted).toHaveLength(1);
+    expect(stats.evicted[0]).toMatchObject({
+      id: lease.id,
+      label: 'p1',
+      source: 'config',
+      state: 'probation',
+      requests: 1,
+      failures: 1,
+      evictionCount: 1,
+      lastReason: 'http://***@a.example.net failed',
+    });
+    expect(JSON.stringify(stats.evicted)).not.toContain('secret');
   });
 
   it('never reuses a label after churn', () => {

@@ -4,12 +4,17 @@ import { type Platform } from '../models/platform.js';
 import {
   type CycleSummary,
   type SessionSummary,
+  type StallEpisode,
   type StopReasonValue,
   type ThroughputSampleRecord,
 } from '../models/session-summary.js';
 import { type ProxySummary, type ProxyUsage } from '../models/run-summary.js';
 import { SCRAPE_STATUSES, type ScrapeStatus } from '../models/status.js';
 import { type ProxyProviderStats } from '../scraper/provider-ports.js';
+import {
+  evaluateConcurrency,
+  resolvedAdmissionBurst,
+} from '../concurrency/concurrency-diagnostics.js';
 
 import { buildProxySummary, mergeProxyUsage } from './build-proxy-summary.js';
 import { type RunCounts } from './types.js';
@@ -33,6 +38,7 @@ export interface BuildSessionSummaryInput {
   concurrency: number;
   targetRpm: number;
   stalled: boolean;
+  stallEpisodes: readonly StallEpisode[];
   /**
    * The pool as it stood when the session ended.
    *
@@ -45,6 +51,7 @@ export interface BuildSessionSummaryInput {
   summaryPath: string | null;
   cyclesDir: string | null;
   rowsWritten: number;
+  minimumProxyCapacity?: number | null | undefined;
 }
 
 /**
@@ -102,6 +109,8 @@ function emptyProxyStats(): ProxyProviderStats {
     totalRequests: 0,
     totalFailures: 0,
     source: null,
+    evicted: [],
+    evictionCount: 0,
     perProxy: [],
   };
 }
@@ -144,6 +153,15 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
   let overranCycles = 0;
   let maxObservedConcurrency = 0;
   let queueMaxDepth = 0;
+  let queueWaitCount = 0;
+  let queueWaitTotalMs = 0;
+  let queueWaitMaxMs: number | null = null;
+  let admissionTotalMs = 0;
+  let httpRateLimitTotalMs = 0;
+  let proxyAcquireTotalMs = 0;
+  let retryBackoffTotalMs = 0;
+  let minimumProxyCapacity: number | null = null;
+  const cycleFindingCodes = new Set<string>();
 
   for (const cycle of input.cycles) {
     if (cycle.overran) overranCycles += 1;
@@ -165,6 +183,22 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
       summary.throughput.concurrency.max_observed,
     );
     queueMaxDepth = Math.max(queueMaxDepth, summary.queue.max_depth);
+    queueWaitCount += summary.queue.wait_count;
+    queueWaitTotalMs += summary.queue.wait_total_ms;
+    if (summary.queue.wait_max_ms !== null) {
+      queueWaitMaxMs = Math.max(queueWaitMaxMs ?? 0, summary.queue.wait_max_ms);
+    }
+    admissionTotalMs += summary.waits.admission_total_ms;
+    httpRateLimitTotalMs += summary.waits.http_rate_limit_total_ms;
+    proxyAcquireTotalMs += summary.waits.proxy_acquire_total_ms;
+    retryBackoffTotalMs += summary.waits.retry_backoff_total_ms;
+    const cycleMinimum = summary.throughput.concurrency.minimum_proxy_capacity;
+    if (cycleMinimum !== null) {
+      minimumProxyCapacity = Math.min(minimumProxyCapacity ?? cycleMinimum, cycleMinimum);
+    }
+    for (const finding of summary.throughput.concurrency.findings) {
+      cycleFindingCodes.add(finding.code);
+    }
 
     for (const [status, count] of Object.entries(summary.status_breakdown)) {
       statusBreakdown[status as ScrapeStatus] += count ?? 0;
@@ -177,6 +211,37 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
   const sortedLatencies = [...input.latenciesMs].sort((a, b) => a - b);
   const perMinute = (windowMs: number): number =>
     windowMs === 0 ? 0 : (requests / windowMs) * 60_000;
+  const proxyStats = input.proxyStats ?? emptyProxyStats();
+  if (input.minimumProxyCapacity !== undefined && input.minimumProxyCapacity !== null) {
+    minimumProxyCapacity = Math.min(
+      minimumProxyCapacity ?? input.minimumProxyCapacity,
+      input.minimumProxyCapacity,
+    );
+  }
+  const diagnostic = evaluateConcurrency({
+    configuredConcurrency: input.concurrency,
+    acceptedJobs: input.counts.accepted,
+    resolvedAdmissionBurst: resolvedAdmissionBurst(input.targetRpm),
+    targetRpm: input.targetRpm,
+    meanLatencyMs: mean(sortedLatencies),
+    admissionWaitMs: admissionTotalMs,
+    observedConcurrency: maxObservedConcurrency,
+    queueDemand: queueMaxDepth,
+    proxyMode: proxyStats.mode,
+    proxyCapacity: minimumProxyCapacity ?? proxyStats.capacity,
+  });
+  for (const finding of diagnostic.findings) cycleFindingCodes.add(finding.code);
+  diagnostic.findings = diagnostic.findings.filter(
+    (finding, index, rows) => rows.findIndex((row) => row.code === finding.code) === index,
+  );
+  for (const code of cycleFindingCodes) {
+    if (!diagnostic.findings.some((finding) => finding.code === code)) {
+      diagnostic.findings.push({
+        code: code as (typeof diagnostic.findings)[number]['code'],
+        severity: code === 'small_input' || code === 'proxy_capacity_unknown' ? 'info' : 'warning',
+      });
+    }
+  }
 
   return {
     session_id: input.sessionId,
@@ -226,6 +291,10 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
         utilization:
           input.concurrency === 0 ? 0 : Math.min(1, maxObservedConcurrency / input.concurrency),
         saturated: input.concurrency > 0 && maxObservedConcurrency >= input.concurrency,
+        achievable: diagnostic.achievable,
+        ceilings: diagnostic.ceilings,
+        minimum_proxy_capacity: minimumProxyCapacity ?? proxyStats.capacity,
+        findings: diagnostic.findings,
       },
       wall_clock_rpm: perMinute(durationMs),
       active_rpm: perMinute(activeMs),
@@ -250,9 +319,24 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
       exhausted_requests: exhaustedRequests,
     },
 
+    queue: {
+      max_depth: queueMaxDepth,
+      wait_count: queueWaitCount,
+      wait_total_ms: queueWaitTotalMs,
+      wait_mean_ms: queueWaitCount === 0 ? null : queueWaitTotalMs / queueWaitCount,
+      wait_max_ms: queueWaitMaxMs,
+    },
+    waits: {
+      admission_total_ms: admissionTotalMs,
+      http_rate_limit_total_ms: httpRateLimitTotalMs,
+      proxy_acquire_total_ms: proxyAcquireTotalMs,
+      retry_backoff_total_ms: retryBackoffTotalMs,
+    },
+
     proxies: sessionProxies(input.proxyStats, input.cycles),
 
     stalled: input.stalled,
+    stall_episodes: [...input.stallEpisodes],
 
     timeline: input.timeline.samples().map((sample): ThroughputSampleRecord => ({
       t_ms: sample.tMs,

@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+import {
+  ConcurrencyCeilingsSchema,
+  ConcurrencyFindingSchema,
+} from '../concurrency/concurrency-diagnostics.js';
+
 import { PROXY_STATES } from '../scraper/pool-ports.js';
 
 import { PlatformSchema } from './platform.js';
@@ -54,6 +59,10 @@ export const ProxyUsageSchema = z.object({
   consecutive_failures: z.number().int().nonnegative(),
   blocked: z.boolean(),
   retired: z.boolean(),
+  /** Historical row retained after removal from the live roster. */
+  evicted: z.boolean(),
+  eviction_count: z.number().int().nonnegative(),
+  evicted_at: z.string().datetime().nullable(),
   /** Leases held at the moment the summary was taken. */
   in_flight: z.number().int().nonnegative(),
   /** Jobs it may hold at once given its health; `null` when unlimited. */
@@ -133,6 +142,7 @@ export const ProxySourceSummarySchema = z.object({
    * healthier.
    */
   admission_to_first_success_rate: z.number().min(0).max(1).nullable(),
+  evictions: z.number().int().nonnegative(),
   /** Usable capacity the supply aims at, in concurrent slots. */
   target_capacity: z.number().int().nonnegative(),
 });
@@ -178,6 +188,8 @@ export const ProxySummarySchema = z.object({
    */
   pool_exhausted: z.number().int().nonnegative(),
   total_failures: z.number().int().nonnegative(),
+  /** Historical removals; not included in `configured` or other live gauges. */
+  eviction_count: z.number().int().nonnegative(),
   source: ProxySourceSummarySchema.nullable(),
   per_proxy: z.array(ProxyUsageSchema),
 });
@@ -200,26 +212,40 @@ export const ConcurrencySummarySchema = z.object({
   utilization: z.number().min(0).max(1),
   /** Whether the configured ceiling was ever actually reached. */
   saturated: z.boolean(),
+  /** Best attainable value after all known ceilings are applied. */
+  achievable: z.number().int().nonnegative(),
+  ceilings: ConcurrencyCeilingsSchema,
+  /** Lowest known pool capacity sampled during the run/session. */
+  minimum_proxy_capacity: z.number().int().nonnegative().nullable(),
+  findings: z.array(ConcurrencyFindingSchema),
 });
 export type ConcurrencySummary = z.infer<typeof ConcurrencySummarySchema>;
 
 export const QueueSummarySchema = z.object({
   /** Deepest the backlog of waiting jobs ever got. */
   max_depth: z.number().int().nonnegative(),
+  wait_count: z.number().int().nonnegative(),
+  wait_total_ms: z.number().nonnegative(),
+  wait_mean_ms: z.number().nonnegative().nullable(),
   wait_p50_ms: z.number().nonnegative().nullable(),
   wait_p95_ms: z.number().nonnegative().nullable(),
   wait_max_ms: z.number().nonnegative().nullable(),
 });
 export type QueueSummary = z.infer<typeof QueueSummarySchema>;
 
-/** Wall-clock time spent waiting rather than requesting, so a run stays attributable. */
+/** Aggregate observed job-time. Values may exceed or overlap the run wall clock. */
 export const WaitSummarySchema = z.object({
-  /** On the job-admission limiter, outside any concurrency slot. */
+  admission_total_ms: z.number().nonnegative(),
+  http_rate_limit_total_ms: z.number().nonnegative(),
+  proxy_acquire_total_ms: z.number().nonnegative(),
+  retry_backoff_total_ms: z.number().nonnegative(),
+  /** @deprecated Exact alias of `admission_total_ms`. */
   admission_ms: z.number().nonnegative(),
-  /** On the per-host HTTP limiter, inside a concurrency slot. */
+  /** @deprecated Exact alias of `http_rate_limit_total_ms`. */
   http_rate_limit_ms: z.number().nonnegative(),
+  /** @deprecated Exact alias of `proxy_acquire_total_ms`. */
   proxy_acquire_ms: z.number().nonnegative(),
-  /** Retry backoff, which holds a concurrency slot while it sleeps. */
+  /** @deprecated Exact alias of `retry_backoff_total_ms`. */
   retry_backoff_ms: z.number().nonnegative(),
 });
 export type WaitSummary = z.infer<typeof WaitSummarySchema>;

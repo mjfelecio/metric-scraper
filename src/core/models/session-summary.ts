@@ -56,6 +56,14 @@ export const CycleSummarySchema = z.object({
 });
 export type CycleSummary = z.infer<typeof CycleSummarySchema>;
 
+export const StallEpisodeSchema = z.object({
+  cycle: z.number().int().positive(),
+  started_at: z.string(),
+  recovered_at: z.string().nullable(),
+  duration_ms: z.number().nonnegative(),
+});
+export type StallEpisode = z.infer<typeof StallEpisodeSchema>;
+
 export const SessionSummarySchema = z.object({
   session_id: z.string(),
   platform: PlatformSchema.nullable(),
@@ -112,6 +120,20 @@ export const SessionSummarySchema = z.object({
   error_breakdown: z.record(z.string(), z.number().int().nonnegative()),
   retries: RetrySummarySchema,
 
+  queue: z.object({
+    max_depth: z.number().int().nonnegative(),
+    wait_count: z.number().int().nonnegative(),
+    wait_total_ms: z.number().nonnegative(),
+    wait_mean_ms: z.number().nonnegative().nullable(),
+    wait_max_ms: z.number().nonnegative().nullable(),
+  }),
+  waits: z.object({
+    admission_total_ms: z.number().nonnegative(),
+    http_rate_limit_total_ms: z.number().nonnegative(),
+    proxy_acquire_total_ms: z.number().nonnegative(),
+    retry_backoff_total_ms: z.number().nonnegative(),
+  }),
+
   /**
    * The proxy pool over the whole session.
    *
@@ -122,8 +144,10 @@ export const SessionSummarySchema = z.object({
    */
   proxies: ProxySummarySchema,
 
-  /** True if any cycle stopped making progress while work was still in flight. */
+  /** True only when the session ended with an active stall. */
   stalled: z.boolean(),
+  /** Distinct periods without completions while work remained in flight. */
+  stall_episodes: z.array(StallEpisodeSchema),
 
   timeline: z.array(ThroughputSampleSchema),
 

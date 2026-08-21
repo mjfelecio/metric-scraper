@@ -99,6 +99,33 @@ describe('MetricsCollector', () => {
     expect(view.exhaustedRequests).toBe(1);
   });
 
+  it('keeps cancelled audit rows out of logical outcomes while retaining HTTP activity', () => {
+    const metrics = new MetricsCollector();
+    metrics.start();
+    metrics.recordRetry();
+    metrics.recordResult({
+      status: 'error',
+      latencyMs: 200,
+      retries: 1,
+      exhausted: false,
+      errorCode: 'cancelled',
+      platformHttpRequests: 2,
+    });
+
+    const view = metrics.view();
+    expect(view.totalRequests).toBe(0);
+    expect(view.successfulRequests).toBe(0);
+    expect(view.failedRequests).toBe(0);
+    expect(view.successRate).toBe(0);
+    expect(view.latency.count).toBe(0);
+    expect(view.statusCounts.error).toBe(0);
+    expect(view.errorCounts).toEqual({});
+    expect(view.totalRetries).toBe(1);
+    expect(view.retriedRequests).toBe(0);
+    expect(view.exhaustedRequests).toBe(0);
+    expect(view.platformHttpRequests).toBe(2);
+  });
+
   it('computes latency percentiles across recorded requests', () => {
     const metrics = new MetricsCollector();
     metrics.start();
@@ -138,6 +165,21 @@ describe('MetricsCollector', () => {
     const view = metrics.view();
     expect(view.elapsedMs).toBe(30_000);
     expect(view.throughputPerMinute).toBeCloseTo(20);
+  });
+
+  it('reports queue statistics and overlapping waits as aggregate job-time', () => {
+    const metrics = collectorAt([0, 100, 100]);
+    metrics.start();
+    metrics.recordQueueStats({ peakInFlight: 2, peakQueueDepth: 2, waitSamples: [25, 75] });
+    // These observations can belong to two jobs waiting during the same 100 ms.
+    metrics.recordHttpRateLimitWait(100);
+    metrics.recordHttpRateLimitWait(100);
+    metrics.finish();
+
+    const view = metrics.view();
+    expect(view.elapsedMs).toBe(100);
+    expect(view.queue).toMatchObject({ waitCount: 2, waitTotalMs: 100, waitMeanMs: 50 });
+    expect(view.waits.httpRateLimitTotalMs).toBe(200);
   });
 
   it('tracks per-proxy usage and failures', () => {

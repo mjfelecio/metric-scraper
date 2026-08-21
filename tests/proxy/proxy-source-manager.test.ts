@@ -215,7 +215,7 @@ describe('ProxySourceManager', () => {
     // there are three more candidates waiting.
     const lease = (await pool.acquire())!;
     pool.reportFailure(lease, 'boom', 'network_error');
-    pool.reportFailure(lease, 'boom', 'network_error');
+    pool.reportFailure({ ...lease, generation: lease.generation + 1 }, 'boom', 'network_error');
     pool.release(lease);
     expect(pool.getStats().perProxy[0]?.state).toBe('cooling');
 
@@ -236,7 +236,7 @@ describe('ProxySourceManager', () => {
     const lease = (await pool.acquire())!;
     pool.reportSuccess(lease);
     pool.reportFailure(lease, 'boom', 'network_error');
-    pool.reportFailure(lease, 'boom', 'network_error');
+    pool.reportFailure({ ...lease, generation: lease.generation + 1 }, 'boom', 'network_error');
     pool.release(lease);
 
     await manager.replenishOnce();
@@ -253,7 +253,7 @@ describe('ProxySourceManager', () => {
 
     const lease = (await pool.acquire())!;
     pool.reportFailure(lease, 'boom', 'network_error');
-    pool.reportFailure(lease, 'boom', 'network_error');
+    pool.reportFailure({ ...lease, generation: lease.generation + 1 }, 'boom', 'network_error');
     pool.release(lease);
 
     await manager.refreshOnce();
@@ -402,7 +402,7 @@ describe('ProxySourceManager capacity accounting', () => {
 
     const lease = (await pool.acquire())!;
     pool.reportFailure(lease, 'boom', 'network_error');
-    pool.reportFailure(lease, 'boom', 'network_error');
+    pool.reportFailure({ ...lease, generation: lease.generation + 1 }, 'boom', 'network_error');
     pool.release(lease);
     expect(pool.getStats().perProxy[0]?.state).toBe('cooling');
     expect(pool.getStats().capacity).toBe(0);
@@ -498,7 +498,7 @@ describe('ProxySourceManager eviction floor', () => {
 
     const lease = (await pool.acquire())!;
     pool.reportFailure(lease, 'boom', 'network_error');
-    pool.reportFailure(lease, 'boom', 'network_error');
+    pool.reportFailure({ ...lease, generation: lease.generation + 1 }, 'boom', 'network_error');
     pool.release(lease);
 
     await manager.replenishOnce();
@@ -521,7 +521,7 @@ describe('ProxySourceManager eviction floor', () => {
     for (const entry of [...pool.getStats().perProxy]) {
       const lease = (await pool.acquire())!;
       pool.reportFailure(lease, 'boom', 'network_error');
-      pool.reportFailure(lease, 'boom', 'network_error');
+      pool.reportFailure({ ...lease, generation: lease.generation + 1 }, 'boom', 'network_error');
       pool.release(lease);
       expect(entry.id).toBeDefined();
     }
@@ -569,7 +569,7 @@ describe('ProxySourceManager eviction floor', () => {
     // proxy, and dropping the entry underneath it would discard that outcome.
     const held = (await pool.acquire())!;
     pool.reportFailure(held, 'boom', 'network_error');
-    pool.reportFailure(held, 'boom', 'network_error');
+    pool.reportFailure({ ...held, generation: held.generation + 1 }, 'boom', 'network_error');
 
     await manager.replenishOnce();
     expect(pool.getStats().perProxy.map((proxy) => proxy.id)).toContain(held.id);
@@ -589,7 +589,7 @@ describe('ProxySourceManager eviction floor', () => {
     const lease = (await pool.acquire())!;
     pool.reportSuccess(lease);
     pool.reportFailure(lease, 'boom', 'network_error');
-    pool.reportFailure(lease, 'boom', 'network_error');
+    pool.reportFailure({ ...lease, generation: lease.generation + 1 }, 'boom', 'network_error');
     pool.release(lease);
 
     await manager.replenishOnce();

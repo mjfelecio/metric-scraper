@@ -1,3 +1,4 @@
+import { formatConcurrencyFinding } from '../concurrency/format-concurrency-finding.js';
 import { summarizeFailureConcentration } from '../metrics/proxy-insights.js';
 import { type ProxyUsage, type RunSummary } from '../models/run-summary.js';
 
@@ -78,31 +79,29 @@ export function formatRunSummary(summary: RunSummary): string {
   lines.push(
     `${pad('Concurrency')}${num(concurrency.max_observed)} observed / ` +
       `${num(concurrency.configured)} configured  ` +
-      `(effective ${concurrency.effective.toFixed(2)})`,
+      `(${num(concurrency.achievable)} achievable; effective ${concurrency.effective.toFixed(2)})`,
   );
 
-  // The exact fingerprint of accidental serialization: work was queued and
-  // waiting while configured capacity sat unused. This is what a run summary
-  // failed to say when a configured concurrency of 10 ran one job at a time.
-  if (concurrency.max_observed < concurrency.configured && summary.queue.max_depth > 0) {
-    lines.push('');
+  for (const finding of concurrency.findings) {
     lines.push(
-      `!  Concurrency underused: ${num(concurrency.configured)} configured, ` +
-        `${num(concurrency.max_observed)} observed, while the queue backlog peaked at ` +
-        `${num(summary.queue.max_depth)}.`,
-    );
-    lines.push(
-      `   Capacity was available but unused. Effective concurrency ${concurrency.effective.toFixed(2)}` +
-        `${concurrency.effective < 1.5 ? ' — this run was effectively sequential.' : '.'}`,
+      '',
+      `${finding.severity === 'warning' ? '!' : 'i'}  ${formatConcurrencyFinding(finding, concurrency)}`,
     );
   }
 
   lines.push('');
-  lines.push(`${pad('Queue wait p95')}${ms(summary.queue.wait_p95_ms)}`);
-  lines.push(`${pad('Admission wait')}${ms(summary.waits.admission_ms)}`);
-  lines.push(`${pad('HTTP limiter wait')}${ms(summary.waits.http_rate_limit_ms)}`);
-  lines.push(`${pad('Proxy acquire')}${ms(summary.waits.proxy_acquire_ms)}`);
-  lines.push(`${pad('Retry backoff')}${ms(summary.waits.retry_backoff_ms)}`);
+  lines.push('Queue delay   (enqueue to job start)');
+  lines.push(`  ${pad('count')}${num(summary.queue.wait_count)}`);
+  lines.push(`  ${pad('total')}${ms(summary.queue.wait_total_ms)}`);
+  lines.push(`  ${pad('mean')}${ms(summary.queue.wait_mean_ms)}`);
+  lines.push(`  ${pad('p95')}${ms(summary.queue.wait_p95_ms)}`);
+  lines.push(`  ${pad('max')}${ms(summary.queue.wait_max_ms)}`);
+  lines.push('');
+  lines.push('Aggregate waits   (aggregate job-time; concurrent waits may overlap)');
+  lines.push(`  ${pad('admission')}${ms(summary.waits.admission_total_ms)}`);
+  lines.push(`  ${pad('HTTP limiter')}${ms(summary.waits.http_rate_limit_total_ms)}`);
+  lines.push(`  ${pad('proxy acquire')}${ms(summary.waits.proxy_acquire_total_ms)}`);
+  lines.push(`  ${pad('retry backoff')}${ms(summary.waits.retry_backoff_total_ms)}`);
   lines.push('');
   lines.push(`${pad('Latency p50')}${ms(summary.latency.p50_ms)}`);
   lines.push(`${pad('Latency p95')}${ms(summary.latency.p95_ms)}`);
@@ -160,7 +159,7 @@ export function formatRunSummary(summary: RunSummary): string {
     lines.push(`  ${pad('retired')}${num(proxies.retired)}`);
     lines.push(
       `  ${pad('in flight')}${num(proxies.total_in_flight)} on ${num(proxies.used)} used` +
-        `${proxies.capacity === null ? '' : ` (capacity ${num(proxies.capacity)})`}`,
+        ` (capacity ${proxies.capacity === null ? 'unknown' : num(proxies.capacity)})`,
     );
     lines.push(`  ${pad('failures')}${num(proxies.total_failures)}`);
     if (proxies.source !== null) {

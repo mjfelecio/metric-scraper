@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { ScrapeError } from '../../src/core/models/errors.js';
 import { HttpError } from '../../src/core/scraper/http-port.js';
 import { FetchHttpClient } from '../../src/infrastructure/http/fetch-http-client.js';
 
@@ -151,6 +152,27 @@ describe('FetchHttpClient error cause preservation', () => {
     const c = client(() => Promise.reject(original));
 
     await expect(c.request({ url: 'https://example.com' })).rejects.toBe(original);
+  });
+
+  it('passes any already-built ScrapeError through unchanged', async () => {
+    const cause = new Error('operator interrupt');
+    const original = new ScrapeError({
+      code: 'cancelled',
+      message: 'run cancelled',
+      retryable: false,
+      cause,
+      causeCode: 'OPERATOR_ABORT',
+    });
+    const c = client(() => Promise.reject(original));
+
+    await expect(c.request({ url: 'https://example.com' })).rejects.toBe(original);
+    expect(original).toMatchObject({
+      code: 'cancelled',
+      retryable: false,
+      message: 'run cancelled',
+      cause,
+      causeCode: 'OPERATOR_ABORT',
+    });
   });
 });
 

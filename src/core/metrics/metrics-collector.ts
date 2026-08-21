@@ -93,21 +93,24 @@ export interface ConcurrencyView {
 export interface QueueView {
   /** Deepest the waiting-task backlog ever got. */
   maxDepth: number;
+  waitCount: number;
+  waitTotalMs: number;
+  waitMeanMs: number | null;
   waitP50Ms: number | null;
   waitP95Ms: number | null;
   waitMaxMs: number | null;
 }
 
-/** Where wall-clock time went outside of the request itself. */
+/** Aggregate observed job-time. Concurrent observations can overlap. */
 export interface WaitView {
-  /** Waiting on the job-admission rate limiter, outside any concurrency slot. */
-  admissionMs: number;
-  /** Waiting on the per-host HTTP rate limiter, inside a concurrency slot. */
-  httpRateLimitMs: number;
-  /** Waiting to lease a proxy. */
-  proxyAcquireMs: number;
-  /** Sleeping in retry backoff, holding a concurrency slot. */
-  retryBackoffMs: number;
+  /** Sum of sequential producer waits, outside slots but overlapping running jobs. */
+  admissionTotalMs: number;
+  /** Sum of positive per-request limiter waits; overlapping jobs hold slots. */
+  httpRateLimitTotalMs: number;
+  /** Sum of attempt-level route acquisition waits; observations can overlap. */
+  proxyAcquireTotalMs: number;
+  /** Sum of retry sleeps, including partial cancelled sleeps; jobs hold slots. */
+  retryBackoffTotalMs: number;
 }
 
 export interface MetricsView {
@@ -251,8 +254,12 @@ export class MetricsCollector {
 
   /** One completed request (one URL), after all retries have been exhausted. */
   recordResult(input: RecordResultInput): void {
-    this.totalRequests += 1;
     this.platformHttpRequests += input.platformHttpRequests ?? 0;
+    // Cancellation is an audit row, not a completed scrape outcome. Wire work
+    // already performed remains factual and is retained above.
+    if (input.errorCode === 'cancelled') return;
+
+    this.totalRequests += 1;
     if (input.status === 'ok') {
       this.successfulRequests += 1;
     } else {
@@ -365,6 +372,7 @@ export class MetricsCollector {
       };
     });
     const sortedWaits = [...this.queueWaits].sort((a, b) => a - b);
+    const queueWaitTotalMs = sortedWaits.reduce((total, wait) => total + wait, 0);
     const configured = this.configuredConcurrency;
 
     return {
@@ -400,15 +408,18 @@ export class MetricsCollector {
       },
       queue: {
         maxDepth: this.peakQueueDepth,
+        waitCount: sortedWaits.length,
+        waitTotalMs: queueWaitTotalMs,
+        waitMeanMs: sortedWaits.length === 0 ? null : queueWaitTotalMs / sortedWaits.length,
         waitP50Ms: percentileOfSorted(sortedWaits, 50),
         waitP95Ms: percentileOfSorted(sortedWaits, 95),
         waitMaxMs: maxOf(sortedWaits),
       },
       waits: {
-        admissionMs: this.admissionWaitMs,
-        httpRateLimitMs: this.httpRateLimitWaitMs,
-        proxyAcquireMs: this.proxyAcquireMs,
-        retryBackoffMs: this.retryBackoffMs,
+        admissionTotalMs: this.admissionWaitMs,
+        httpRateLimitTotalMs: this.httpRateLimitWaitMs,
+        proxyAcquireTotalMs: this.proxyAcquireMs,
+        retryBackoffTotalMs: this.retryBackoffMs,
       },
       bandwidth: this.bandwidth,
     };

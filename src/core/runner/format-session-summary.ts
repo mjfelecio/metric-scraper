@@ -1,3 +1,4 @@
+import { formatConcurrencyFinding } from '../concurrency/format-concurrency-finding.js';
 import { summarizeFailureConcentration } from '../metrics/proxy-insights.js';
 import { type SessionSummary } from '../models/session-summary.js';
 import { formatDuration } from '../schedule/duration.js';
@@ -69,8 +70,14 @@ export function formatSessionSummary(summary: SessionSummary): string {
   lines.push(
     `  ${pad('concurrency')}${num(throughput.concurrency.max_observed)} observed / ` +
       `${num(throughput.concurrency.configured)} configured ` +
-      `(effective ${throughput.concurrency.effective.toFixed(2)})`,
+      `(${num(throughput.concurrency.achievable)} achievable; ` +
+      `effective ${throughput.concurrency.effective.toFixed(2)})`,
   );
+  for (const finding of throughput.concurrency.findings) {
+    lines.push(
+      `  ${finding.severity === 'warning' ? '!' : 'i'} ${formatConcurrencyFinding(finding, throughput.concurrency)}`,
+    );
+  }
   lines.push(`  ${pad('active')}${rate(throughput.active_rpm)}   (excludes idle gaps)`);
   lines.push(`  ${pad('wall clock')}${rate(throughput.wall_clock_rpm)}   (includes idle gaps)`);
   lines.push(`  ${pad('peak')}${rate(throughput.peak_rpm)}`);
@@ -84,6 +91,21 @@ export function formatSessionSummary(summary: SessionSummary): string {
   lines.push(`${pad('Latency p50')}${ms(summary.latency.p50_ms)}`);
   lines.push(`${pad('Latency p95')}${ms(summary.latency.p95_ms)}`);
   lines.push(`${pad('Latency max')}${ms(summary.latency.max_ms)}`);
+
+  lines.push('');
+  lines.push('Queue delay   (enqueue to job start; combined across cycles)');
+  lines.push(`  ${pad('max depth')}${num(summary.queue.max_depth)}`);
+  lines.push(`  ${pad('wait count')}${num(summary.queue.wait_count)}`);
+  lines.push(`  ${pad('wait total')}${ms(summary.queue.wait_total_ms)}`);
+  lines.push(`  ${pad('wait mean')}${ms(summary.queue.wait_mean_ms)}`);
+  lines.push(`  ${pad('wait max')}${ms(summary.queue.wait_max_ms)}`);
+
+  lines.push('');
+  lines.push('Aggregate waits   (aggregate job-time; concurrent waits may overlap)');
+  lines.push(`  ${pad('admission')}${ms(summary.waits.admission_total_ms)}`);
+  lines.push(`  ${pad('HTTP limiter')}${ms(summary.waits.http_rate_limit_total_ms)}`);
+  lines.push(`  ${pad('proxy acquire')}${ms(summary.waits.proxy_acquire_total_ms)}`);
+  lines.push(`  ${pad('retry backoff')}${ms(summary.waits.retry_backoff_total_ms)}`);
 
   lines.push('');
   lines.push('Status breakdown');
@@ -117,6 +139,9 @@ export function formatSessionSummary(summary: SessionSummary): string {
     lines.push('Proxies   (cumulative over the session; state as it stood at the end)');
     lines.push(`  ${pad('configured')}${num(proxies.configured)}`);
     lines.push(`  ${pad('usable at end')}${num(proxies.available)}`);
+    lines.push(
+      `  ${pad('capacity at end')}${proxies.capacity === null ? 'unknown' : num(proxies.capacity)}`,
+    );
     lines.push(`  ${pad('cooling at end')}${num(proxies.cooling)}`);
     lines.push(`  ${pad('retired')}${num(proxies.retired)}`);
     lines.push(`  ${pad('failures')}${num(proxies.total_failures)}`);
@@ -160,9 +185,12 @@ export function formatSessionSummary(summary: SessionSummary): string {
     }
   }
 
-  if (summary.stalled) {
+  if (summary.stall_episodes.length > 0) {
     lines.push('');
-    lines.push('  ⚠ a cycle stopped making progress while work was still in flight');
+    lines.push(
+      `  ${summary.stalled ? '⚠' : '✓'} ${num(summary.stall_episodes.length)} stall episode(s)` +
+        `${summary.stalled ? '; the latest is still active' : '; all recovered'}`,
+    );
   }
 
   lines.push('');

@@ -95,7 +95,8 @@ backpressure and is measured via `onWait` so it stays visible in the summary's `
 `a`, validates every row against a Zod schema, respects stream backpressure, and never
 rewrites or de-duplicates — repeated scrapes of the same URL are supposed to produce new rows.
 Alongside it, `MetricsCollector` accumulates status counts, latency samples, retry counts,
-per-proxy usage, queue stats and four categories of wait time; `buildRunSummary` turns that
+per-proxy usage, queue-delay stats and four categories of aggregate job-time;
+`buildRunSummary` turns that
 plus `proxyProvider.getStats()` into the `*.summary.json` the spec asks for; and `ProxyEventLog`
 writes a separate `*.proxy-events.jsonl` recording every proxy health *transition*.
 
@@ -563,7 +564,8 @@ concurrency, and both are config, not code. What I have not done is the run that
 success (`in-memory-proxy-pool.ts:879-883`). A pool of 10 proxies with `PROXY_MAX_CONCURRENT=8`
 has a *theoretical* 80 slots but reports whatever it has actually earned — 30, 32, 72, 80 across
 the sampled runs. When earned capacity is below the configured concurrency, jobs wait in
-`acquire`, which shows up as `waits.proxy_acquire_ms` (1558 ms in one 20-URL run).
+`acquire`, which shows up as `waits.proxy_acquire_total_ms` (1558 ms of aggregate job-time
+in one 20-URL run; concurrent acquisitions may overlap).
 
 **Why it matters.** Someone comparing `SCRAPER_CONCURRENCY=50` against observed throughput will
 conclude the queue is broken. It is not; the pool is the binding constraint.
@@ -637,8 +639,9 @@ can park most of the pool in backoff. Effective concurrency drops even though no
 
 **How to answer.** "It is genuine backpressure, not a bug — but it is indistinguishable from
 one unless it is measured, so both are accumulated into `summary.waits` as
-`retry_backoff_ms` and `http_rate_limit_ms`. If those dominate, the answer is to lower the
-target rate, not to raise concurrency."
+`retry_backoff_total_ms` and `http_rate_limit_total_ms`. These are overlapping aggregate
+job-time, not wall-clock duration. If those dominate, the answer is to lower the target rate,
+not to raise concurrency."
 
 ### 9.6 The Instagram authenticated fallback rarely fires in a rotating pool
 

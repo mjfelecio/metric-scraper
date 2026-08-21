@@ -57,7 +57,7 @@ export class RotatingResidentialProxyProvider implements ProxyProvider {
   constructor(options: RotatingResidentialProxyProviderOptions) {
     this.now = options.now ?? Date.now;
     this.admittedAt = this.now();
-    this.lease = { id: proxyId(options.target), target: options.target };
+    this.lease = { id: proxyId(options.target), generation: 0, target: options.target };
   }
 
   /** The credential-free gateway id, as it appears in logs and the summary. */
@@ -136,6 +136,8 @@ export class RotatingResidentialProxyProvider implements ProxyProvider {
       totalRequests: this.requests,
       totalFailures: this.failures,
       source: null,
+      evicted: [],
+      evictionCount: 0,
       perProxy: [this.health(used)],
     };
   }

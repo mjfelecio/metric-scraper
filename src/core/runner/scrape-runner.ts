@@ -6,6 +6,7 @@ import {
   type TaskQueueOptions,
 } from '../concurrency/task-queue.js';
 import { type Logger } from '../logging/logger.js';
+import { ConcurrencyMonitor } from '../concurrency/concurrency-diagnostics.js';
 import { type BandwidthAggregator } from '../metrics/bandwidth.js';
 import { type MetricsCollector } from '../metrics/metrics-collector.js';
 import { createRateLimiter, type RateLimiter } from '../rate-limit/rate-limit.js';
@@ -13,7 +14,7 @@ import { ScrapeError, type ScrapeErrorInfo } from '../models/errors.js';
 import { type InputRecord, type PreparedInputItem } from '../models/input.js';
 import { type Platform } from '../models/platform.js';
 import { type RunSummary } from '../models/run-summary.js';
-import { type ScrapeResult } from '../models/scrape-result.js';
+import { scrapeFailure, type ScrapeResult } from '../models/scrape-result.js';
 import {
   createFailureSnapshot,
   createSuccessSnapshot,
@@ -83,6 +84,8 @@ export interface RunOptions {
   summaryPath?: string | null | undefined;
   onResult?: ((event: JobCompletedEvent) => void) | undefined;
   onProgress?: ((progress: RunProgress) => void) | undefined;
+  /** Reused by scheduled sessions so capacity transitions span cycle boundaries. */
+  concurrencyMonitor?: ConcurrencyMonitor | undefined;
 }
 
 export interface RunResult {
@@ -145,6 +148,19 @@ export class ScrapeRunner {
       });
 
     const startedAt = this.now();
+    const concurrencyMonitor =
+      options.concurrencyMonitor ??
+      new ConcurrencyMonitor({
+        configuredConcurrency: config.concurrency,
+        acceptedJobs: options.counts?.accepted ?? records.length,
+        proxyMode: this.deps.proxyProvider.mode,
+        logger: runLogger,
+      });
+    concurrencyMonitor.observe(this.deps.proxyProvider.getStats().capacity);
+    const capacitySampler = setInterval(() => {
+      concurrencyMonitor.observe(this.deps.proxyProvider.getStats().capacity);
+    }, 1_000);
+    capacitySampler.unref();
     metrics.start();
     metrics.configureConcurrency(config.concurrency);
     runLogger.info(
@@ -160,6 +176,7 @@ export class ScrapeRunner {
     let processed = 0;
 
     const emitProgress = (): void => {
+      concurrencyMonitor.observe(this.deps.proxyProvider.getStats().capacity);
       if (options.onProgress === undefined) return;
       const view = metrics.view();
       options.onProgress({
@@ -203,7 +220,7 @@ export class ScrapeRunner {
             exhausted:
               event.snapshot.status !== 'ok' &&
               event.attempts >= this.deps.retryPolicy.options.maxAttempts,
-            errorCode: extractErrorCode(event.snapshot.error),
+            errorCode: event.errorCode,
             platformHttpRequests: event.platformHttpRequests,
           });
 
@@ -240,12 +257,18 @@ export class ScrapeRunner {
       if (signal.aborted) break;
 
       submit(record);
+      // Expose newly started/queued work immediately. Waiting until the first
+      // completion leaves the session watchdog blind when the initial batch
+      // itself stalls.
+      emitProgress();
     }
 
     await queue.onIdle();
+    clearInterval(capacitySampler);
 
     metrics.recordQueueStats(queue.stats());
     metrics.finish();
+    concurrencyMonitor.observe(this.deps.proxyProvider.getStats().capacity);
     // Final tick, so observers see a settled state (nothing in flight, nothing
     // queued) rather than the mid-flight numbers from the last result.
     emitProgress();
@@ -287,6 +310,8 @@ export class ScrapeRunner {
       snapshotsPath: sink.location,
       summaryPath: options.summaryPath ?? null,
       rowsWritten: sink.rowsWritten,
+      minimumProxyCapacity: concurrencyMonitor.minimumObservedProxyCapacity,
+      burst: config.burst,
     });
 
     runLogger.info(
@@ -326,6 +351,7 @@ export class ScrapeRunner {
         retries: item.resolution.retries,
         proxyId: item.resolution.proxyId,
         platformHttpRequests: item.resolution.platformHttpRequests,
+        errorCode: item.error.code,
       };
     }
 
@@ -376,6 +402,7 @@ export class ScrapeRunner {
         retries: 0,
         proxyId: null,
         platformHttpRequests: 0,
+        errorCode: error.code,
       };
     }
 
@@ -438,6 +465,10 @@ export class ScrapeRunner {
         result = failureFromThrown(error);
       }
 
+      if (signal.aborted && result.outcome === 'failure') {
+        result = cancelledResult(signal.reason);
+      }
+
       lastResult = result;
       platformHttpRequests += attemptHttpRequests;
       if (proxyLease !== null) {
@@ -465,6 +496,7 @@ export class ScrapeRunner {
       }
 
       if (result.outcome === 'ok') break;
+      if (result.error.code === 'cancelled') break;
       if (!retryPolicy.isRetryableResult(result)) break;
       if (!retryPolicy.hasAttemptsLeft(attempt)) break;
       if (signal.aborted) break;
@@ -483,6 +515,9 @@ export class ScrapeRunner {
       try {
         await this.sleep(delayMs, signal);
       } catch {
+        if (signal.aborted) {
+          lastResult = cancelledResult(signal.reason);
+        }
         break; // Run cancelled while backing off.
       } finally {
         metrics.recordRetryBackoff(Date.now() - backoffStart);
@@ -511,13 +546,22 @@ export class ScrapeRunner {
             lastResult?.outcome === 'failure' ? (lastResult.partial ?? {}) : {},
           );
 
-    return { snapshot, attempts: attempt, retries, proxyId: lastProxyId, platformHttpRequests };
+    return {
+      snapshot,
+      errorCode: lastResult?.outcome === 'failure' ? lastResult.error.code : null,
+      attempts: attempt,
+      retries,
+      proxyId: lastProxyId,
+      platformHttpRequests,
+    };
   }
 
   private reportSessionOutcome(lease: SessionLease, result: ScrapeResult): void {
     const pool = this.deps.sessionPool;
     if (result.outcome === 'ok') {
       pool.reportSuccess(lease);
+    } else if (result.error.code === 'cancelled') {
+      // Operator cancellation says nothing about session health.
     } else if (result.error.code === 'blocked' || result.status === 'rate_limited') {
       pool.markBlocked(lease, result.error.message);
     } else if (result.error.retryable) {
@@ -536,10 +580,14 @@ function failureFromThrown(error: unknown): ScrapeResult {
   return { outcome: 'failure', status, error: scrapeError.toInfo() };
 }
 
-function extractErrorCode(error: string | null): string | null {
-  if (error === null) return null;
-  const separator = error.indexOf(':');
-  return separator === -1 ? error : error.slice(0, separator);
+function cancelledResult(reason: unknown): ScrapeResult {
+  const error = ScrapeError.from(reason);
+  return scrapeFailure('error', {
+    code: 'cancelled',
+    message: error.code === 'cancelled' ? error.message : 'run cancelled by operator',
+    retryable: false,
+    causeCode: error.causeCode,
+  });
 }
 
 function inferPlatform(records: readonly (InputRecord | PreparedInputItem)[]): Platform | null {

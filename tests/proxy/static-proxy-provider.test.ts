@@ -21,7 +21,11 @@ function target(): ProxyTarget {
   };
 }
 
-const LEASE: ProxyLease = { id: 'http://proxy-a.example.net:8000', target: target() };
+const LEASE: ProxyLease = {
+  id: 'http://proxy-a.example.net:8000',
+  generation: 0,
+  target: target(),
+};
 
 /** Records what the provider asked the pool to do, in the order it asked. */
 class RecordingPool implements ProxyPool {
@@ -63,6 +67,8 @@ class RecordingPool implements ProxyPool {
       totalRequests: 0,
       totalFailures: 0,
       source: null,
+      evicted: [],
+      evictionCount: 0,
       perProxy: [],
     };
   }

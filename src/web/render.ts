@@ -1,4 +1,5 @@
 import { type RecentResultDto, type RunState } from '../app/types.js';
+import { formatConcurrencyFinding } from '../core/concurrency/format-concurrency-finding.js';
 import { summarizeFailureConcentration } from '../core/metrics/proxy-insights.js';
 import { type ThroughputSample } from '../core/metrics/throughput-timeline.js';
 import { type ScrapeStatus } from '../core/models/status.js';
@@ -309,7 +310,7 @@ function renderProxyPanel(state: AppState): void {
         ['Cooling', String(pool.cooling)],
         ['Retired', String(pool.retired)],
         ['Jobs in flight', `${pool.totalInFlight} on ${pool.inUse}`],
-        ['Capacity', pool.capacity === null ? 'unlimited' : String(pool.capacity)],
+        ['Capacity', pool.capacity === null ? 'unknown' : String(pool.capacity)],
       ])}
     </div>
     ${
@@ -419,7 +420,7 @@ function proxyRow(proxy: ProxyHealth, now: number): string {
         </span>
       </td>
       <td class="py-1.5 pr-3 text-slate-300">
-        ${proxy.inFlight}${proxy.capacity === null ? '' : ` / ${proxy.capacity}`}
+        ${proxy.inFlight} / ${proxy.capacity === null ? 'unknown' : proxy.capacity}
       </td>
       <td class="py-1.5 pr-3 text-right text-slate-300">${proxy.requests}</td>
       <td class="py-1.5 pr-3 text-right text-emerald-300">${proxy.successes}</td>
@@ -708,10 +709,6 @@ function renderSummary(state: AppState): void {
   const statuses = Object.entries(summary.status_breakdown).filter(([, count]) => count > 0);
   const proxies = summary.proxies;
   const concurrency = summary.throughput.concurrency;
-  // Capacity was available and demanded, but never used — the fingerprint of
-  // accidental serialization. Showing the configured number alone would hide it.
-  const underused =
-    concurrency.max_observed < concurrency.configured && summary.queue.max_depth > 0;
 
   panel.innerHTML = `
     <h2 class="mb-4 text-sm font-semibold uppercase tracking-wider text-slate-400">Run summary</h2>
@@ -720,6 +717,7 @@ function renderSummary(state: AppState): void {
         ['Success rate', `${(summary.totals.success_rate * 100).toFixed(1)}%`],
         ['Throughput', `${summary.throughput.requests_per_minute.toFixed(1)}/min`],
         ['Concurrency', `${concurrency.max_observed} / ${concurrency.configured}`],
+        ['Achievable', String(concurrency.achievable)],
         ['Effective', `${concurrency.effective.toFixed(2)}x`],
         ['p50', formatMs(summary.latency.p50_ms)],
         ['p95', formatMs(summary.latency.p95_ms)],
@@ -731,16 +729,41 @@ function renderSummary(state: AppState): void {
         ['Duration', `${(summary.duration_ms / 1000).toFixed(1)}s`],
       ])}
     </div>
-    ${
-      underused
-        ? `<p class="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-             Concurrency underused: ${concurrency.configured} configured,
-             ${concurrency.max_observed} observed, queue backlog peaked at
-             ${summary.queue.max_depth}. Effective concurrency
-             ${concurrency.effective.toFixed(2)}x.
-           </p>`
-        : ''
-    }
+    ${concurrency.findings
+      .map(
+        (finding) =>
+          `<p class="mt-3 rounded border ${
+            finding.severity === 'warning'
+              ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+              : 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+          } px-3 py-2 text-xs">${formatConcurrencyFinding(finding, concurrency)}</p>`,
+      )
+      .join('')}
+
+    <div class="mt-5 grid gap-5 sm:grid-cols-2">
+      <div>
+        <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+          Queue delay (enqueue to job start)
+        </h3>
+        ${statCards([
+          ['Count', String(summary.queue.wait_count)],
+          ['Mean', formatMs(summary.queue.wait_mean_ms)],
+          ['p95', formatMs(summary.queue.wait_p95_ms)],
+          ['Max', formatMs(summary.queue.wait_max_ms)],
+        ])}
+      </div>
+      <div>
+        <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+          Aggregate waits (aggregate job-time; may overlap)
+        </h3>
+        ${statCards([
+          ['Admission', formatMs(summary.waits.admission_total_ms)],
+          ['HTTP limiter', formatMs(summary.waits.http_rate_limit_total_ms)],
+          ['Proxy acquire', formatMs(summary.waits.proxy_acquire_total_ms)],
+          ['Retry backoff', formatMs(summary.waits.retry_backoff_total_ms)],
+        ])}
+      </div>
+    </div>
 
     <div class="mt-5 grid gap-5 sm:grid-cols-2">
       <div>

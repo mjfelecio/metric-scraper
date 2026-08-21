@@ -2,7 +2,7 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { runSession } from '../../src/app/scrape-session.js';
 import { loadConfig, type AppConfig } from '../../src/config/env.js';
@@ -244,6 +244,69 @@ describe('runSession', () => {
     expect(summary.throughput.active_rpm).toBeGreaterThanOrEqual(
       summary.throughput.wall_clock_rpm - 1e-9,
     );
+  });
+
+  it('clears a stall after progress resumes and records the recovered episode', async () => {
+    vi.useFakeTimers();
+    try {
+      let signalStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        signalStarted = resolve;
+      });
+      const slowScraper: Scraper = {
+        platform: 'tiktok',
+        scrape: async () => {
+          signalStarted?.();
+          await new Promise<void>((resolve) => setTimeout(resolve, 31_000));
+          return scrapeSuccess({ ...EMPTY_VIDEO_DATA, views: 1 });
+        },
+      };
+      const progressStates: boolean[] = [];
+      const pending = session({
+        records: records('https://www.tiktok.com/@a/video/1'),
+        counts: { candidates: 1, accepted: 1, rejected: 0 },
+        config: { ...config, requestTimeoutMs: 1_000 },
+        schedule: { intervalMs: 0, durationMs: null, maxCycles: 1 },
+        sampleIntervalMs: 1_000,
+        createRunner: async (context) => {
+          const built = await runnerFactory({ scraper: slowScraper })(context);
+          return {
+            ...built,
+            runner: new ScrapeRunner({
+              scrapers: createScraperRegistry([slowScraper]),
+              http: unusedHttp,
+              proxyProvider: new StaticProxyProvider(new NullProxyPool()),
+              sessionPool: new NullSessionPool(),
+              sink: context.sink,
+              metrics: built.metrics,
+              retryPolicy: new RetryPolicy({ maxAttempts: 1, jitter: false }),
+              logger: nullLogger,
+              config: {
+                concurrency: 1,
+                targetRpm: 0,
+                maxQueueSize: 0,
+                attemptTimeoutMsByPlatform: { tiktok: 60_000, instagram: 60_000 },
+              },
+              sleep: () => Promise.resolve(),
+            }),
+          };
+        },
+        onProgress: (progress) => progressStates.push(progress.stalled),
+      });
+
+      await started;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(progressStates).toContain(true);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const summary = await pending;
+      expect(summary.stalled).toBe(false);
+      expect(summary.stall_episodes).toHaveLength(1);
+      expect(summary.stall_episodes[0]).toMatchObject({ cycle: 1, duration_ms: 31_000 });
+      expect(summary.stall_episodes[0]?.recovered_at).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('accumulates bandwidth across cycle boundaries without double-counting or losing bytes', async () => {
