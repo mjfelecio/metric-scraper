@@ -117,7 +117,11 @@ says which produced it, and totals, throughput, status breakdown, latency percen
 counts and error classification are all recorded identically. One caveat — the concurrency
 ceilings differ (see the table), so unless `PROXY_MAX_CONCURRENT` is raised until the static
 pool's earned `proxies.capacity` reaches `SCRAPER_CONCURRENCY`, a throughput comparison is
-measuring pool capacity as much as proxy quality.
+measuring pool capacity as much as proxy quality. Run and session summaries make that caveat
+auditable: `throughput.concurrency` records the configured, input, admission and known proxy
+ceilings, the resulting achievable concurrency, the minimum sampled proxy capacity, and
+structured findings. Residential `capacity: null` is reported as **unknown**, never as zero
+or unlimited.
 
 Sticky sessions are not implemented. `ProxyRequestContext` carries the platform and attempt
 number for a later session-id strategy to use, but nothing derives one today: providers
@@ -816,10 +820,11 @@ including the case of the same video appearing twice with different `scraped_at`
 - **Sticky sessions are not implemented** (see [Proxy modes](#proxy-modes)). The port
   carries the context a session strategy would need; the provider-specific username
   format it would encode is deliberately not guessed at.
-- **The two proxy modes are not automatically comparable on throughput.** A static run is
-  bounded by the pool's earned capacity and a residential run by `SCRAPER_CONCURRENCY`, so
-  `PROXY_MAX_CONCURRENT` has to be raised until `proxies.capacity` reaches the configured
-  concurrency before a throughput difference can be attributed to the proxies themselves.
+- **Residential-specific automatic concurrency controls are deferred.** The shared
+  diagnostics expose differing ceilings so cross-mode comparisons are auditable, while a
+  static run remains bounded by earned pool capacity. Keep using `PROXY_MAX_CONCURRENT` and
+  compare configured, known and achievable concurrency; no residential ceiling is assumed
+  until a real provider limit is established.
 - **Proxy health lives for one process.** Cooldowns and retirement are in-memory and
   session-scoped: a new run starts with a fresh pool. That is deliberate — a cooldown is a
   statement about a 30-second-old observation, and restoring yesterday's would bench

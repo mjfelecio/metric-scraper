@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+import {
+  ConcurrencyCeilingsSchema,
+  ConcurrencyFindingSchema,
+} from '../concurrency/concurrency-diagnostics.js';
+
 import { PROXY_STATES } from '../scraper/pool-ports.js';
 
 import { PlatformSchema } from './platform.js';
@@ -207,6 +212,12 @@ export const ConcurrencySummarySchema = z.object({
   utilization: z.number().min(0).max(1),
   /** Whether the configured ceiling was ever actually reached. */
   saturated: z.boolean(),
+  /** Best attainable value after all known ceilings are applied. */
+  achievable: z.number().int().nonnegative(),
+  ceilings: ConcurrencyCeilingsSchema,
+  /** Lowest known pool capacity sampled during the run/session. */
+  minimum_proxy_capacity: z.number().int().nonnegative().nullable(),
+  findings: z.array(ConcurrencyFindingSchema),
 });
 export type ConcurrencySummary = z.infer<typeof ConcurrencySummarySchema>;
 

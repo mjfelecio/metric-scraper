@@ -3,6 +3,10 @@ import { type Platform } from '../models/platform.js';
 import { type RunSummary } from '../models/run-summary.js';
 import { type SessionPoolStats } from '../scraper/pool-ports.js';
 import { type ProxyProviderStats } from '../scraper/provider-ports.js';
+import {
+  evaluateConcurrency,
+  resolvedAdmissionBurst,
+} from '../concurrency/concurrency-diagnostics.js';
 
 import { buildProxySummary } from './build-proxy-summary.js';
 import { type RunCounts } from './types.js';
@@ -22,6 +26,8 @@ export interface BuildSummaryInput {
   snapshotsPath: string | null;
   summaryPath: string | null;
   rowsWritten: number;
+  minimumProxyCapacity?: number | null | undefined;
+  burst?: number | undefined;
 }
 
 /**
@@ -33,6 +39,18 @@ export interface BuildSummaryInput {
 export function buildRunSummary(input: BuildSummaryInput): RunSummary {
   const { metrics } = input;
   const durationMs = Math.max(0, input.finishedAt.getTime() - input.startedAt.getTime());
+  const diagnostic = evaluateConcurrency({
+    configuredConcurrency: input.concurrency,
+    acceptedJobs: input.counts.accepted,
+    resolvedAdmissionBurst: resolvedAdmissionBurst(input.targetRpm, input.burst),
+    targetRpm: input.targetRpm,
+    meanLatencyMs: metrics.latency.meanMs,
+    admissionWaitMs: metrics.waits.admissionTotalMs,
+    observedConcurrency: metrics.concurrency.maxObserved,
+    queueDemand: metrics.queue.maxDepth,
+    proxyMode: input.proxyStats.mode,
+    proxyCapacity: input.minimumProxyCapacity ?? input.proxyStats.capacity,
+  });
 
   return {
     run_id: input.runId,
@@ -66,6 +84,10 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
         effective: durationMs === 0 ? 0 : metrics.latencySumMs / durationMs,
         utilization: Math.min(1, metrics.concurrency.utilization),
         saturated: metrics.concurrency.saturated,
+        achievable: diagnostic.achievable,
+        ceilings: diagnostic.ceilings,
+        minimum_proxy_capacity: input.minimumProxyCapacity ?? input.proxyStats.capacity,
+        findings: diagnostic.findings,
       },
     },
 

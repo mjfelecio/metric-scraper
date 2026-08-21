@@ -6,6 +6,7 @@ import {
   type TaskQueueOptions,
 } from '../concurrency/task-queue.js';
 import { type Logger } from '../logging/logger.js';
+import { ConcurrencyMonitor } from '../concurrency/concurrency-diagnostics.js';
 import { type BandwidthAggregator } from '../metrics/bandwidth.js';
 import { type MetricsCollector } from '../metrics/metrics-collector.js';
 import { createRateLimiter, type RateLimiter } from '../rate-limit/rate-limit.js';
@@ -83,6 +84,8 @@ export interface RunOptions {
   summaryPath?: string | null | undefined;
   onResult?: ((event: JobCompletedEvent) => void) | undefined;
   onProgress?: ((progress: RunProgress) => void) | undefined;
+  /** Reused by scheduled sessions so capacity transitions span cycle boundaries. */
+  concurrencyMonitor?: ConcurrencyMonitor | undefined;
 }
 
 export interface RunResult {
@@ -145,6 +148,19 @@ export class ScrapeRunner {
       });
 
     const startedAt = this.now();
+    const concurrencyMonitor =
+      options.concurrencyMonitor ??
+      new ConcurrencyMonitor({
+        configuredConcurrency: config.concurrency,
+        acceptedJobs: options.counts?.accepted ?? records.length,
+        proxyMode: this.deps.proxyProvider.mode,
+        logger: runLogger,
+      });
+    concurrencyMonitor.observe(this.deps.proxyProvider.getStats().capacity);
+    const capacitySampler = setInterval(() => {
+      concurrencyMonitor.observe(this.deps.proxyProvider.getStats().capacity);
+    }, 1_000);
+    capacitySampler.unref();
     metrics.start();
     metrics.configureConcurrency(config.concurrency);
     runLogger.info(
@@ -160,6 +176,7 @@ export class ScrapeRunner {
     let processed = 0;
 
     const emitProgress = (): void => {
+      concurrencyMonitor.observe(this.deps.proxyProvider.getStats().capacity);
       if (options.onProgress === undefined) return;
       const view = metrics.view();
       options.onProgress({
@@ -247,9 +264,11 @@ export class ScrapeRunner {
     }
 
     await queue.onIdle();
+    clearInterval(capacitySampler);
 
     metrics.recordQueueStats(queue.stats());
     metrics.finish();
+    concurrencyMonitor.observe(this.deps.proxyProvider.getStats().capacity);
     // Final tick, so observers see a settled state (nothing in flight, nothing
     // queued) rather than the mid-flight numbers from the last result.
     emitProgress();
@@ -291,6 +310,8 @@ export class ScrapeRunner {
       snapshotsPath: sink.location,
       summaryPath: options.summaryPath ?? null,
       rowsWritten: sink.rowsWritten,
+      minimumProxyCapacity: concurrencyMonitor.minimumObservedProxyCapacity,
+      burst: config.burst,
     });
 
     runLogger.info(

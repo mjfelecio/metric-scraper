@@ -1,3 +1,4 @@
+import { formatConcurrencyFinding } from '../concurrency/format-concurrency-finding.js';
 import { summarizeFailureConcentration } from '../metrics/proxy-insights.js';
 import { type SessionSummary } from '../models/session-summary.js';
 import { formatDuration } from '../schedule/duration.js';
@@ -69,8 +70,14 @@ export function formatSessionSummary(summary: SessionSummary): string {
   lines.push(
     `  ${pad('concurrency')}${num(throughput.concurrency.max_observed)} observed / ` +
       `${num(throughput.concurrency.configured)} configured ` +
-      `(effective ${throughput.concurrency.effective.toFixed(2)})`,
+      `(${num(throughput.concurrency.achievable)} achievable; ` +
+      `effective ${throughput.concurrency.effective.toFixed(2)})`,
   );
+  for (const finding of throughput.concurrency.findings) {
+    lines.push(
+      `  ${finding.severity === 'warning' ? '!' : 'i'} ${formatConcurrencyFinding(finding, throughput.concurrency)}`,
+    );
+  }
   lines.push(`  ${pad('active')}${rate(throughput.active_rpm)}   (excludes idle gaps)`);
   lines.push(`  ${pad('wall clock')}${rate(throughput.wall_clock_rpm)}   (includes idle gaps)`);
   lines.push(`  ${pad('peak')}${rate(throughput.peak_rpm)}`);
@@ -132,6 +139,9 @@ export function formatSessionSummary(summary: SessionSummary): string {
     lines.push('Proxies   (cumulative over the session; state as it stood at the end)');
     lines.push(`  ${pad('configured')}${num(proxies.configured)}`);
     lines.push(`  ${pad('usable at end')}${num(proxies.available)}`);
+    lines.push(
+      `  ${pad('capacity at end')}${proxies.capacity === null ? 'unknown' : num(proxies.capacity)}`,
+    );
     lines.push(`  ${pad('cooling at end')}${num(proxies.cooling)}`);
     lines.push(`  ${pad('retired')}${num(proxies.retired)}`);
     lines.push(`  ${pad('failures')}${num(proxies.total_failures)}`);

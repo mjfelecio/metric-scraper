@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { ConcurrencyMonitor } from '../core/concurrency/concurrency-diagnostics.js';
 
 import { type AppConfig } from '../config/env.js';
 import { type Logger, nullLogger } from '../core/logging/logger.js';
@@ -196,6 +197,13 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     concurrency,
   );
   const proxyProvider = proxySupply.provider;
+  const concurrencyMonitor = new ConcurrencyMonitor({
+    configuredConcurrency: concurrency,
+    acceptedJobs: options.counts.accepted,
+    proxyMode: proxyProvider.mode,
+    logger: sessionLogger,
+  });
+  concurrencyMonitor.observe(proxyProvider.getStats().capacity);
   // Stocked before the first cycle so it does not start against an empty pool,
   // then topped up in the background for the rest of the session.
   await proxySupply.source?.start();
@@ -343,6 +351,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
       }
 
       observeStall(now(), inFlight);
+      concurrencyMonitor.observe(proxyProvider.getStats().capacity);
 
       options.onProgress?.(buildProgress());
     }
@@ -424,6 +433,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
           onProgress: (progress) => {
             liveProgress = progress;
           },
+          concurrencyMonitor,
           onResult: (event) => {
             if (event.errorCode !== 'cancelled') {
               completed += 1;
@@ -530,6 +540,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     bytes: liveBandwidthBytes(),
   });
   if (finalSample !== null) options.onSample?.(finalSample);
+  concurrencyMonitor.observe(proxyProvider.getStats().capacity);
 
   nextCycleAt = null;
   const finishedAt = new Date(now());
@@ -565,6 +576,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     summaryPath: paths.summary,
     cyclesDir: paths.cyclesDir,
     rowsWritten,
+    minimumProxyCapacity: concurrencyMonitor.minimumObservedProxyCapacity,
   });
 
   proxySupply.source?.stop();
