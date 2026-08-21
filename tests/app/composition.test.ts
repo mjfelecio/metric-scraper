@@ -6,24 +6,37 @@ vi.mock('undici', async (importOriginal) => {
   const actual = await importOriginal<typeof Undici>();
   return {
     ...actual,
+    Agent: vi.fn().mockImplementation(() => {
+      const agent = {
+        compose: vi.fn(() => agent),
+        close: vi.fn(() => Promise.resolve()),
+      };
+      return agent;
+    }),
     ProxyAgent: vi.fn().mockImplementation((options: unknown) => {
       // A bandwidth-measurement no-op: these tests are about ProxyAgent
       // construction and caching, not about the interceptor, so `compose`
       // just returns the same object rather than modeling undici's real
       // (distinct-object) behavior.
-      const agent: { __options: unknown; compose: (interceptor: unknown) => unknown } = {
+      const agent: {
+        __options: unknown;
+        compose: (interceptor: unknown) => unknown;
+        close: () => Promise<void>;
+      } = {
         __options: options,
         compose: () => agent,
+        close: vi.fn(() => Promise.resolve()),
       };
       return agent;
     }),
   };
 });
 
-import { ProxyAgent } from 'undici';
+import { Agent, ProxyAgent } from 'undici';
 
 import {
   buildRunner as buildComposedRunner,
+  createManagedHttpTransport,
   createProxyAgentFactory,
   createProxySupply,
   rpmForHost,
@@ -129,6 +142,69 @@ describe('rpmForHost', () => {
 
   it('leaves an unrecognized host unlimited when neither platform is limited', () => {
     expect(rpmForHost('example.net', { tiktok: 0, instagram: 0 })).toBe(0);
+  });
+});
+
+describe('createManagedHttpTransport', () => {
+  function dispatcherFactory(client: HttpClient): (target: ProxyTarget) => unknown {
+    return (
+      client as unknown as {
+        options: { dispatcherFactory: (target: ProxyTarget) => unknown };
+      }
+    ).options.dispatcherFactory;
+  }
+
+  it('reuses proxy agents across cycle clients and closes every base agent once', async () => {
+    const config = loadConfig({ env: { METRICS_BANDWIDTH: 'true' }, dotenv: false });
+    const transport = createManagedHttpTransport(config);
+    const first = transport.clientFor(nullBandwidthSink);
+    const firstDispatcher = dispatcherFactory(first)(target());
+    const second = transport.clientFor(nullBandwidthSink);
+    const secondDispatcher = dispatcherFactory(second)(target());
+
+    expect(secondDispatcher).toBe(firstDispatcher);
+    expect(ProxyAgent).toHaveBeenCalledTimes(1);
+
+    await transport.close();
+    await transport.close();
+
+    const direct = vi.mocked(Agent).mock.results[0]?.value as { close: ReturnType<typeof vi.fn> };
+    const proxy = vi.mocked(ProxyAgent).mock.results[0]?.value as {
+      close: ReturnType<typeof vi.fn>;
+    };
+    expect(direct.close).toHaveBeenCalledTimes(1);
+    expect(proxy.close).toHaveBeenCalledTimes(1);
+    expect(() => transport.clientFor(nullBandwidthSink)).toThrow(/already closed/);
+  });
+
+  it('logs close failures with only the credential-free proxy id', async () => {
+    const closeError = new Error('close failed');
+    vi.mocked(ProxyAgent).mockImplementationOnce(
+      () =>
+        ({
+          compose() {
+            return this;
+          },
+          close: () => Promise.reject(closeError),
+        }) as never,
+    );
+    const warn = vi.fn();
+    const config = loadConfig({ env: {}, dotenv: false });
+    const transport = createManagedHttpTransport(config, { ...nullLogger, warn });
+    const credentialed = target({
+      username: 'secret-user',
+      password: 'secret-password',
+      url: 'http://secret-user:secret-password@proxy.example.net:8080',
+    });
+
+    dispatcherFactory(transport.clientFor(nullBandwidthSink))(credentialed);
+    await expect(transport.close()).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ proxy_id: 'http://proxy.example.net:8080' }),
+      'could not close HTTP dispatcher',
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/secret-user|secret-password/);
   });
 });
 

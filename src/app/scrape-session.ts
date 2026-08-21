@@ -35,9 +35,11 @@ import {
 
 import {
   buildRunner,
+  createManagedHttpTransport,
   createProxySupply,
   createSessionPool,
   type BuiltRunner,
+  type ManagedHttpTransport,
   type RunnerOverrides,
 } from './composition.js';
 import { type ResolvedUrl } from './input-preparer.js';
@@ -135,6 +137,8 @@ export interface RunSessionOptions {
    */
   createRunner?:
     ((context: { cycle: number; sink: SnapshotSink }) => Promise<BuiltRunner>) | undefined;
+  /** Session-owned transport override for lifecycle tests and tooling. */
+  managedTransport?: ManagedHttpTransport | undefined;
 }
 
 /**
@@ -209,6 +213,8 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
   await proxySupply.source?.start();
   const sessionPool = await createSessionPool(config, sessionLogger);
   const resolutionCache = new Map<string, ResolvedUrl>();
+  const managedTransport =
+    options.managedTransport ?? createManagedHttpTransport(config, sessionLogger);
 
   // Session-cumulative counters, updated as results land rather than derived
   // from cycle summaries, so the live timeline is accurate mid-cycle.
@@ -399,6 +405,7 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
                 proxyProvider,
                 sessionPool,
                 resolutionCache,
+                managedTransport,
               })
             : await options.createRunner({ cycle: context.cycle, sink });
 
@@ -526,6 +533,14 @@ export async function runSession(options: RunSessionOptions): Promise<SessionSum
     sampling = false;
     samplerStop.abort();
     await sampler;
+    try {
+      await managedTransport?.close();
+    } catch (error) {
+      sessionLogger.warn(
+        { message: error instanceof Error ? error.message : String(error) },
+        'could not close session HTTP transport',
+      );
+    }
   }
 
   // One last sample so the timeline reflects the settled state rather than

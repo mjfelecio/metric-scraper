@@ -435,6 +435,7 @@ export class RunService {
 
   private async execute(record: RunRecord, request: StartRunRequest): Promise<void> {
     const { state } = record;
+    const cleanup: Array<() => Promise<void> | void> = [];
 
     try {
       const parsed = this.parseRequestInput(request);
@@ -475,6 +476,7 @@ export class RunService {
         context: { run_id: state.runId },
         logger: this.logger,
       });
+      cleanup.push(() => proxyEvents.close());
       const proxySupply = createProxySupply(
         this.config,
         this.logger,
@@ -483,6 +485,7 @@ export class RunService {
         },
         request.concurrency,
       );
+      cleanup.push(() => proxySupply.source?.stop());
       await proxySupply.source?.start();
 
       const built = await buildRunner({
@@ -492,6 +495,7 @@ export class RunService {
         overrides: { concurrency: request.concurrency, targetRpm: request.targetRpm },
         proxyProvider: proxySupply.provider,
       });
+      cleanup.push(() => built.dispose());
       const prepared =
         built.inputPreparer === undefined
           ? {
@@ -546,8 +550,6 @@ export class RunService {
 
       proxiesSampledAt = 0;
       sampleProxies();
-      proxySupply.source?.stop();
-      await proxyEvents.close();
       await this.persistSummary(paths.summary, result.summary);
       await appendBandwidthBaseline(result.summary, this.bandwidthDeps());
 
@@ -586,6 +588,20 @@ export class RunService {
         { run_id: state.runId, error_code: scrapeError.code, message: scrapeError.message },
         'run failed',
       );
+    } finally {
+      for (const release of cleanup.reverse()) {
+        try {
+          await release();
+        } catch (error) {
+          this.logger.warn(
+            {
+              run_id: state.runId,
+              message: error instanceof Error ? error.message : String(error),
+            },
+            'could not release run resource',
+          );
+        }
+      }
     }
   }
 

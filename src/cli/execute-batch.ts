@@ -1,5 +1,10 @@
 import { appendBandwidthBaseline } from '../app/bandwidth-refresh.js';
-import { buildRunner, createProxySupply, type RunnerOverrides } from '../app/composition.js';
+import {
+  buildRunner,
+  createProxySupply,
+  type BuiltRunner,
+  type RunnerOverrides,
+} from '../app/composition.js';
 import { loadConfig, type AppConfig } from '../config/env.js';
 import { parseInput } from '../core/input/parse-input.js';
 import { ScrapeError } from '../core/models/errors.js';
@@ -73,9 +78,10 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
     options.overrides?.concurrency ?? config.concurrency,
   );
   await proxySupply.source?.start();
+  let built: BuiltRunner | null = null;
 
   try {
-    const built = await buildRunner({
+    built = await buildRunner({
       config,
       logger,
       sink,
@@ -145,6 +151,14 @@ export async function executeBatch(options: ExecuteBatchOptions): Promise<Execut
 
     return { summary: result.summary, parsed: preparedParsed };
   } finally {
+    try {
+      await built?.dispose();
+    } catch (error) {
+      logger.warn(
+        { message: error instanceof Error ? error.message : String(error) },
+        'could not close run HTTP transport',
+      );
+    }
     proxySupply.source?.stop();
     await proxyEvents.close();
   }
