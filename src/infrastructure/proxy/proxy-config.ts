@@ -74,6 +74,43 @@ export function parseProxyEntry(entry: string): ProxyTarget {
   };
 }
 
+/**
+ * Assembles a target from separately configured parts, as opposed to parsing
+ * one written as a URL.
+ *
+ * Exists for the residential gateway, whose host, port and credentials arrive
+ * as individual environment variables. Kept here so credential encoding happens
+ * in the one module that already owns it: a gateway password containing `@` or
+ * `:` would otherwise produce a URL that parses back into the wrong host.
+ */
+export function buildProxyTarget(parts: {
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string | null;
+}): ProxyTarget {
+  const { protocol, host, port } = parts;
+  const username = parts.username === undefined || parts.username === '' ? null : parts.username;
+  const password = parts.password === undefined || parts.password === '' ? null : parts.password;
+
+  if (host.length === 0) {
+    throw new ScrapeError({ code: 'config_error', message: 'proxy host must not be empty' });
+  }
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+    throw new ScrapeError({
+      code: 'config_error',
+      message: `proxy port must be between 1 and 65535, got ${String(port)}`,
+    });
+  }
+
+  const url = new URL(`${protocol}://${host}:${String(port)}`);
+  if (username !== null) url.username = encodeURIComponent(username);
+  if (password !== null) url.password = encodeURIComponent(password);
+
+  return { protocol, host, port, username, password, url: url.toString() };
+}
+
 /** Stable identifier safe to log and to publish in a run summary. */
 export function proxyId(target: ProxyTarget): string {
   return `${target.protocol}://${target.host}:${target.port}`;
