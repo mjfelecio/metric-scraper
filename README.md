@@ -563,6 +563,11 @@ up, and the session carries on; only an unwritable output is fatal. A watchdog f
 cycle that stops making progress while work is still in flight. Ctrl-C stops after the
 cycle in flight, and the summary is still written — a second Ctrl-C exits immediately.
 
+Direct and proxy HTTP connection pools live for the whole session, so short-interval and
+back-to-back cycles can reuse warm keep-alive sockets instead of repeating TCP/TLS setup.
+The pools are closed when the session completes or is cancelled; proxy/session health
+pools remain session-scoped as before, while bandwidth and retry metrics remain per cycle.
+
 Run configs carry the same settings (`watch`, `interval`, `duration`, `maxCycles`), and
 precedence is unchanged: **CLI > run config > environment**.
 

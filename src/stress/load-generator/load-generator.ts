@@ -216,13 +216,19 @@ export async function runLoadTest(options: LoadGeneratorOptions): Promise<LoadGe
           ? mergeSignals([AbortSignal.timeout(phase.durationMs), options.signal])
           : options.signal;
 
-      const result = await built.runner.run(records, {
-        platform: phase.platform === 'mixed' ? null : phase.platform,
-        ...(phaseSignal !== undefined ? { signal: phaseSignal } : {}),
-        onProgress: (progress: RunProgress) => {
-          latestProgress = progress;
-        },
-      });
+      const result = await (async () => {
+        try {
+          return await built.runner.run(records, {
+            platform: phase.platform === 'mixed' ? null : phase.platform,
+            ...(phaseSignal !== undefined ? { signal: phaseSignal } : {}),
+            onProgress: (progress: RunProgress) => {
+              latestProgress = progress;
+            },
+          });
+        } finally {
+          await built.dispose();
+        }
+      })();
 
       priorPhasesCompleted += result.summary.totals.requests;
       priorPhasesSuccesses += result.summary.totals.successes;

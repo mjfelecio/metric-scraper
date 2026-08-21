@@ -1,12 +1,14 @@
 import { type AppConfig, resolveTargetCapacity } from '../config/env.js';
 import { Agent, ProxyAgent, type Dispatcher } from 'undici';
-import { type Logger } from '../core/logging/logger.js';
+import { nullLogger, type Logger } from '../core/logging/logger.js';
 import {
   BandwidthAggregator,
   nullBandwidthSink,
+  type BandwidthSample,
   type BandwidthSink,
 } from '../core/metrics/bandwidth.js';
 import { MetricsCollector } from '../core/metrics/metrics-collector.js';
+import { ScrapeError } from '../core/models/errors.js';
 import { type SnapshotSink } from '../core/output/snapshot-sink.js';
 import { RetryPolicy, type RetryPolicyOptions } from '../core/retry/retry-policy.js';
 import { type ProxyTarget } from '../core/scraper/lease-ports.js';
@@ -61,6 +63,111 @@ export interface BuiltRunner {
   targetRpm: number;
   /** `null` when `METRICS_BANDWIDTH` is off; otherwise holds the run's wire-byte totals. */
   bandwidth: BandwidthAggregator | null;
+  /** Releases transport resources owned by this build. Safe to call repeatedly. */
+  dispose(): Promise<void>;
+}
+
+/** Session-safe HTTP transport whose connection pools outlive individual runners. */
+export interface ManagedHttpTransport {
+  clientFor(sink: BandwidthSink): HttpClient;
+  close(): Promise<void>;
+}
+
+class SwitchableBandwidthSink implements BandwidthSink {
+  private current: BandwidthSink = nullBandwidthSink;
+
+  use(sink: BandwidthSink): void {
+    this.current = sink;
+  }
+
+  record(sample: BandwidthSample): void {
+    this.current.record(sample);
+  }
+}
+
+/**
+ * Owns direct and per-proxy Undici agents. `clientFor` may be called once per
+ * sequential cycle; dispatchers stay stable while byte accounting moves to
+ * that cycle's aggregator.
+ */
+export function createManagedHttpTransport(
+  config: AppConfig,
+  logger: Logger = nullLogger,
+): ManagedHttpTransport {
+  const bandwidth = new SwitchableBandwidthSink();
+  const directBase = new Agent();
+  const directDispatcher = config.metricsBandwidth
+    ? directBase.compose(createCountingInterceptor({ sink: bandwidth, proxyId: null }))
+    : directBase;
+  const proxyAgents = new Map<
+    string,
+    { id: string; base: ProxyAgent; dispatcher: ProxyAgent | Dispatcher }
+  >();
+  let closePromise: Promise<void> | null = null;
+
+  return {
+    clientFor(sink) {
+      if (closePromise !== null) {
+        throw new ScrapeError({
+          code: 'config_error',
+          message: 'HTTP transport is already closed',
+        });
+      }
+      bandwidth.use(sink);
+      return new FetchHttpClient({
+        defaultTimeoutMs: config.requestTimeoutMs,
+        defaultDispatcher: directDispatcher,
+        dispatcherFactory: (target) => {
+          if (target.protocol !== 'http' && target.protocol !== 'https') {
+            throw new Error(
+              `proxy protocol ${target.protocol} is not supported by the fetch transport; use http or https`,
+            );
+          }
+          let entry = proxyAgents.get(target.url);
+          if (entry === undefined) {
+            const base = new ProxyAgent({
+              uri: target.url,
+              connectTimeout: config.proxy.connectTimeoutMs,
+            });
+            entry = {
+              id: proxyId(target),
+              base,
+              dispatcher: config.metricsBandwidth
+                ? base.compose(
+                    createCountingInterceptor({ sink: bandwidth, proxyId: proxyId(target) }),
+                  )
+                : base,
+            };
+            proxyAgents.set(target.url, entry);
+          }
+          return entry.dispatcher;
+        },
+      });
+    },
+    close() {
+      closePromise ??= Promise.allSettled([
+        directBase.close(),
+        ...[...proxyAgents.values()].map((entry) => entry.base.close()),
+      ]).then((results) => {
+        const identities: (string | null)[] = [
+          null,
+          ...[...proxyAgents.values()].map((entry) => entry.id),
+        ];
+        for (const [index, result] of results.entries()) {
+          if (result.status !== 'rejected') continue;
+          logger.warn(
+            {
+              proxy_id: identities[index] ?? null,
+              message:
+                result.reason instanceof Error ? result.reason.message : String(result.reason),
+            },
+            'could not close HTTP dispatcher',
+          );
+        }
+      });
+      return closePromise;
+    },
+  };
 }
 
 /**
@@ -101,9 +208,11 @@ export async function buildRunner(options: {
    * Receives the same `bandwidthSink` production wiring already owns, so a
    * substituted transport still feeds real wire-byte accounting into this
    * run's `BandwidthAggregator` rather than leaving it empty. Test/tooling
-   * seam only — omitted, this is byte-for-byte the production path.
+   * seam only — omitted, the managed production transport is used.
    */
   transport?: ((bandwidthSink: BandwidthSink) => HttpClient) | undefined;
+  /** Externally owned connection pools, reused by sequential session cycles. */
+  managedTransport?: ManagedHttpTransport | undefined;
 }): Promise<BuiltRunner> {
   const { config, logger, sink } = options;
   const concurrency = options.overrides?.concurrency ?? config.concurrency;
@@ -124,19 +233,16 @@ export async function buildRunner(options: {
   const bandwidth = config.metricsBandwidth ? new BandwidthAggregator() : null;
   const bandwidthSink: BandwidthSink = bandwidth ?? nullBandwidthSink;
 
+  const ownedTransport =
+    options.transport === undefined && options.managedTransport === undefined
+      ? createManagedHttpTransport(config, logger)
+      : null;
+  const managedTransport = options.managedTransport ?? ownedTransport;
   const transport =
-    options.transport?.(bandwidthSink) ??
-    new FetchHttpClient({
-      defaultTimeoutMs: config.requestTimeoutMs,
-      dispatcherFactory: createProxyAgentFactory(config, bandwidthSink),
-      ...(bandwidth === null
-        ? {}
-        : {
-            defaultDispatcher: new Agent().compose(
-              createCountingInterceptor({ sink: bandwidthSink, proxyId: null }),
-            ),
-          }),
-    });
+    options.transport?.(bandwidthSink) ?? managedTransport?.clientFor(bandwidthSink);
+  if (transport === undefined) {
+    throw new ScrapeError({ code: 'config_error', message: 'no HTTP transport was configured' });
+  }
 
   // Egress limiting wraps the transport, so retries and the multi-hop calls a
   // platform scraper makes internally are all counted. A job-level limit cannot
@@ -192,6 +298,7 @@ export async function buildRunner(options: {
     concurrency,
     targetRpm,
     bandwidth,
+    dispose: () => ownedTransport?.close() ?? Promise.resolve(),
   };
 }
 

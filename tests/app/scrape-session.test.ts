@@ -103,6 +103,7 @@ function runnerFactory(options: {
       concurrency: 4,
       targetRpm: 0,
       bandwidth: null,
+      dispose: () => Promise.resolve(),
     });
   };
 }
@@ -220,9 +221,11 @@ describe('runSession', () => {
 
   it('stops when cancelled and still reports', async () => {
     const controller = new AbortController();
+    const closeTransport = vi.fn(() => Promise.resolve());
     const summary = await session({
       schedule: { intervalMs: 0, durationMs: null, maxCycles: null },
       signal: controller.signal,
+      managedTransport: { clientFor: () => unusedHttp, close: closeTransport },
       onCycleEnd: () => {
         controller.abort();
       },
@@ -233,6 +236,7 @@ describe('runSession', () => {
     // The run still finished and reported rather than throwing away its work.
     expect(summary.totals.requests).toBe(2);
     expect(summary.finished_at).not.toBe('');
+    expect(closeTransport).toHaveBeenCalledTimes(1);
   });
 
   it('reports both wall-clock and active throughput', async () => {
