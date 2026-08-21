@@ -2,6 +2,11 @@ export class InstagramParseError extends Error {
   override readonly name = 'InstagramParseError';
 }
 
+/** A valid post-operation response that explicitly contains no public media. */
+export class InstagramMediaUnavailableError extends Error {
+  override readonly name = 'InstagramMediaUnavailableError';
+}
+
 export function parseJson(body: string, source: string): unknown {
   try {
     return JSON.parse(body);

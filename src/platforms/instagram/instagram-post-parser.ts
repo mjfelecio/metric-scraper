@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { type ScrapedVideoData } from '../../core/models/snapshot.js';
 
 import {
+  InstagramMediaUnavailableError,
   InstagramParseError,
   parseJson,
   parseOptionalCount,
@@ -43,9 +44,15 @@ export function parseInstagramPostResponse(
     );
   }
 
-  const item = parsed.data.data?.xdt_api__v1__media__shortcode__web_info?.items[0];
-  if (item === undefined)
-    throw new InstagramParseError('Instagram post response contains no media');
+  const operation = parsed.data.data?.xdt_api__v1__media__shortcode__web_info;
+  if (operation === null || operation === undefined) {
+    throw new InstagramParseError('Instagram post response is missing operation data');
+  }
+
+  const item = operation.items[0];
+  if (item === undefined) {
+    throw new InstagramMediaUnavailableError('Instagram returned no publicly available media');
+  }
 
   const shortcode = stringField(item.code, 'code');
   if (shortcode !== expectedShortcode) {
