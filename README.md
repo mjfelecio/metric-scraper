@@ -693,6 +693,13 @@ then discarded so a later time-series run fetches fresh counters. Reels outside 
 bounds require a compatible session and use authenticated media-info. GraphQL document
 IDs are configurable because they are undocumented and volatile.
 
+A structurally valid post response with an explicit empty `items` array is a definitive
+anonymous result: the post is recorded as non-retryable `not_found` unless a compatible
+session can recover it through the existing media-info fallback. Missing operation data,
+invalid JSON, malformed metrics and shortcode mismatches remain `parse_error`. A successful
+CSRF bootstrap response that omits the token is treated as retryable `blocked`, and its
+cached bootstrap promise is evicted so a retry or another proxy can bootstrap again.
+
 ## 11. Output contract
 
 One JSON object per line, appended, UTF-8, keys in a fixed order:
