@@ -193,7 +193,8 @@ All are optional. See [`.env.example`](.env.example) for the annotated list.
 | `SCRAPER_CONCURRENCY`               | `10`       | Ceiling on jobs in flight at once. See [§5.1](#51-concurrency-rate-and-backpressure)     |
 | `SCRAPER_TARGET_RPM`                | `500`      | **Logical jobs** admitted per minute; `0` disables pacing                                |
 | `SCRAPER_BURST`                     | `0`        | Jobs admissible at once after idle; `0` = one second of target                           |
-| `SCRAPER_HTTP_RPM_PER_HOST`         | `0`        | **Actual HTTP requests** per minute per host, retries included; `0` = off                |
+| `TIKTOK_HTTP_RPM_PER_HOST`          | `300`      | **Actual HTTP requests** per minute to TikTok, retries included; `0` = off               |
+| `INSTAGRAM_HTTP_RPM_PER_HOST`       | `180`      | Same, for Instagram; stricter because its per-job fan-out and pushback are both higher   |
 | `SCRAPER_MAX_QUEUE_SIZE`            | `1000`     | Max waiting jobs before the producer waits; `0` = unbounded                              |
 | `SCRAPER_REQUEST_TIMEOUT_MS`        | `15000`    | Maximum duration of each individual outbound HTTP request                                |
 | `TIKTOK_ATTEMPT_TIMEOUT_MS`         | `15000`    | Maximum duration of one complete TikTok attempt                                          |
@@ -307,7 +308,7 @@ one job at a time, and the run summary still reported `concurrency: 10`.
 | Concern          | Knob                                              | Mechanism                     | What it bounds                               |
 | ---------------- | ------------------------------------------------- | ----------------------------- | -------------------------------------------- |
 | **Concurrency**  | `SCRAPER_CONCURRENCY`                             | Worker pool                   | Jobs in flight — sockets, memory, proxy load |
-| **Rate**         | `SCRAPER_TARGET_RPM`, `SCRAPER_HTTP_RPM_PER_HOST` | Token bucket                  | How fast we start work / hit upstream        |
+| **Rate**         | `SCRAPER_TARGET_RPM`, `TIKTOK_HTTP_RPM_PER_HOST`, `INSTAGRAM_HTTP_RPM_PER_HOST` | Token bucket | How fast we start work / hit upstream |
 | **Backpressure** | `SCRAPER_MAX_QUEUE_SIZE`                          | Bounded queue, producer waits | Memory under a large input                   |
 
 **Rate limiting is two-tier, on purpose.** `targetRpm` counts _logical jobs_ — one
@@ -317,13 +318,54 @@ items, never retries). But it does not protect upstream, because one job is not
 one request: TikTok issues two, Instagram up to three per bounded page/author,
 and a retried job repeats all of them. `httpRpmPerHost` therefore limits the
 actual egress, applied at the HTTP client so retries and multi-hop calls are
-counted automatically.
+counted automatically — split into `TIKTOK_HTTP_RPM_PER_HOST` and
+`INSTAGRAM_HTTP_RPM_PER_HOST` because the two platforms' fan-out per job differs
+enough that one shared ceiling would either starve one platform or leave the
+other unconstrained. A request is routed to whichever ceiling its host belongs
+to (`tiktok.com`, or `instagram.com`/`instagr.am`); a host belonging to neither
+— a redirect hop mid-resolution, say — falls back to the stricter of the two
+configured limits rather than going unpaced.
 
 ```
 1 job -> attempt 1 (2 hops) -> fail -> attempt 2 (2 hops) -> fail -> attempt 3 (2 hops)
        = 1 unit of targetRpm
        = 6 units of httpRpmPerHost
 ```
+
+**Why these default to on, and to these numbers.** Both used to default to `0`
+(off) with no ceiling on real egress — `targetRpm` only paces job admission, so
+a job's own retries were invisible to it and could fan out unbounded. Measured
+with `pnpm stress-test --profile acceptance` (mocked upstream, real proxy pool,
+retry policy, and rate limiter — see §6.2) against the same synthetic input,
+seed, and 10-proxy pool, comparing off vs. the shipped default:
+
+| Platform  | `httpRpmPerHost` | Success rate | Retries        | Proxy pool                |
+| --------- | ----------------- | ------------ | -------------- | -------------------------- |
+| TikTok    | `0` (off)          | 61.2%        | 313/381 (82%)  | 10/10 cooling — exhausted  |
+| TikTok    | `300` (default)    | 100%         | 9/107 (8.4%)   | never exhausted            |
+| Instagram | `0` (off)          | 82.7%        | 120/381 (31.5%)| 10/10 cooling — exhausted  |
+| Instagram | `180` (default)    | 96.2%        | 5/52 (9.6%)    | never exhausted            |
+
+Unthrottled, retries cascade fast enough that every proxy in the pool crosses
+`PROXY_MAX_FAILURES` and cools down at once — after which _every_ request fails
+regardless of what caused the first one, which is the collapse the numbers
+above show. The effect has a threshold, not a gradient: sweeping TikTok from
+`300` up to `1000` rpm found the pool survives up to `600` and collapses by
+`750`, with no stable middle. `300`/`180` sit well under that edge rather than
+against it, on purpose — a default should stay correct as the input, proxy
+pool, or upstream mood changes, not sit at the exact rpm that happened to
+survive one measured run.
+
+The cost is throughput: at `300`/`180` neither run sustains the 500 rpm
+`stress-test acceptance` target, because the HTTP ceiling — not admission — is
+now the bottleneck. That is the tradeoff these knobs exist to make explicit
+rather than hide: raising them trades pool survival for throughput, and the
+right value depends on proxy pool size and upstream tolerance on the day,
+which is exactly why they stay independently configurable per platform rather
+than fixed. Tune with the same comparison shown above — vary
+`TIKTOK_HTTP_RPM_PER_HOST`/`INSTAGRAM_HTTP_RPM_PER_HOST`, keep `--seed` fixed,
+compare `totals.successRate` and the `proxy_exhaustion`/`retry_storm` findings
+between runs.
 
 **Concurrency is a ceiling, not a target.** Sustained throughput obeys Little's
 Law: `in-flight = rate x latency`. At the ~3.5s mean latency observed against
@@ -868,6 +910,13 @@ including the case of the same video appearing twice with different `scraped_at`
   statement about a 30-second-old observation, and restoring yesterday's would bench
   proxies that have long since recovered. The durable record is the summary plus
   `*.proxy-events.jsonl`, which is what a past run should be read from.
+- **`httpRpmPerHost` trades throughput for pool survival, and the right value is
+  proxy-pool-dependent.** The shipped defaults (§5.1) were measured against a
+  10-proxy pool and keep it from collapsing, but they mean neither platform
+  sustains the 500 rpm `stress-test acceptance` target on that pool size — the
+  HTTP ceiling becomes the bottleneck instead of admission. A larger pool can
+  likely absorb a higher ceiling; re-measure with `pnpm stress-test` (§5.1)
+  rather than assuming the shipped numbers travel to a different pool size.
 - **Instagram uses undocumented first-party operations.** Document IDs and response
   shapes can change. A malformed response becomes a visible `parse_error`.
 - **Instagram clips lookup is deliberately bounded.** The anonymous path checks at most
@@ -931,7 +980,10 @@ including the case of the same video appearing twice with different `scraped_at`
    strict 15 RPM confirmation held at 14.18 RPM, but no proxy pool is configured yet.
 2. Validate the authenticated Instagram fallback for Reels beyond the anonymous page and
    coauthor bounds using a dedicated local test session.
-3. Validate the ~500 rpm target against a real proxy workload and tune concurrency, pacing
-   and the retry policy from the measured run summaries. The continuous-run harness
-   (§6.1) already sustains that rate against the placeholder scrapers; what remains is
-   running it against real acquisition once a proxy pool is configured.
+3. Validate the ~500 rpm target against a real proxy workload and tune concurrency, pacing,
+   `httpRpmPerHost` (§5.1), and the retry policy from the measured run summaries. The
+   continuous-run harness (§6.1) already sustains that rate against the placeholder
+   scrapers; what remains is running it against real acquisition once a proxy pool is
+   configured. The `httpRpmPerHost` defaults shipped today are measured against the mocked
+   stress harness and a 10-proxy pool (§5.1) — real acquisition, and a differently sized
+   pool, may call for different numbers.

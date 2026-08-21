@@ -26,7 +26,11 @@ export const RunConfigSchema = z
     targetRpm: z.number().int().min(0).nullish(),
     /** Jobs admissible at once after idle; `0` = one second of `targetRpm`. */
     burst: z.number().int().min(0).nullish(),
-    /** Ceiling on actual HTTP requests per minute per host, retries included. */
+    /**
+     * Ceiling on actual HTTP requests per minute per host, retries included.
+     * Overrides both platforms' ceilings uniformly; env config sets them
+     * independently (`TIKTOK_HTTP_RPM_PER_HOST`/`INSTAGRAM_HTTP_RPM_PER_HOST`).
+     */
     httpRpmPerHost: z.number().int().min(0).nullish(),
     /** Repeat the batch continuously instead of running it once. */
     watch: z.boolean().nullish(),

@@ -110,8 +110,9 @@ status with a fabricated `deleted` result.
 Two different rate controls must be reported separately:
 
 - `SCRAPER_TARGET_RPM` limits logical URL jobs admitted per minute.
-- `SCRAPER_HTTP_RPM_PER_HOST` limits actual platform HTTP calls per host, including retries
-  and multi-request Instagram jobs.
+- `TIKTOK_HTTP_RPM_PER_HOST` / `INSTAGRAM_HTTP_RPM_PER_HOST` limit actual platform HTTP
+  calls per host, including retries and multi-request Instagram jobs, independently per
+  platform.
 
 ### What to write from a live run
 
