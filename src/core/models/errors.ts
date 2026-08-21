@@ -112,6 +112,22 @@ export function defaultRetryableForCode(code: ScrapeErrorCode): boolean {
 }
 
 /**
+ * Whether a thrown value is an abort raised by `AbortSignal`.
+ *
+ * Both names have to be here. `AbortSignal.timeout()` rejects with a
+ * `TimeoutError`, while `AbortController.abort()` and `fetch` use
+ * `AbortError` — and a single definition is the point: when only the transport
+ * knew about `TimeoutError`, an attempt timeout raised anywhere else fell
+ * through to `unknown`, which is non-retryable, so a job that merely waited
+ * too long died terminally on its first attempt and was reported as an
+ * unclassified failure.
+ */
+export function isAbortLikeError(value: unknown): boolean {
+  if (!(value instanceof Error)) return false;
+  return value.name === 'TimeoutError' || value.name === 'AbortError';
+}
+
+/**
  * The one error type that crosses layer boundaries. Anything thrown inside a
  * scraper is normalised into this before the runner sees it, which is what
  * lets every failure become a row instead of a dropped job.
@@ -150,8 +166,9 @@ export class ScrapeError extends Error {
       return value;
     }
     if (value instanceof Error) {
-      // AbortError is what fetch/AbortSignal throws on timeout or cancellation.
-      const code: ScrapeErrorCode = value.name === 'AbortError' ? 'timeout' : 'unknown';
+      // See `isAbortLikeError`: an AbortSignal reports a timeout under either
+      // of two names, and both mean the same thing to the runner.
+      const code: ScrapeErrorCode = isAbortLikeError(value) ? 'timeout' : 'unknown';
       return new ScrapeError({ code, message: value.message || value.name, cause: value });
     }
     return new ScrapeError({ code: 'unknown', message: String(value), cause: value });

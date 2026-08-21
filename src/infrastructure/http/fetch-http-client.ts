@@ -1,4 +1,4 @@
-import { ScrapeError } from '../../core/models/errors.js';
+import { isAbortLikeError, ScrapeError } from '../../core/models/errors.js';
 import {
   HttpError,
   type HttpClient,
@@ -122,8 +122,7 @@ function toHttpError(error: unknown, url: string): ScrapeError {
   // identity so cancellation and any future cross-layer classification reach
   // the runner without losing metadata or being relabelled as a network error.
   if (error instanceof ScrapeError) return error;
-  const name = error instanceof Error ? error.name : '';
-  if (name === 'TimeoutError' || name === 'AbortError') {
+  if (isAbortLikeError(error)) {
     return new HttpError({
       code: 'timeout',
       message: `request to ${url} timed out or was aborted`,
