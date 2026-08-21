@@ -573,6 +573,10 @@ answers whether the scraper's own plumbing holds up at the required rate before 
 full flag reference, mock scenario catalog, and how this relates to the real acceptance
 benchmark (§6.1's `--watch` flow against `data/acceptance/*-valid-100.txt`, unchanged).
 
+Behavior a run actually catches — capacity limits, cascades, misconfigurations, and
+whether each one is a real problem or just a config choice — is tracked in
+[`docs/failure-points.md`](docs/failure-points.md), kept up to date as new ones are found.
+
 ## 7. Running the web UI
 
 ```bash
