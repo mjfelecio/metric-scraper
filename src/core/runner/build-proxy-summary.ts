@@ -4,7 +4,7 @@ import {
   type ProxySummary,
   type ProxyUsage,
 } from '../models/run-summary.js';
-import { type ProxyHealth } from '../scraper/pool-ports.js';
+import { type ProxyEviction, type ProxyHealth } from '../scraper/pool-ports.js';
 import { type ProxyProviderStats } from '../scraper/provider-ports.js';
 import { type ProxySourceStats } from '../scraper/proxy-source-ports.js';
 
@@ -29,12 +29,17 @@ export function buildProxySummary(
 ): ProxySummary {
   const byId = new Map(usage.map((entry) => [entry.proxyId, entry]));
   const perProxy: ProxyUsage[] = stats.perProxy.map((health) => toRow(health, byId.get(health.id)));
+  perProxy.push(...stats.evicted.map((health) => toRow(health, byId.get(health.id), health)));
 
   // Anything the metrics saw but the pool did not list. Only reachable through
   // a pool that hands out ids it does not report; the tallies are still real,
   // so they are kept rather than quietly dropped.
   for (const entry of usage) {
-    if (stats.perProxy.some((health) => health.id === entry.proxyId)) continue;
+    if (
+      stats.perProxy.some((health) => health.id === entry.proxyId) ||
+      stats.evicted.some((health) => health.id === entry.proxyId)
+    )
+      continue;
     perProxy.push(toRow(unknownHealth(entry.proxyId), entry));
   }
 
@@ -52,6 +57,7 @@ export function buildProxySummary(
     capacity: stats.capacity,
     pool_exhausted: stats.poolExhaustedCount,
     total_failures: stats.totalFailures,
+    eviction_count: stats.evictionCount,
     source: sourceRow(stats.source),
     per_proxy: perProxy,
   };
@@ -79,6 +85,7 @@ function sourceRow(source: ProxySourceStats | null): ProxySourceSummary | null {
     admitted_tried: source.admittedTried,
     admitted_proven: source.admittedProven,
     admission_to_first_success_rate: source.admissionToFirstSuccessRate,
+    evictions: source.evictions,
     target_capacity: source.targetCapacity,
   };
 }
@@ -138,7 +145,11 @@ function addNullableBytes(a: number | null, b: number | null): number | null {
   return (a ?? 0) + (b ?? 0);
 }
 
-function toRow(health: ProxyHealth, usage: ProxyUsageView | undefined): ProxyUsage {
+function toRow(
+  health: ProxyHealth,
+  usage: ProxyUsageView | undefined,
+  eviction?: ProxyEviction,
+): ProxyUsage {
   return {
     proxy_id: health.id,
     label: health.label,
@@ -154,6 +165,9 @@ function toRow(health: ProxyHealth, usage: ProxyUsageView | undefined): ProxyUsa
     consecutive_failures: health.consecutiveFailures,
     blocked: health.blocked || (usage?.blocked ?? false),
     retired: health.retired,
+    evicted: eviction !== undefined,
+    eviction_count: eviction?.evictionCount ?? 0,
+    evicted_at: iso(eviction?.evictedAt ?? null),
     in_flight: health.inFlight,
     capacity: health.capacity,
     unhealthy_since: iso(health.unhealthySince),

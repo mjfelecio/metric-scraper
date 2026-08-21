@@ -72,11 +72,10 @@ interface CandidateRecord {
   /**
    * Whether the pool ever leased it, and whether it ever worked.
    *
-   * Sticky, and kept on the candidate rather than read off the pool, because
-   * the pool forgets an evicted proxy entirely — and every proxy it evicts is
-   * one that never succeeded. Reading the rate off the roster would therefore
-   * delete exactly the failures it is meant to count, and a pool churning hard
-   * would report a rate approaching 1 while achieving very little.
+   * Sticky, and kept on the candidate rather than read off the live roster,
+   * because every proxy removed from that roster is one that never succeeded.
+   * Reading the rate from live entries would therefore delete exactly the
+   * failures it is meant to count, and a churning pool would flatter itself.
    */
   everTried: boolean;
   everSucceeded: boolean;
@@ -325,6 +324,9 @@ export class ProxySourceManager {
       admittedTried,
       admittedProven,
       admissionToFirstSuccessRate: admittedTried === 0 ? null : admittedProven / admittedTried,
+      evictions: [...this.candidates.values()].filter(
+        (record) => record.rejection === 'evicted' || record.rejection === 'retired',
+      ).length,
       targetCapacity: this.targetCapacity,
     };
   }
@@ -449,9 +451,9 @@ export class ProxySourceManager {
   /**
    * Marks candidates the pool has since seen succeed.
    *
-   * Runs on the replenish tick, and once more on `stop`, because the pool's own
-   * record of a proxy disappears when it is evicted — and eviction is exactly
-   * what happens to the proxies this rate is trying to count. Reading it here
+   * Runs on the replenish tick, and once more on `stop`, because an evicted
+   * proxy disappears from the live roster — and eviction is exactly what
+   * happens to the proxies this rate is trying to count. Reading it here
    * rather than inside `getStats` is not a style choice: the pool publishes
    * these stats *through* `getStats`, so asking it for them from there would
    * recurse.

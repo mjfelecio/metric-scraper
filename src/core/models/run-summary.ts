@@ -54,6 +54,10 @@ export const ProxyUsageSchema = z.object({
   consecutive_failures: z.number().int().nonnegative(),
   blocked: z.boolean(),
   retired: z.boolean(),
+  /** Historical row retained after removal from the live roster. */
+  evicted: z.boolean(),
+  eviction_count: z.number().int().nonnegative(),
+  evicted_at: z.string().datetime().nullable(),
   /** Leases held at the moment the summary was taken. */
   in_flight: z.number().int().nonnegative(),
   /** Jobs it may hold at once given its health; `null` when unlimited. */
@@ -133,6 +137,7 @@ export const ProxySourceSummarySchema = z.object({
    * healthier.
    */
   admission_to_first_success_rate: z.number().min(0).max(1).nullable(),
+  evictions: z.number().int().nonnegative(),
   /** Usable capacity the supply aims at, in concurrent slots. */
   target_capacity: z.number().int().nonnegative(),
 });
@@ -178,6 +183,8 @@ export const ProxySummarySchema = z.object({
    */
   pool_exhausted: z.number().int().nonnegative(),
   total_failures: z.number().int().nonnegative(),
+  /** Historical removals; not included in `configured` or other live gauges. */
+  eviction_count: z.number().int().nonnegative(),
   source: ProxySourceSummarySchema.nullable(),
   per_proxy: z.array(ProxyUsageSchema),
 });

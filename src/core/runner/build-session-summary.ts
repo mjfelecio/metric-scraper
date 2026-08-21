@@ -104,6 +104,8 @@ function emptyProxyStats(): ProxyProviderStats {
     totalRequests: 0,
     totalFailures: 0,
     source: null,
+    evicted: [],
+    evictionCount: 0,
     perProxy: [],
   };
 }

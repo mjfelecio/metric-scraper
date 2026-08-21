@@ -7,6 +7,7 @@ import {
   type ProxyBlockKind,
   type ProxyEvent,
   type ProxyEventListener,
+  type ProxyEviction,
   type ProxyHealth,
   type ProxyPool,
   type ProxyPoolStats,
@@ -181,6 +182,8 @@ interface ProxyEntry {
    * concurrently. Ties would then always resolve to the same proxy.
    */
   lastUsedSeq: number;
+  /** Advances when one checkout generation supplies a health observation. */
+  generation: number;
 }
 
 /**
@@ -258,6 +261,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
   private exploreCredit = 0;
   private poolExhaustedCount = 0;
   private sourceStatsProvider: (() => ProxySourceStats) | null = null;
+  private readonly evicted = new Map<string, ProxyEviction>();
 
   constructor(options: InMemoryProxyPoolOptions) {
     this.now = options.now ?? (() => Date.now());
@@ -316,6 +320,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
         lastReason: null,
         lastErrorCode: null,
         lastUsedSeq: 0,
+        generation: 0,
       };
       this.entries.push(entry);
       this.byId.set(id, entry);
@@ -338,6 +343,16 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
     const entry = this.byId.get(id);
     if (entry === undefined || entry.inFlight > 0) return false;
 
+    const now = this.now();
+    const snapshot = this.healthSnapshot(entry, now);
+    this.evicted.set(id, {
+      ...snapshot,
+      state: snapshot.state === 'saturated' ? this.healthOf(entry, now) : snapshot.state,
+      inUse: false,
+      inFlight: 0,
+      evictedAt: now,
+      evictionCount: 1,
+    });
     this.byId.delete(id);
     this.entries = this.entries.filter((candidate) => candidate !== entry);
     return true;
@@ -421,7 +436,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
         chosen.firstUsedAt ??= now;
         chosen.lastUsedSeq = ++this.sequence;
         chosen.requests += 1;
-        return { id: chosen.id, target: chosen.target };
+        return { id: chosen.id, generation: chosen.generation, target: chosen.target };
       }
 
       if (healthy.length > 0) {
@@ -502,9 +517,10 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
     this.transition(entry, () => {
       const now = this.now();
       entry.successes += 1;
+      entry.lastSuccessAt = now;
+      if (lease.generation !== entry.generation) return;
       entry.consecutiveFailures = 0;
       entry.consecutiveUnsuitable = 0;
-      entry.lastSuccessAt = now;
       // Credited even for a straggler reporting in during a cooldown: the
       // request did work, and unlike clearing the cooldown below, trusting the
       // proxy with another slot cannot let it back into rotation early.
@@ -536,8 +552,13 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
       entry,
       () => {
         entry.failures += 1;
-        entry.consecutiveFailures += 1;
         entry.lastFailureAt = this.now();
+        if (lease.generation !== entry.generation) return;
+        entry.generation += 1;
+        entry.consecutiveFailures = Math.min(
+          this.maxConsecutiveFailures,
+          entry.consecutiveFailures + 1,
+        );
         this.loseTrust(entry);
         this.recordReason(entry, reason, errorCode);
 
@@ -564,8 +585,13 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
       () => {
         entry.failures += 1;
         entry.unsuitable += 1;
-        entry.consecutiveUnsuitable += 1;
         entry.lastFailureAt = this.now();
+        if (lease.generation !== entry.generation) return;
+        entry.generation += 1;
+        entry.consecutiveUnsuitable = Math.min(
+          this.maxConsecutiveFailures,
+          entry.consecutiveUnsuitable + 1,
+        );
         this.loseTrust(entry);
         this.recordReason(entry, reason, errorCode);
 
@@ -596,11 +622,16 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
       entry,
       () => {
         entry.failures += 1;
-        entry.consecutiveFailures += 1;
+        entry.lastFailureAt = this.now();
+        if (lease.generation !== entry.generation) return;
+        entry.generation += 1;
+        entry.consecutiveFailures = Math.min(
+          this.maxConsecutiveFailures,
+          entry.consecutiveFailures + 1,
+        );
         entry.blocked = true;
         entry.cooldownUntil = this.now() + this.cooldownMs;
         entry.blockKind = 'detected_block';
-        entry.lastFailureAt = this.now();
         this.loseTrust(entry);
         this.recordReason(entry, reason, errorCode);
         this.logger.warn({ proxy_id: entry.id, reason: reason ?? null }, 'proxy marked blocked');
@@ -614,7 +645,43 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
     const now = this.now();
     this.refresh(now);
 
-    const perProxy: ProxyHealth[] = this.entries.map((entry) => ({
+    const perProxy: ProxyHealth[] = this.entries.map((entry) => this.healthSnapshot(entry, now));
+    const usable = perProxy.filter(
+      (proxy) => proxy.state !== 'retired' && proxy.state !== 'cooling',
+    );
+
+    return {
+      configured: this.entries.length,
+      available: usable.length,
+      inUse: perProxy.filter((proxy) => proxy.inFlight > 0).length,
+      blocked: perProxy.filter((proxy) => proxy.blocked).length,
+      retired: perProxy.filter((proxy) => proxy.retired).length,
+      untested: perProxy.filter((proxy) => proxy.state === 'untested').length,
+      cooling: perProxy.filter((proxy) => proxy.state === 'cooling').length,
+      saturated: perProxy.filter((proxy) => proxy.state === 'saturated').length,
+      totalInFlight: perProxy.reduce((total, proxy) => total + proxy.inFlight, 0),
+      // Only usable proxies count: capacity is what the pool can serve *now*,
+      // which is the number to compare a configured concurrency against.
+      capacity:
+        this.maxConcurrentPerProxy <= 0
+          ? null
+          : usable.reduce((total, proxy) => total + (proxy.capacity ?? 0), 0),
+      poolExhaustedCount: this.poolExhaustedCount,
+      totalRequests:
+        perProxy.reduce((total, proxy) => total + proxy.requests, 0) +
+        [...this.evicted.values()].reduce((total, proxy) => total + proxy.requests, 0),
+      totalFailures:
+        perProxy.reduce((total, proxy) => total + proxy.failures, 0) +
+        [...this.evicted.values()].reduce((total, proxy) => total + proxy.failures, 0),
+      source: this.sourceStatsProvider?.() ?? null,
+      evicted: [...this.evicted.values()],
+      evictionCount: this.evicted.size,
+      perProxy,
+    };
+  }
+
+  private healthSnapshot(entry: ProxyEntry, now: number): ProxyHealth {
+    return {
       id: entry.id,
       label: entry.label,
       source: entry.source,
@@ -641,33 +708,6 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
       unhealthySince: entry.unhealthySince,
       lastReason: entry.lastReason,
       lastErrorCode: entry.lastErrorCode,
-    }));
-
-    const usable = perProxy.filter(
-      (proxy) => proxy.state !== 'retired' && proxy.state !== 'cooling',
-    );
-
-    return {
-      configured: this.entries.length,
-      available: usable.length,
-      inUse: perProxy.filter((proxy) => proxy.inFlight > 0).length,
-      blocked: perProxy.filter((proxy) => proxy.blocked).length,
-      retired: perProxy.filter((proxy) => proxy.retired).length,
-      untested: perProxy.filter((proxy) => proxy.state === 'untested').length,
-      cooling: perProxy.filter((proxy) => proxy.state === 'cooling').length,
-      saturated: perProxy.filter((proxy) => proxy.state === 'saturated').length,
-      totalInFlight: perProxy.reduce((total, proxy) => total + proxy.inFlight, 0),
-      // Only usable proxies count: capacity is what the pool can serve *now*,
-      // which is the number to compare a configured concurrency against.
-      capacity:
-        this.maxConcurrentPerProxy <= 0
-          ? null
-          : usable.reduce((total, proxy) => total + (proxy.capacity ?? 0), 0),
-      poolExhaustedCount: this.poolExhaustedCount,
-      totalRequests: perProxy.reduce((total, proxy) => total + proxy.requests, 0),
-      totalFailures: perProxy.reduce((total, proxy) => total + proxy.failures, 0),
-      source: this.sourceStatsProvider?.() ?? null,
-      perProxy,
     };
   }
 
@@ -748,6 +788,7 @@ export class InMemoryProxyPool implements ProxyPool, ProxyRoster {
       // proxy comes back having to re-earn its concurrency rather than being
       // handed eight slots the moment the clock says it may try again.
       entry.consecutiveFailures = 0;
+      entry.generation += 1;
       this.emit(entry, from, this.healthOf(entry, now), entry.lastReason, entry.lastErrorCode);
     }
   }
@@ -1006,6 +1047,8 @@ export class NullProxyPool implements ProxyPool {
       totalRequests: 0,
       totalFailures: 0,
       source: null,
+      evicted: [],
+      evictionCount: 0,
       perProxy: [],
     };
   }

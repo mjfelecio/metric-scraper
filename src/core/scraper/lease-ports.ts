@@ -20,6 +20,8 @@ export interface ProxyTarget {
 export interface ProxyLease {
   /** Stable, credential-free identifier, e.g. `http://proxy-a.example.net:8000`. */
   readonly id: string;
+  /** Health epoch observed at checkout; used to ignore stale concurrent outcomes. */
+  readonly generation: number;
   readonly target: ProxyTarget;
 }
 

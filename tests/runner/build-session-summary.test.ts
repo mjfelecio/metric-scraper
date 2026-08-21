@@ -59,6 +59,7 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
       capacity: null,
       pool_exhausted: 0,
       total_failures: 0,
+      eviction_count: 0,
       source: null,
       per_proxy: [],
     },
@@ -266,7 +267,10 @@ describe('buildSessionSummary proxies', () => {
     };
   }
 
-  function proxyStats(perProxy: ProxyHealth[]): ProxyProviderStats {
+  function proxyStats(
+    perProxy: ProxyHealth[],
+    overrides: Partial<ProxyProviderStats> = {},
+  ): ProxyProviderStats {
     return {
       mode: 'static',
       configured: perProxy.length,
@@ -283,7 +287,10 @@ describe('buildSessionSummary proxies', () => {
       totalRequests: 15,
       totalFailures: 4,
       source: null,
+      evicted: [],
+      evictionCount: 0,
       perProxy,
+      ...overrides,
     };
   }
 
@@ -304,6 +311,7 @@ describe('buildSessionSummary proxies', () => {
           capacity: 1,
           pool_exhausted: 0,
           total_failures: failures,
+          eviction_count: 0,
           source: null,
           per_proxy: [
             {
@@ -319,6 +327,9 @@ describe('buildSessionSummary proxies', () => {
               consecutive_failures: 0,
               blocked: false,
               retired: false,
+              evicted: false,
+              eviction_count: 0,
+              evicted_at: null,
               in_flight: 0,
               capacity: 8,
               unhealthy_since: null,
@@ -369,5 +380,38 @@ describe('buildSessionSummary proxies', () => {
 
     expect(summary.proxies.configured).toBe(0);
     expect(summary.proxies.per_proxy).toEqual([]);
+  });
+
+  it('keeps an evicted proxy classified from the final session snapshot', () => {
+    const evicted = health({
+      source: 'proxyscrape',
+      requests: 3,
+      successes: 0,
+      failures: 3,
+      lastReason: 'timeout',
+    });
+    const summary = build({
+      cycles: [cycleWithProxy(1, 'network_error', 3)],
+      proxyStats: proxyStats([], {
+        configured: 0,
+        blocked: 0,
+        cooling: 0,
+        totalRequests: 3,
+        totalFailures: 3,
+        evicted: [{ ...evicted, evictedAt: 1, evictionCount: 1 }],
+        evictionCount: 1,
+      }),
+    });
+
+    expect(summary.proxies.configured).toBe(0);
+    expect(summary.proxies.eviction_count).toBe(1);
+    expect(summary.proxies.per_proxy[0]).toMatchObject({
+      label: 'p1',
+      source: 'proxyscrape',
+      state: 'cooling',
+      evicted: true,
+      requests: 3,
+      failures: 3,
+    });
   });
 });

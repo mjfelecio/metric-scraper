@@ -63,6 +63,8 @@ function stats(
     totalRequests: perProxy.reduce((total, entry) => total + entry.requests, 0),
     totalFailures: perProxy.reduce((total, entry) => total + entry.failures, 0),
     source: null,
+    evicted: [],
+    evictionCount: 0,
     perProxy,
     ...overrides,
   };
@@ -107,10 +109,47 @@ function sourceStats(overrides: Partial<ProxySourceStats> = {}): ProxySourceStat
     admissionToFirstSuccessRate: 0.5,
     targetCapacity: 10,
     ...overrides,
+    evictions: overrides.evictions ?? 0,
   };
 }
 
 describe('buildProxySummary', () => {
+  it('reports an evicted failed proxy from its tombstone, separate from live gauges', () => {
+    const final = health({
+      state: 'cooling',
+      source: 'proxyscrape',
+      requests: 3,
+      failures: 3,
+      consecutiveFailures: 3,
+      lastReason: 'timeout',
+    });
+    const summary = buildProxySummary(
+      stats([], {
+        configured: 0,
+        available: 0,
+        capacity: 0,
+        evicted: [{ ...final, evictedAt: WENT_BAD_AT, evictionCount: 1 }],
+        evictionCount: 1,
+        source: sourceStats({ evictions: 1 }),
+      }),
+      [usage({ requests: 3, failures: 3, byErrorCode: { network_error: 3 } })],
+    );
+
+    expect(summary.configured).toBe(0);
+    expect(summary.eviction_count).toBe(1);
+    expect(summary.source?.evictions).toBe(1);
+    expect(summary.per_proxy[0]).toMatchObject({
+      label: 'p1',
+      source: 'proxyscrape',
+      state: 'cooling',
+      evicted: true,
+      eviction_count: 1,
+      requests: 3,
+      failures: 3,
+      last_reason: 'timeout',
+    });
+  });
+
   it('carries the probe stage breakdown and admission rate into the summary', () => {
     // These are the numbers the validation strategy is judged on, so they have
     // to survive into the artifact rather than living only in the dashboard.
@@ -239,6 +278,9 @@ describe('mergeProxyUsage', () => {
       consecutive_failures: 0,
       blocked: false,
       retired: false,
+      evicted: false,
+      eviction_count: 0,
+      evicted_at: null,
       in_flight: 0,
       capacity: 8,
       unhealthy_since: null,

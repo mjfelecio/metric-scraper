@@ -113,6 +113,12 @@ export interface ProxyHealth {
   lastErrorCode: ScrapeErrorCode | null;
 }
 
+/** Credential-free final snapshot retained after a proxy leaves the live roster. */
+export interface ProxyEviction extends ProxyHealth {
+  evictedAt: number;
+  evictionCount: number;
+}
+
 export interface ProxyPoolStats {
   configured: number;
   available: number;
@@ -154,6 +160,9 @@ export interface ProxyPoolStats {
    * dashboard and the run summary already carry this object.
    */
   source: ProxySourceStats | null;
+  /** Historical records only; excluded from every live pool gauge above. */
+  evicted: ProxyEviction[];
+  evictionCount: number;
   perProxy: ProxyHealth[];
 }
 

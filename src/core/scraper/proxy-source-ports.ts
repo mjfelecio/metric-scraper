@@ -124,6 +124,8 @@ export interface ProxySourceStats {
    * failure would make the rate fall as the pool got healthier.
    */
   admissionToFirstSuccessRate: number | null;
+  /** Unique source-supplied proxies removed from the live roster. */
+  evictions: number;
   /**
    * Usable capacity the manager is replenishing towards, in concurrent slots.
    *
