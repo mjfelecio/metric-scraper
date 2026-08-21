@@ -213,20 +213,28 @@ export type ConcurrencySummary = z.infer<typeof ConcurrencySummarySchema>;
 export const QueueSummarySchema = z.object({
   /** Deepest the backlog of waiting jobs ever got. */
   max_depth: z.number().int().nonnegative(),
+  wait_count: z.number().int().nonnegative(),
+  wait_total_ms: z.number().nonnegative(),
+  wait_mean_ms: z.number().nonnegative().nullable(),
   wait_p50_ms: z.number().nonnegative().nullable(),
   wait_p95_ms: z.number().nonnegative().nullable(),
   wait_max_ms: z.number().nonnegative().nullable(),
 });
 export type QueueSummary = z.infer<typeof QueueSummarySchema>;
 
-/** Wall-clock time spent waiting rather than requesting, so a run stays attributable. */
+/** Aggregate observed job-time. Values may exceed or overlap the run wall clock. */
 export const WaitSummarySchema = z.object({
-  /** On the job-admission limiter, outside any concurrency slot. */
+  admission_total_ms: z.number().nonnegative(),
+  http_rate_limit_total_ms: z.number().nonnegative(),
+  proxy_acquire_total_ms: z.number().nonnegative(),
+  retry_backoff_total_ms: z.number().nonnegative(),
+  /** @deprecated Exact alias of `admission_total_ms`. */
   admission_ms: z.number().nonnegative(),
-  /** On the per-host HTTP limiter, inside a concurrency slot. */
+  /** @deprecated Exact alias of `http_rate_limit_total_ms`. */
   http_rate_limit_ms: z.number().nonnegative(),
+  /** @deprecated Exact alias of `proxy_acquire_total_ms`. */
   proxy_acquire_ms: z.number().nonnegative(),
-  /** Retry backoff, which holds a concurrency slot while it sleeps. */
+  /** @deprecated Exact alias of `retry_backoff_total_ms`. */
   retry_backoff_ms: z.number().nonnegative(),
 });
 export type WaitSummary = z.infer<typeof WaitSummarySchema>;

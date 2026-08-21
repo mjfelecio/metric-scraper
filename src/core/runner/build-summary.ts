@@ -82,16 +82,23 @@ export function buildRunSummary(input: BuildSummaryInput): RunSummary {
 
     queue: {
       max_depth: metrics.queue.maxDepth,
+      wait_count: metrics.queue.waitCount,
+      wait_total_ms: metrics.queue.waitTotalMs,
+      wait_mean_ms: metrics.queue.waitMeanMs,
       wait_p50_ms: metrics.queue.waitP50Ms,
       wait_p95_ms: metrics.queue.waitP95Ms,
       wait_max_ms: metrics.queue.waitMaxMs,
     },
 
     waits: {
-      admission_ms: metrics.waits.admissionMs,
-      http_rate_limit_ms: metrics.waits.httpRateLimitMs,
-      proxy_acquire_ms: metrics.waits.proxyAcquireMs,
-      retry_backoff_ms: metrics.waits.retryBackoffMs,
+      admission_total_ms: metrics.waits.admissionTotalMs,
+      http_rate_limit_total_ms: metrics.waits.httpRateLimitTotalMs,
+      proxy_acquire_total_ms: metrics.waits.proxyAcquireTotalMs,
+      retry_backoff_total_ms: metrics.waits.retryBackoffTotalMs,
+      admission_ms: metrics.waits.admissionTotalMs,
+      http_rate_limit_ms: metrics.waits.httpRateLimitTotalMs,
+      proxy_acquire_ms: metrics.waits.proxyAcquireTotalMs,
+      retry_backoff_ms: metrics.waits.retryBackoffTotalMs,
     },
 
     latency: {

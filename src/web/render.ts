@@ -745,6 +745,31 @@ function renderSummary(state: AppState): void {
     <div class="mt-5 grid gap-5 sm:grid-cols-2">
       <div>
         <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+          Queue delay (enqueue to job start)
+        </h3>
+        ${statCards([
+          ['Count', String(summary.queue.wait_count)],
+          ['Mean', formatMs(summary.queue.wait_mean_ms)],
+          ['p95', formatMs(summary.queue.wait_p95_ms)],
+          ['Max', formatMs(summary.queue.wait_max_ms)],
+        ])}
+      </div>
+      <div>
+        <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
+          Aggregate waits (aggregate job-time; may overlap)
+        </h3>
+        ${statCards([
+          ['Admission', formatMs(summary.waits.admission_total_ms)],
+          ['HTTP limiter', formatMs(summary.waits.http_rate_limit_total_ms)],
+          ['Proxy acquire', formatMs(summary.waits.proxy_acquire_total_ms)],
+          ['Retry backoff', formatMs(summary.waits.retry_backoff_total_ms)],
+        ])}
+      </div>
+    </div>
+
+    <div class="mt-5 grid gap-5 sm:grid-cols-2">
+      <div>
+        <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">
           Status breakdown
         </h3>
         <ul class="space-y-1 text-xs">

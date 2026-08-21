@@ -148,6 +148,13 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
   let overranCycles = 0;
   let maxObservedConcurrency = 0;
   let queueMaxDepth = 0;
+  let queueWaitCount = 0;
+  let queueWaitTotalMs = 0;
+  let queueWaitMaxMs: number | null = null;
+  let admissionTotalMs = 0;
+  let httpRateLimitTotalMs = 0;
+  let proxyAcquireTotalMs = 0;
+  let retryBackoffTotalMs = 0;
 
   for (const cycle of input.cycles) {
     if (cycle.overran) overranCycles += 1;
@@ -169,6 +176,15 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
       summary.throughput.concurrency.max_observed,
     );
     queueMaxDepth = Math.max(queueMaxDepth, summary.queue.max_depth);
+    queueWaitCount += summary.queue.wait_count;
+    queueWaitTotalMs += summary.queue.wait_total_ms;
+    if (summary.queue.wait_max_ms !== null) {
+      queueWaitMaxMs = Math.max(queueWaitMaxMs ?? 0, summary.queue.wait_max_ms);
+    }
+    admissionTotalMs += summary.waits.admission_total_ms;
+    httpRateLimitTotalMs += summary.waits.http_rate_limit_total_ms;
+    proxyAcquireTotalMs += summary.waits.proxy_acquire_total_ms;
+    retryBackoffTotalMs += summary.waits.retry_backoff_total_ms;
 
     for (const [status, count] of Object.entries(summary.status_breakdown)) {
       statusBreakdown[status as ScrapeStatus] += count ?? 0;
@@ -252,6 +268,20 @@ export function buildSessionSummary(input: BuildSessionSummaryInput): SessionSum
       total_retries: totalRetries,
       retried_requests: retriedRequests,
       exhausted_requests: exhaustedRequests,
+    },
+
+    queue: {
+      max_depth: queueMaxDepth,
+      wait_count: queueWaitCount,
+      wait_total_ms: queueWaitTotalMs,
+      wait_mean_ms: queueWaitCount === 0 ? null : queueWaitTotalMs / queueWaitCount,
+      wait_max_ms: queueWaitMaxMs,
+    },
+    waits: {
+      admission_total_ms: admissionTotalMs,
+      http_rate_limit_total_ms: httpRateLimitTotalMs,
+      proxy_acquire_total_ms: proxyAcquireTotalMs,
+      retry_backoff_total_ms: retryBackoffTotalMs,
     },
 
     proxies: sessionProxies(input.proxyStats, input.cycles),

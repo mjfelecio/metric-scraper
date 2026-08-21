@@ -343,7 +343,8 @@ doubles its slots on each success up to `PROXY_MAX_CONCURRENT`, and halves them
 on each failure. What the pool can actually serve right now is the sum of that,
 reported as `proxies.capacity` in the run summary — and _that_ is the number to
 compare `SCRAPER_CONCURRENCY` against. If concurrency exceeds it, the pool is the
-binding constraint and the surplus shows up as `waits.proxy_acquire_ms`.
+binding constraint and the surplus shows up as aggregate job-time in
+`waits.proxy_acquire_total_ms`.
 
 The ramp exists because the earlier model was binary: full concurrency for a
 proxy whose last outcome was a success, one slot for everything else. Real
@@ -757,11 +758,19 @@ The CLI prints a warning whenever `max_observed < configured` while the queue ba
 was non-empty — capacity available but unused, which is the precise fingerprint of
 accidental serialization.
 
-Two further sections make a run's wall clock attributable rather than mysterious:
-`queue` (max depth, wait p50/p95/max) and `waits` (`admission_ms`,
-`http_rate_limit_ms`, `proxy_acquire_ms`, `retry_backoff_ms`). Retry backoff is
-recorded because it holds a concurrency slot while it sleeps, and an idle-looking
-slot must always be explainable.
+Two further sections explain delay without pretending every measurement is wall-clock time.
+`queue` describes enqueue-to-job-start delay (max depth plus wait count, total, mean,
+p50, p95, and max). `waits` reports aggregate job-time as `admission_total_ms`,
+`http_rate_limit_total_ms`, `proxy_acquire_total_ms`, and `retry_backoff_total_ms`.
+Concurrent observations can overlap, so these totals can exceed run duration and must never
+be used as wall-clock percentages. The older names without `_total` remain exact deprecated
+aliases in run JSON. Admission occurs outside concurrency slots but can overlap running jobs;
+HTTP limiting, proxy acquisition, and retry backoff occur within jobs, with backoff holding a
+slot. Separately, `duration_ms` is run wall clock and latency is each job's end-to-end time.
+
+Session JSON sums queue counts and totals, derives a weighted queue mean, and takes maximum
+depth and maximum wait. It deliberately omits queue percentiles because per-cycle percentiles
+cannot be combined. Its four canonical wait totals are sums across successful cycles.
 
 A continuous session writes one file per session instead, plus a summary per cycle:
 

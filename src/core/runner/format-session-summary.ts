@@ -86,6 +86,21 @@ export function formatSessionSummary(summary: SessionSummary): string {
   lines.push(`${pad('Latency max')}${ms(summary.latency.max_ms)}`);
 
   lines.push('');
+  lines.push('Queue delay   (enqueue to job start; combined across cycles)');
+  lines.push(`  ${pad('max depth')}${num(summary.queue.max_depth)}`);
+  lines.push(`  ${pad('wait count')}${num(summary.queue.wait_count)}`);
+  lines.push(`  ${pad('wait total')}${ms(summary.queue.wait_total_ms)}`);
+  lines.push(`  ${pad('wait mean')}${ms(summary.queue.wait_mean_ms)}`);
+  lines.push(`  ${pad('wait max')}${ms(summary.queue.wait_max_ms)}`);
+
+  lines.push('');
+  lines.push('Aggregate waits   (aggregate job-time; concurrent waits may overlap)');
+  lines.push(`  ${pad('admission')}${ms(summary.waits.admission_total_ms)}`);
+  lines.push(`  ${pad('HTTP limiter')}${ms(summary.waits.http_rate_limit_total_ms)}`);
+  lines.push(`  ${pad('proxy acquire')}${ms(summary.waits.proxy_acquire_total_ms)}`);
+  lines.push(`  ${pad('retry backoff')}${ms(summary.waits.retry_backoff_total_ms)}`);
+
+  lines.push('');
   lines.push('Status breakdown');
   const statuses = Object.entries(summary.status_breakdown).filter(([, count]) => count > 0);
   if (statuses.length === 0) {

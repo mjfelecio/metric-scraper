@@ -167,6 +167,21 @@ describe('MetricsCollector', () => {
     expect(view.throughputPerMinute).toBeCloseTo(20);
   });
 
+  it('reports queue statistics and overlapping waits as aggregate job-time', () => {
+    const metrics = collectorAt([0, 100, 100]);
+    metrics.start();
+    metrics.recordQueueStats({ peakInFlight: 2, peakQueueDepth: 2, waitSamples: [25, 75] });
+    // These observations can belong to two jobs waiting during the same 100 ms.
+    metrics.recordHttpRateLimitWait(100);
+    metrics.recordHttpRateLimitWait(100);
+    metrics.finish();
+
+    const view = metrics.view();
+    expect(view.elapsedMs).toBe(100);
+    expect(view.queue).toMatchObject({ waitCount: 2, waitTotalMs: 100, waitMeanMs: 50 });
+    expect(view.waits.httpRateLimitTotalMs).toBe(200);
+  });
+
   it('tracks per-proxy usage and failures', () => {
     const metrics = new MetricsCollector();
     metrics.start();

@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import { ThroughputTimeline } from '../../src/core/metrics/throughput-timeline.js';
 import { type RunSummary } from '../../src/core/models/run-summary.js';
-import { type CycleSummary } from '../../src/core/models/session-summary.js';
+import { type CycleSummary, SessionSummarySchema } from '../../src/core/models/session-summary.js';
 import { buildSessionSummary } from '../../src/core/runner/build-session-summary.js';
+import { formatSessionSummary } from '../../src/core/runner/format-session-summary.js';
 import { type ProxyHealth } from '../../src/core/scraper/pool-ports.js';
 import { type ProxyProviderStats } from '../../src/core/scraper/provider-ports.js';
 
@@ -34,8 +35,20 @@ function runSummary(overrides: Partial<RunSummary> = {}): RunSummary {
       },
     },
     bandwidth: null,
-    queue: { max_depth: 5, wait_p50_ms: 10, wait_p95_ms: 20, wait_max_ms: 25 },
+    queue: {
+      max_depth: 5,
+      wait_count: 2,
+      wait_total_ms: 30,
+      wait_mean_ms: 15,
+      wait_p50_ms: 10,
+      wait_p95_ms: 20,
+      wait_max_ms: 25,
+    },
     waits: {
+      admission_total_ms: 0,
+      http_rate_limit_total_ms: 0,
+      proxy_acquire_total_ms: 0,
+      retry_backoff_total_ms: 0,
       admission_ms: 0,
       http_rate_limit_ms: 0,
       proxy_acquire_ms: 0,
@@ -120,6 +133,14 @@ function build(options: {
 }
 
 describe('buildSessionSummary', () => {
+  it('produces a schema-valid summary with explicit queue and wait blocks', () => {
+    const summary = build({ cycles: [cycle(1)] });
+    expect(SessionSummarySchema.safeParse(summary).success).toBe(true);
+    expect(formatSessionSummary(summary)).toContain(
+      'Aggregate waits   (aggregate job-time; concurrent waits may overlap)',
+    );
+  });
+
   it('sums totals, breakdowns and retries across cycles', () => {
     const summary = build({ cycles: [cycle(1), cycle(2)] });
 
@@ -183,6 +204,70 @@ describe('buildSessionSummary', () => {
     expect(summary.cycles).toEqual({ started: 3, completed: 2, failed: 1, overran: 0 });
     // Only the two cycles that ran contribute.
     expect(summary.totals.requests).toBe(20);
+  });
+
+  it('combines only composable queue and aggregate-wait statistics', () => {
+    const first = runSummary({
+      queue: {
+        max_depth: 3,
+        wait_count: 2,
+        wait_total_ms: 100,
+        wait_mean_ms: 50,
+        wait_p50_ms: 40,
+        wait_p95_ms: 60,
+        wait_max_ms: 60,
+      },
+      waits: {
+        admission_total_ms: 10,
+        http_rate_limit_total_ms: 20,
+        proxy_acquire_total_ms: 30,
+        retry_backoff_total_ms: 40,
+        admission_ms: 10,
+        http_rate_limit_ms: 20,
+        proxy_acquire_ms: 30,
+        retry_backoff_ms: 40,
+      },
+    });
+    const second = runSummary({
+      queue: {
+        max_depth: 8,
+        wait_count: 3,
+        wait_total_ms: 300,
+        wait_mean_ms: 100,
+        wait_p50_ms: 90,
+        wait_p95_ms: 200,
+        wait_max_ms: 220,
+      },
+      waits: {
+        admission_total_ms: 1,
+        http_rate_limit_total_ms: 2,
+        proxy_acquire_total_ms: 3,
+        retry_backoff_total_ms: 4,
+        admission_ms: 1,
+        http_rate_limit_ms: 2,
+        proxy_acquire_ms: 3,
+        retry_backoff_ms: 4,
+      },
+    });
+
+    const summary = build({
+      cycles: [cycle(1, { summary: first }), cycle(2, { summary: second })],
+    });
+    expect(summary.queue).toEqual({
+      max_depth: 8,
+      wait_count: 5,
+      wait_total_ms: 400,
+      wait_mean_ms: 80,
+      wait_max_ms: 220,
+    });
+    expect(summary.queue).not.toHaveProperty('wait_p50_ms');
+    expect(summary.queue).not.toHaveProperty('wait_p95_ms');
+    expect(summary.waits).toEqual({
+      admission_total_ms: 11,
+      http_rate_limit_total_ms: 22,
+      proxy_acquire_total_ms: 33,
+      retry_backoff_total_ms: 44,
+    });
   });
 
   it('counts cycles that overran their interval', () => {

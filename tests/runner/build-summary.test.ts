@@ -92,6 +92,14 @@ describe('buildRunSummary', () => {
     expect(summary.input).toEqual({ candidates: 8, accepted: 6, rejected: 2 });
   });
 
+  it('keeps deprecated wait keys as exact aliases of canonical totals', () => {
+    const summary = summaryFixture();
+    expect(summary.waits.admission_ms).toBe(summary.waits.admission_total_ms);
+    expect(summary.waits.http_rate_limit_ms).toBe(summary.waits.http_rate_limit_total_ms);
+    expect(summary.waits.proxy_acquire_ms).toBe(summary.waits.proxy_acquire_total_ms);
+    expect(summary.waits.retry_backoff_ms).toBe(summary.waits.retry_backoff_total_ms);
+  });
+
   it('handles a run with no requests without dividing by zero', () => {
     const metrics = new MetricsCollector();
     metrics.start();
@@ -126,6 +134,8 @@ describe('formatRunSummary', () => {
     expect(text).toContain('Total requests');
     expect(text).toContain('83.3%');
     expect(text).toContain('Latency p95');
+    expect(text).toContain('Aggregate waits');
+    expect(text).toContain('aggregate job-time; concurrent waits may overlap');
     expect(text).toContain('none configured (direct connection)');
     expect(text).toContain('/tmp/run.jsonl');
   });
@@ -189,7 +199,9 @@ describe('concurrency reporting', () => {
   });
 
   it('warns when capacity was available but unused', () => {
-    const text = formatRunSummary(summaryWith({ configured: 10, peakInFlight: 1, peakQueueDepth: 9 }));
+    const text = formatRunSummary(
+      summaryWith({ configured: 10, peakInFlight: 1, peakQueueDepth: 9 }),
+    );
 
     // The report must not be able to claim a concurrency it never reached.
     expect(text).toMatch(/Concurrency underused/);
@@ -198,12 +210,16 @@ describe('concurrency reporting', () => {
   });
 
   it('stays quiet when the configured concurrency was actually reached', () => {
-    const text = formatRunSummary(summaryWith({ configured: 3, peakInFlight: 3, peakQueueDepth: 2 }));
+    const text = formatRunSummary(
+      summaryWith({ configured: 3, peakInFlight: 3, peakQueueDepth: 2 }),
+    );
     expect(text).not.toMatch(/Concurrency underused/);
   });
 
   it('stays quiet when nothing ever queued, since capacity was never demanded', () => {
-    const text = formatRunSummary(summaryWith({ configured: 10, peakInFlight: 2, peakQueueDepth: 0 }));
+    const text = formatRunSummary(
+      summaryWith({ configured: 10, peakInFlight: 2, peakQueueDepth: 0 }),
+    );
     expect(text).not.toMatch(/Concurrency underused/);
   });
 });
