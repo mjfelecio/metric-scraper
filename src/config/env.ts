@@ -27,9 +27,17 @@ export const AppConfigSchema = z.object({
   /**
    * Ceiling on actual outbound HTTP requests per minute, per host — retries and
    * multi-hop platform calls included. This is what protects upstream; `targetRpm`
-   * does not, because one job can be many requests. `0` disables.
+   * does not, because one job can be many requests. `0` disables, per platform.
+   *
+   * Split by platform because their fan-out per job differs substantially —
+   * TikTok issues about two requests per attempt, Instagram up to eight — so one
+   * shared ceiling would either starve Instagram or leave TikTok unconstrained.
+   * See README §5.1 for the measurements behind these defaults.
    */
-  httpRpmPerHost: z.number().int().min(0),
+  httpRpmPerHostByPlatform: z.object({
+    tiktok: z.number().int().min(0),
+    instagram: z.number().int().min(0),
+  }),
   /** `0` means an unbounded queue. Producers wait for room rather than failing. */
   maxQueueSize: z.number().int().min(0),
   /**
@@ -207,7 +215,14 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     concurrency: int(env, 'SCRAPER_CONCURRENCY', 10),
     targetRpm: int(env, 'SCRAPER_TARGET_RPM', 500),
     burst: int(env, 'SCRAPER_BURST', 0),
-    httpRpmPerHost: int(env, 'SCRAPER_HTTP_RPM_PER_HOST', 0),
+    httpRpmPerHostByPlatform: {
+      // Instagram fans out further per job (up to eight requests against a
+      // platform that has been observed pushing back — timeouts, rate_limited,
+      // and proxy cooldown cascades) so it gets the stricter ceiling. See
+      // README §5.1 for the measured comparison behind both numbers.
+      tiktok: int(env, 'TIKTOK_HTTP_RPM_PER_HOST', 300),
+      instagram: int(env, 'INSTAGRAM_HTTP_RPM_PER_HOST', 180),
+    },
     // Bounded by default: an unbounded queue turns a large input straight into
     // unbounded pending work, and the producer has no way to feel the pressure.
     maxQueueSize: int(env, 'SCRAPER_MAX_QUEUE_SIZE', 1_000),
@@ -391,7 +406,7 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
     concurrency: config.concurrency,
     targetRpm: config.targetRpm,
     burst: config.burst,
-    httpRpmPerHost: config.httpRpmPerHost,
+    httpRpmPerHostByPlatform: { ...config.httpRpmPerHostByPlatform },
     maxQueueSize: config.maxQueueSize,
     pollIntervalMs: config.pollIntervalMs,
     attemptTimeoutMsByPlatform: { ...config.attemptTimeoutMsByPlatform },

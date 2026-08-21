@@ -7,8 +7,13 @@ import { type HttpClient, type HttpRequest, type HttpResponse } from '../../core
 
 export interface RateLimitedHttpClientOptions {
   inner: HttpClient;
-  /** Outbound requests per minute, per host. `0` disables limiting. */
-  rpmPerHost: number;
+  /**
+   * Outbound requests per minute, per host. A plain number applies the same
+   * ceiling to every host; a function is called with each request's host so
+   * callers can vary the rate per host (e.g. by platform). `0` — from either
+   * form — disables limiting for that host.
+   */
+  rpmPerHost: number | ((host: string) => number);
   /** Units spendable at once after idle. See `RateLimiterOptions.burst`. */
   burst?: number | undefined;
   /** Called with the time spent waiting on the limiter, so it stays visible. */
@@ -33,7 +38,7 @@ export interface RateLimitedHttpClientOptions {
  */
 export class RateLimitedHttpClient implements HttpClient {
   private readonly inner: HttpClient;
-  private readonly rpmPerHost: number;
+  private readonly resolveRpm: (host: string) => number;
   private readonly burst: number | undefined;
   private readonly onWait: ((waitMs: number, host: string) => void) | undefined;
   private readonly now: () => number;
@@ -42,7 +47,8 @@ export class RateLimitedHttpClient implements HttpClient {
 
   constructor(options: RateLimitedHttpClientOptions) {
     this.inner = options.inner;
-    this.rpmPerHost = options.rpmPerHost;
+    this.resolveRpm =
+      typeof options.rpmPerHost === 'function' ? options.rpmPerHost : () => options.rpmPerHost as number;
     this.burst = options.burst;
     this.onWait = options.onWait;
     this.now = options.now ?? (() => Date.now());
@@ -50,10 +56,6 @@ export class RateLimitedHttpClient implements HttpClient {
   }
 
   async request(request: HttpRequest): Promise<HttpResponse> {
-    if (!Number.isFinite(this.rpmPerHost) || this.rpmPerHost <= 0) {
-      return await this.inner.request(request);
-    }
-
     const host = hostOf(request.url);
     const limiter = this.limiterFor(host);
 
@@ -70,10 +72,11 @@ export class RateLimitedHttpClient implements HttpClient {
   private limiterFor(host: string): RateLimiter {
     let limiter = this.limiters.get(host);
     if (limiter === undefined) {
+      const rpm = this.resolveRpm(host);
       limiter =
-        this.rpmPerHost > 0
+        Number.isFinite(rpm) && rpm > 0
           ? createRateLimiter({
-              rpm: this.rpmPerHost,
+              rpm,
               ...(this.burst === undefined ? {} : { burst: this.burst }),
               now: this.now,
               ...(this.sleep === undefined ? {} : { sleep: this.sleep }),

@@ -39,6 +39,7 @@ import {
   createManagedHttpTransport,
   createProxyAgentFactory,
   createProxySupply,
+  rpmForHost,
 } from '../../src/app/composition.js';
 import { loadConfig } from '../../src/config/env.js';
 import { nullBandwidthSink, type BandwidthSink } from '../../src/core/metrics/bandwidth.js';
@@ -108,6 +109,39 @@ describe('createProxyAgentFactory', () => {
     const factory = createProxyAgentFactory(config, nullBandwidthSink);
 
     expect(() => factory(target({ protocol: 'socks5' }))).toThrow(/socks5/);
+  });
+});
+
+describe('rpmForHost', () => {
+  const byPlatform = { tiktok: 300, instagram: 180 };
+
+  it('routes TikTok and its short-link hosts to the TikTok ceiling', () => {
+    expect(rpmForHost('www.tiktok.com', byPlatform)).toBe(300);
+    expect(rpmForHost('vm.tiktok.com', byPlatform)).toBe(300);
+    expect(rpmForHost('vt.tiktok.com', byPlatform)).toBe(300);
+  });
+
+  it('routes Instagram and instagr.am hosts to the Instagram ceiling', () => {
+    expect(rpmForHost('www.instagram.com', byPlatform)).toBe(180);
+    expect(rpmForHost('i.instagram.com', byPlatform)).toBe(180);
+    expect(rpmForHost('instagr.am', byPlatform)).toBe(180);
+  });
+
+  it('is case-insensitive', () => {
+    expect(rpmForHost('WWW.TIKTOK.COM', byPlatform)).toBe(300);
+  });
+
+  it('falls back to the stricter configured limit for an unrecognized host', () => {
+    expect(rpmForHost('example.net', byPlatform)).toBe(180);
+  });
+
+  it('falls back to whichever platform is actually limited when the other is 0', () => {
+    expect(rpmForHost('example.net', { tiktok: 0, instagram: 180 })).toBe(180);
+    expect(rpmForHost('example.net', { tiktok: 300, instagram: 0 })).toBe(300);
+  });
+
+  it('leaves an unrecognized host unlimited when neither platform is limited', () => {
+    expect(rpmForHost('example.net', { tiktok: 0, instagram: 0 })).toBe(0);
   });
 });
 

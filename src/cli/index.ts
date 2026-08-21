@@ -74,7 +74,8 @@ function withCommonOptions(command: Command): Command {
     )
     .option(
       '--http-rpm-per-host <n>',
-      'ceiling on actual HTTP requests per minute per host, retries included (0 = off)',
+      'ceiling on actual HTTP requests per minute per host, retries included (0 = off); ' +
+        'overrides both platforms uniformly (see TIKTOK/INSTAGRAM_HTTP_RPM_PER_HOST for independent limits)',
       parseNonNegativeInt,
     )
     .option('-a, --max-attempts <n>', 'attempts per URL, including the first', parsePositiveInt)

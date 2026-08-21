@@ -22,6 +22,10 @@ describe('loadConfig', () => {
       tiktok: 15_000,
       instagram: 60_000,
     });
+    expect(config.httpRpmPerHostByPlatform).toEqual({
+      tiktok: 300,
+      instagram: 180,
+    });
   });
 
   it('reads overrides from the environment', () => {
@@ -36,6 +40,8 @@ describe('loadConfig', () => {
       SCRAPER_REQUEST_TIMEOUT_MS: '12000',
       TIKTOK_ATTEMPT_TIMEOUT_MS: '18000',
       INSTAGRAM_ATTEMPT_TIMEOUT_MS: '75000',
+      TIKTOK_HTTP_RPM_PER_HOST: '400',
+      INSTAGRAM_HTTP_RPM_PER_HOST: '250',
     });
 
     expect(config.concurrency).toBe(25);
@@ -48,6 +54,10 @@ describe('loadConfig', () => {
     expect(config.attemptTimeoutMsByPlatform).toEqual({
       tiktok: 18_000,
       instagram: 75_000,
+    });
+    expect(config.httpRpmPerHostByPlatform).toEqual({
+      tiktok: 400,
+      instagram: 250,
     });
   });
 
@@ -78,6 +88,8 @@ describe('loadConfig', () => {
     expect(() => load({ INSTAGRAM_CLIPS_MAX_PAGES: '0' })).toThrow(/invalid configuration/);
     expect(() => load({ INSTAGRAM_CLIPS_MAX_AUTHORS: '0' })).toThrow(/invalid configuration/);
     expect(() => load({ TIKTOK_ATTEMPT_TIMEOUT_MS: '0' })).toThrow(/invalid configuration/);
+    expect(() => load({ TIKTOK_HTTP_RPM_PER_HOST: '-1' })).toThrow(/invalid configuration/);
+    expect(() => load({ INSTAGRAM_HTTP_RPM_PER_HOST: '-1' })).toThrow(/invalid configuration/);
     expect(() => load({ INSTAGRAM_ATTEMPT_TIMEOUT_MS: '-1' })).toThrow(/invalid configuration/);
     expect(() => load({ INSTAGRAM_ATTEMPT_TIMEOUT_MS: '1.5' })).toThrow(
       /INSTAGRAM_ATTEMPT_TIMEOUT_MS/,

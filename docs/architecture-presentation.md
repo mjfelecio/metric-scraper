@@ -87,9 +87,12 @@ ProxyScrape list, validating candidates with an HTTPS canary probe before admiss
 *job admission* in the runner and is the number the summary reports against the acceptance
 target. `httpRpmPerHost` (`src/infrastructure/http/rate-limited-http-client.ts`) wraps the
 transport itself and paces *actual outbound requests per host*, retries and multi-hop calls
-included — that is the tier that protects upstream. It defaults to off. Waiting at the HTTP
-tier happens inside a job and therefore does consume a concurrency slot; that is genuine
-backpressure and is measured via `onWait` so it stays visible in the summary's `waits` block.
+included — that is the tier that protects upstream. It is configured independently per
+platform (`TIKTOK_HTTP_RPM_PER_HOST`/`INSTAGRAM_HTTP_RPM_PER_HOST`) since their fan-out
+differs enough that one shared ceiling would either starve one platform or leave the other
+unconstrained. Waiting at the HTTP tier happens inside a job and therefore does consume a
+concurrency slot; that is genuine backpressure and is measured via `onWait` so it stays
+visible in the summary's `waits` block.
 
 **Output is append-only and observability is first-class.** `JsonlFileSink` opens with flag
 `a`, validates every row against a Zod schema, respects stream backpressure, and never
@@ -585,9 +588,11 @@ failure is reported. The cost is a warm-up ramp, and the summary reports the rea
 
 **What it is.** One TikTok job = 2 HTTP requests. One Instagram job = 2 minimum, up to 8+
 (CSRF + post + 3 authors × 2 clips pages + media-info), plus retries. `httpRpmPerHost` is the
-only knob that caps actual egress, and it **defaults to 0 = off** (`env.ts:210`). The Instagram
-run above shows 51 platform HTTP requests for 20 jobs — **2.55× amplification** — and that was
-with the run cache already deduplicating clips calls.
+only knob that caps actual egress; it defaults to `300` for TikTok and `180` for Instagram
+(`TIKTOK_HTTP_RPM_PER_HOST`/`INSTAGRAM_HTTP_RPM_PER_HOST`, `env.ts`), measured against a
+mocked stress run (README §5.1) rather than shipped off. The Instagram run above shows 51
+platform HTTP requests for 20 jobs — **2.55× amplification** — and that was with the run
+cache already deduplicating clips calls.
 
 **Why it matters.** At a hypothetical 500 job-rpm, Instagram could be issuing ~1300–4000
 requests/min at instagram.com. That is the number that gets you blocked, and it is invisible

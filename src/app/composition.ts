@@ -1,6 +1,7 @@
 import { type AppConfig, resolveTargetCapacity } from '../config/env.js';
 import { Agent, ProxyAgent, type Dispatcher } from 'undici';
 import { nullLogger, type Logger } from '../core/logging/logger.js';
+import { type Platform } from '../core/models/platform.js';
 import {
   BandwidthAggregator,
   nullBandwidthSink,
@@ -47,6 +48,7 @@ export interface RunnerOverrides {
   concurrency?: number | undefined;
   targetRpm?: number | undefined;
   burst?: number | undefined;
+  /** Overrides both platforms' ceilings uniformly. Config sets them independently. */
   httpRpmPerHost?: number | undefined;
   retry?: Partial<RetryPolicyOptions> | undefined;
 }
@@ -218,7 +220,8 @@ export async function buildRunner(options: {
   const concurrency = options.overrides?.concurrency ?? config.concurrency;
   const targetRpm = options.overrides?.targetRpm ?? config.targetRpm;
   const burst = options.overrides?.burst ?? config.burst;
-  const httpRpmPerHost = options.overrides?.httpRpmPerHost ?? config.httpRpmPerHost;
+  const httpRpmPerHostOverride = options.overrides?.httpRpmPerHost;
+  const httpRpmPerHostByPlatform = config.httpRpmPerHostByPlatform;
 
   const proxyProvider =
     options.proxyProvider ?? createProxyProvider(config, logger, options.onProxyEvent);
@@ -246,16 +249,22 @@ export async function buildRunner(options: {
 
   // Egress limiting wraps the transport, so retries and the multi-hop calls a
   // platform scraper makes internally are all counted. A job-level limit cannot
-  // see that traffic.
-  const http =
-    httpRpmPerHost > 0
-      ? new RateLimitedHttpClient({
-          inner: transport,
-          rpmPerHost: httpRpmPerHost,
-          ...(burst > 0 ? { burst } : {}),
-          onWait: (waitMs) => metrics.recordHttpRateLimitWait(waitMs),
-        })
-      : transport;
+  // see that traffic. An explicit override applies the same ceiling to every
+  // host; otherwise each host is rate-limited according to which platform it
+  // belongs to, so TikTok and Instagram never share a bucket.
+  const hasAnyHttpLimit =
+    httpRpmPerHostOverride !== undefined
+      ? httpRpmPerHostOverride > 0
+      : httpRpmPerHostByPlatform.tiktok > 0 || httpRpmPerHostByPlatform.instagram > 0;
+  const http = hasAnyHttpLimit
+    ? new RateLimitedHttpClient({
+        inner: transport,
+        rpmPerHost:
+          httpRpmPerHostOverride ?? ((host) => rpmForHost(host, httpRpmPerHostByPlatform)),
+        ...(burst > 0 ? { burst } : {}),
+        onWait: (waitMs) => metrics.recordHttpRateLimitWait(waitMs),
+      })
+    : transport;
 
   const retryPolicy = new RetryPolicy({ ...config.retry, ...options.overrides?.retry });
   const runner = new ScrapeRunner({
@@ -300,6 +309,34 @@ export async function buildRunner(options: {
     bandwidth,
     dispose: () => ownedTransport?.close() ?? Promise.resolve(),
   };
+}
+
+const TIKTOK_DOMAINS = ['tiktok.com'];
+const INSTAGRAM_DOMAINS = ['instagram.com', 'instagr.am'];
+
+function domainMatches(host: string, domain: string): boolean {
+  const normalized = host.toLowerCase();
+  return normalized === domain || normalized.endsWith(`.${domain}`);
+}
+
+function platformForHost(host: string): Platform | null {
+  if (TIKTOK_DOMAINS.some((domain) => domainMatches(host, domain))) return 'tiktok';
+  if (INSTAGRAM_DOMAINS.some((domain) => domainMatches(host, domain))) return 'instagram';
+  return null;
+}
+
+/**
+ * Resolves a request host to its platform's configured ceiling.
+ *
+ * A host outside both platforms' domains (a redirect hop mid-resolution,
+ * say) falls back to the stricter of the two configured limits rather than
+ * going unpaced — an unrecognized host is not a reason to skip protection.
+ */
+export function rpmForHost(host: string, byPlatform: Record<Platform, number>): number {
+  const platform = platformForHost(host);
+  if (platform !== null) return byPlatform[platform];
+  const configured = [byPlatform.tiktok, byPlatform.instagram].filter((rpm) => rpm > 0);
+  return configured.length > 0 ? Math.min(...configured) : 0;
 }
 
 /**
