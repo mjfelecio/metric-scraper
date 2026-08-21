@@ -2,10 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { InstagramScraper } from '../../../src/platforms/instagram/instagram-scraper.js';
 import { type PlatformSession } from '../../../src/core/scraper/lease-ports.js';
-import {
-  computeInstagramRequestLatencyMs,
-  registerInstagramMockUpstream,
-} from '../../../src/stress/upstream/instagram-mock-upstream.js';
+import { createInstagramMockUpstream } from '../../../src/stress/upstream/instagram-mock-upstream.js';
 import { createSharedMockAgent } from '../../../src/stress/upstream/proxy-mock-dispatcher.js';
 import { instagramSyntheticUrl } from '../../../src/stress/workload/synthetic-input.js';
 import { type InstagramScenario } from '../../../src/stress/workload/scenario.js';
@@ -31,10 +28,9 @@ function setup(scenario: InstagramScenario) {
   const mockAgent = createSharedMockAgent();
   const profile = profileFor(scenario);
   const docIds = { postDocId: POST_DOC_ID, clipsDocId: CLIPS_DOC_ID };
-  registerInstagramMockUpstream(mockAgent, profile, SEED, docIds);
-  const { http, bandwidth } = buildStressHttpClient(mockAgent, (opts) =>
-    computeInstagramRequestLatencyMs(opts, profile, SEED, docIds),
-  );
+  const upstream = createInstagramMockUpstream(profile, SEED, docIds);
+  upstream.register(mockAgent);
+  const { http, bandwidth } = buildStressHttpClient(mockAgent, upstream.computeLatencyMs);
   return { http, bandwidth };
 }
 
@@ -145,7 +141,7 @@ describe('Instagram mock upstream', () => {
     }
   });
 
-  it.each(['post_403', 'post_429', 'post_500'] as const)(
+  it.each(['post_403', 'post_429', 'post_500', 'post_timeout'] as const)(
     '%s: fails the first post attempt but a retry (fresh proxy) recovers',
     async (scenario) => {
       const { http } = setup(scenario);
@@ -190,14 +186,12 @@ describe('Instagram mock upstream', () => {
       responseSize: { targetBytes: 5_000 },
     };
     const docIds = { postDocId: POST_DOC_ID, clipsDocId: CLIPS_DOC_ID };
-    registerInstagramMockUpstream(mockAgentA, profile, SEED, docIds);
-    registerInstagramMockUpstream(mockAgentB, profile, SEED, docIds);
-    const a = buildStressHttpClient(mockAgentA, (opts) =>
-      computeInstagramRequestLatencyMs(opts, profile, SEED, docIds),
-    );
-    const b = buildStressHttpClient(mockAgentB, (opts) =>
-      computeInstagramRequestLatencyMs(opts, profile, SEED, docIds),
-    );
+    const upstreamA = createInstagramMockUpstream(profile, SEED, docIds);
+    const upstreamB = createInstagramMockUpstream(profile, SEED, docIds);
+    upstreamA.register(mockAgentA);
+    upstreamB.register(mockAgentB);
+    const a = buildStressHttpClient(mockAgentA, upstreamA.computeLatencyMs);
+    const b = buildStressHttpClient(mockAgentB, upstreamB.computeLatencyMs);
 
     const outcomes: [string, string][] = [];
     for (let index = 20; index < 40; index += 1) {

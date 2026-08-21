@@ -227,10 +227,10 @@ the real timeout classification path, exercised without an actual multi-second w
 
 ## 7. Retryable failures recover on retry
 
-Retryable HTTP-status failures (`embed_403`/`429`/`500`/`challenge`,
-`player_403`/`429`/`500`, `post_403`/`429`/`500`) fail only on a synthetic id's **first**
-attempt and succeed on every retry. This was not the original design, and the reason it
-changed is itself a useful data point about what this harness can find:
+Retryable failures (`embed_403`/`429`/`500`/`challenge`/`timeout`, `player_403`/`429`/`500`/
+`timeout`, `post_403`/`429`/`500`/`timeout`) fail only on a synthetic id's **first** attempt
+and succeed on every retry. This was not the original design, and the reason it changed is
+itself a useful data point about what this harness can find:
 
 Making a scenario a pure function of `(seed, id)` for _every_ call, including retries, was
 measured to cascade a 10-proxy pool into 100% cooling within a 15-second run at the default
@@ -246,6 +246,23 @@ caveat as §6. `embed_not_found`/`post_not_found`/`post_malformed`/`post_missing
 stay permanent regardless of occurrence — they are non-retryable in the real scraper, and
 unlike a transient block, a deleted or malformed post does not "come back" on a later,
 independent scrape of the same URL (the acceptance-criterion-5 shape).
+
+**The three `_timeout` scenarios needed a second, later fix (see FP-001 in
+[`docs/failure-points.md`](failure-points.md)).** The occurrence counter above lives in each
+platform module's closure and was originally only read from inside a `.reply()` callback —
+fine for HTTP-status failures, since `.reply()` is exactly where the status is chosen. But a
+simulated timeout is injected via a separate `.replyWithError(...)` interceptor (§6), and
+`MockAgent` decides _which_ interceptor matches — including whether the error interceptor
+matches at all — from that interceptor's own matching _predicate_, evaluated before any
+`.reply()` callback ever runs. The predicate had no occurrence data to read yet, so
+`embed_timeout`/`player_timeout`/`post_timeout` fired identically on every retry, never
+recovering, unlike their HTTP-status siblings. Fixed by moving occurrence tracking out of
+the reply callback and into `computeLatencyMs` — the one function in each mock-upstream
+module guaranteed to run exactly once per dispatch, _before_ `MockAgent`'s own interceptor
+matching — so both the error interceptor's predicate and the normal reply callback now read
+from the same up-to-date counter. `createTikTokMockUpstream`/`createInstagramMockUpstream`
+became factories for exactly this reason: the counter must be shared state constructed once
+per run, not per call.
 
 ## 8. Measuring sustained throughput correctly
 

@@ -56,7 +56,9 @@ without a number next to it is a guess, not a finding.
   this run)
 - **Classification:** `capacity limitation` (not a scraper logic bug)
 - **Severity:** `blocking` — fails the acceptance profile's own pass/fail gate outright
-- **Status:** `open`
+- **Status:** `open` — the timeout-scenario harness bug described below is fixed, but the
+  primary finding (10 proxies undersized for 500rpm) is a config decision for whoever runs
+  this, not something a commit resolves
 
 ### What we saw
 
@@ -101,8 +103,10 @@ for 85 (38%)** despite being only ~1% of the scripted workload's weight — a ~1
 disproportionate share. Cause: retryable HTTP-status scenarios (403/429/500) were fixed to
 recover on retry (a fresh proxy lease shouldn't repeat someone else's rate-limit), but
 `embed_timeout`/`player_timeout` were left permanent-per-id, so an unlucky id burns _three
-separate proxies_ (one per attempt, all guaranteed to fail) instead of one. Being addressed
-in a follow-up commit — see the Status line once it lands.
+separate proxies_ (one per attempt, all guaranteed to fail) instead of one. **Fixed in a
+follow-up commit** — see [`stress-testing.md` §7](stress-testing.md#7-retryable-failures-recover-on-retry)
+for the mechanism (`embed_timeout`/`player_timeout`/`post_timeout` now share the same
+per-id occurrence tracking as the HTTP-status scenarios and recover on retry).
 
 ### Is this a bug or a misconfiguration?
 
@@ -110,10 +114,12 @@ in a follow-up commit — see the Status line once it lands.
 PROXY_COOLDOWN_MS=60000` was never sized for 500 sustained rpm. The scraper's own logic
 (earned capacity, rotation, cooldown, retry) is behaving exactly as designed; the pool it
 was handed is too small and too punishing for this volume. The timeout-scenario gap noted
-above is a real harness-fidelity bug (it makes the mock overstate cascade risk from that
-one scenario type specifically), but it is not the primary driver — pool exhaustion would
-still dominate even with it fixed, since 98% of failures never touched a scripted scenario
-at all.
+above was a real harness-fidelity bug (it made the mock overstate cascade risk from that
+one scenario type specifically) — now fixed — but it was never the primary driver: pool
+exhaustion still dominates with it fixed, since 98% of the original run's failures never
+touched a scripted scenario at all. Re-running against the same undersized 10-proxy pool
+is still expected to `FAIL` on pool exhaustion; only widening the pool (recommendation
+below) addresses the primary finding.
 
 ### Recommended action
 

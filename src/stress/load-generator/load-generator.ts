@@ -13,10 +13,7 @@ import { type RunProgress } from '../../core/runner/types.js';
 import { FetchHttpClient } from '../../infrastructure/http/fetch-http-client.js';
 import { JsonlFileSink } from '../../infrastructure/output/jsonl-file-sink.js';
 import { timestampSlug } from '../../infrastructure/output/run-paths.js';
-import {
-  combinedRequestLatencyMs,
-  registerAllMockUpstreams,
-} from '../upstream/combined-mock-upstream.js';
+import { createCombinedMockUpstream } from '../upstream/combined-mock-upstream.js';
 import {
   createMockDefaultDispatcher,
   createMockDispatcherFactory,
@@ -111,9 +108,9 @@ export async function runLoadTest(options: LoadGeneratorOptions): Promise<LoadGe
     postDocId: config.instagram.postDocId,
     clipsDocId: config.instagram.clipsDocId,
   };
-  registerAllMockUpstreams(mockAgent, workload, instagramDocIds);
-  const latencyMs = (opts: Parameters<typeof combinedRequestLatencyMs>[0]): number =>
-    combinedRequestLatencyMs(opts, workload, instagramDocIds);
+  const mockUpstream = createCombinedMockUpstream(workload, instagramDocIds);
+  mockUpstream.register(mockAgent);
+  const latencyMs = mockUpstream.computeLatencyMs;
 
   const proxySupply = createProxySupply(config, logger, undefined, config.concurrency);
   await proxySupply.source?.start();

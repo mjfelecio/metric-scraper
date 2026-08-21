@@ -19,10 +19,7 @@ import {
   createMockDispatcherFactory,
   createSharedMockAgent,
 } from '../../../src/stress/upstream/proxy-mock-dispatcher.js';
-import {
-  computeTikTokRequestLatencyMs,
-  registerTikTokMockUpstream,
-} from '../../../src/stress/upstream/tiktok-mock-upstream.js';
+import { createTikTokMockUpstream } from '../../../src/stress/upstream/tiktok-mock-upstream.js';
 import { type TikTokWorkloadProfile } from '../../../src/stress/workload/workload-profile.js';
 import { tiktokSyntheticUrl } from '../../../src/stress/workload/synthetic-input.js';
 
@@ -37,10 +34,13 @@ const PROXY_TARGET: ProxyTarget = {
 
 function buildRunner(profile: TikTokWorkloadProfile, seed: number, maxAttempts = 3) {
   const mockAgent = createSharedMockAgent();
-  registerTikTokMockUpstream(mockAgent, profile, seed);
+  const upstream = createTikTokMockUpstream(profile, seed);
+  upstream.register(mockAgent);
   const bandwidth = new BandwidthAggregator();
-  const dispatcherFactory = createMockDispatcherFactory(mockAgent, bandwidth, (opts) =>
-    computeTikTokRequestLatencyMs(opts, profile, seed),
+  const dispatcherFactory = createMockDispatcherFactory(
+    mockAgent,
+    bandwidth,
+    upstream.computeLatencyMs,
   );
   const http = new FetchHttpClient({ defaultTimeoutMs: 5_000, dispatcherFactory });
   const proxyPool = new InMemoryProxyPool({ targets: [PROXY_TARGET] });

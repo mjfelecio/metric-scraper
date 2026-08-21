@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { TikTokScraper } from '../../../src/platforms/tiktok/tiktok-scraper.js';
-import {
-  computeTikTokRequestLatencyMs,
-  registerTikTokMockUpstream,
-} from '../../../src/stress/upstream/tiktok-mock-upstream.js';
+import { createTikTokMockUpstream } from '../../../src/stress/upstream/tiktok-mock-upstream.js';
 import { createSharedMockAgent } from '../../../src/stress/upstream/proxy-mock-dispatcher.js';
 import { tiktokSyntheticUrl } from '../../../src/stress/workload/synthetic-input.js';
 import { type TikTokScenario } from '../../../src/stress/workload/scenario.js';
@@ -26,10 +23,9 @@ function profileFor(scenario: TikTokScenario, retryFailFirstN = 1): TikTokWorklo
 function setup(scenario: TikTokScenario, retryFailFirstN = 1) {
   const mockAgent = createSharedMockAgent();
   const profile = profileFor(scenario, retryFailFirstN);
-  registerTikTokMockUpstream(mockAgent, profile, SEED);
-  const { http, bandwidth } = buildStressHttpClient(mockAgent, (opts) =>
-    computeTikTokRequestLatencyMs(opts, profile, SEED),
-  );
+  const upstream = createTikTokMockUpstream(profile, SEED);
+  upstream.register(mockAgent);
+  const { http, bandwidth } = buildStressHttpClient(mockAgent, upstream.computeLatencyMs);
   return { http, bandwidth };
 }
 
@@ -111,7 +107,7 @@ describe('TikTok mock upstream', () => {
     expect(attempt3.outcome).toBe('ok');
   });
 
-  it.each(['embed_403', 'embed_429', 'embed_500', 'embed_challenge'] as const)(
+  it.each(['embed_403', 'embed_429', 'embed_500', 'embed_challenge', 'embed_timeout'] as const)(
     '%s: fails the first attempt but a retry (fresh proxy) recovers',
     async (scenario) => {
       const { http } = setup(scenario);
@@ -125,7 +121,7 @@ describe('TikTok mock upstream', () => {
     },
   );
 
-  it.each(['player_403', 'player_429', 'player_500'] as const)(
+  it.each(['player_403', 'player_429', 'player_500', 'player_timeout'] as const)(
     '%s: fails the first attempt but a retry recovers',
     async (scenario) => {
       const { http } = setup(scenario);
@@ -164,14 +160,12 @@ describe('TikTok mock upstream', () => {
       latency: { minMs: 0, maxMs: 0 },
       responseSize: { targetBytes: 5_000 },
     };
-    registerTikTokMockUpstream(mockAgentA, profile, SEED);
-    registerTikTokMockUpstream(mockAgentB, profile, SEED);
-    const a = buildStressHttpClient(mockAgentA, (opts) =>
-      computeTikTokRequestLatencyMs(opts, profile, SEED),
-    );
-    const b = buildStressHttpClient(mockAgentB, (opts) =>
-      computeTikTokRequestLatencyMs(opts, profile, SEED),
-    );
+    const upstreamA = createTikTokMockUpstream(profile, SEED);
+    const upstreamB = createTikTokMockUpstream(profile, SEED);
+    upstreamA.register(mockAgentA);
+    upstreamB.register(mockAgentB);
+    const a = buildStressHttpClient(mockAgentA, upstreamA.computeLatencyMs);
+    const b = buildStressHttpClient(mockAgentB, upstreamB.computeLatencyMs);
 
     const outcomes: [string, string][] = [];
     for (let index = 10; index < 30; index += 1) {
