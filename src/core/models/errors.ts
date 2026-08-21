@@ -17,6 +17,7 @@ export const SCRAPE_ERROR_CODES = [
   'http_error',
   'rate_limited',
   'blocked',
+  'throttled',
   'geo_blocked',
   'not_found',
   'private',
@@ -68,6 +69,11 @@ const DEFAULT_STATUS_BY_CODE: Record<ScrapeErrorCode, FailureStatus> = {
   http_error: 'error',
   rate_limited: 'rate_limited',
   blocked: 'rate_limited',
+  // Our own egress ceiling, not the platform's. Deliberately NOT
+  // `rate_limited`: that status means upstream pushed back, and it is what
+  // `classifyProxyOutcome` reads to mark a proxy `blocked`. Reporting our own
+  // throttle there would bench healthy proxies for a limit we imposed.
+  throttled: 'error',
   geo_blocked: 'error',
   not_found: 'not_found',
   private: 'private',
@@ -89,6 +95,9 @@ const DEFAULT_RETRYABLE_BY_CODE: Record<ScrapeErrorCode, boolean> = {
   http_error: true,
   rate_limited: true,
   blocked: true,
+  // The queue was too deep to wait out within this attempt's budget. Another
+  // attempt, after backoff, may well find room.
+  throttled: true,
   // The URL is unavailable *from this exit node*. Another one may not be
   // blocked, and every retry leases a fresh proxy, so this is worth retrying.
   geo_blocked: true,
@@ -117,10 +126,10 @@ export function defaultRetryableForCode(code: ScrapeErrorCode): boolean {
  * Both names have to be here. `AbortSignal.timeout()` rejects with a
  * `TimeoutError`, while `AbortController.abort()` and `fetch` use
  * `AbortError` — and a single definition is the point: when only the transport
- * knew about `TimeoutError`, an attempt timeout raised anywhere else fell
- * through to `unknown`, which is non-retryable, so a job that merely waited
- * too long died terminally on its first attempt and was reported as an
- * unclassified failure.
+ * knew about `TimeoutError`, an attempt timeout raised anywhere else (the
+ * egress rate limiter, say) fell through to `unknown`, which is
+ * non-retryable, so a job that merely waited too long died terminally on its
+ * first attempt and was reported as an unclassified failure.
  */
 export function isAbortLikeError(value: unknown): boolean {
   if (!(value instanceof Error)) return false;

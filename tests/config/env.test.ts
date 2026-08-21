@@ -42,6 +42,8 @@ describe('loadConfig', () => {
       INSTAGRAM_ATTEMPT_TIMEOUT_MS: '75000',
       TIKTOK_HTTP_RPM_PER_HOST: '400',
       INSTAGRAM_HTTP_RPM_PER_HOST: '250',
+      TIKTOK_HTTP_RATE_LIMIT_MAX_WAIT_MS: '4000',
+      INSTAGRAM_HTTP_RATE_LIMIT_MAX_WAIT_MS: '9000',
     });
 
     expect(config.concurrency).toBe(25);
@@ -58,6 +60,20 @@ describe('loadConfig', () => {
     expect(config.httpRpmPerHostByPlatform).toEqual({
       tiktok: 400,
       instagram: 250,
+    });
+    expect(config.httpRateLimitMaxWaitMsByPlatform).toEqual({
+      tiktok: 4_000,
+      instagram: 9_000,
+    });
+  });
+
+  it("defaults each queue bound to one request's share of its attempt budget", () => {
+    // 15_000 / 2 and 60_000 / 5, at each platform's measured fan-out. Recompute
+    // from platform_http_requests / requests if either platform's fan-out moves.
+    const config = load({});
+    expect(config.httpRateLimitMaxWaitMsByPlatform).toEqual({
+      tiktok: 7_500,
+      instagram: 12_000,
     });
   });
 
@@ -90,6 +106,12 @@ describe('loadConfig', () => {
     expect(() => load({ TIKTOK_ATTEMPT_TIMEOUT_MS: '0' })).toThrow(/invalid configuration/);
     expect(() => load({ TIKTOK_HTTP_RPM_PER_HOST: '-1' })).toThrow(/invalid configuration/);
     expect(() => load({ INSTAGRAM_HTTP_RPM_PER_HOST: '-1' })).toThrow(/invalid configuration/);
+    expect(() => load({ TIKTOK_HTTP_RATE_LIMIT_MAX_WAIT_MS: '-1' })).toThrow(
+      /invalid configuration/,
+    );
+    expect(() => load({ INSTAGRAM_HTTP_RATE_LIMIT_MAX_WAIT_MS: '-1' })).toThrow(
+      /invalid configuration/,
+    );
     expect(() => load({ INSTAGRAM_ATTEMPT_TIMEOUT_MS: '-1' })).toThrow(/invalid configuration/);
     expect(() => load({ INSTAGRAM_ATTEMPT_TIMEOUT_MS: '1.5' })).toThrow(
       /INSTAGRAM_ATTEMPT_TIMEOUT_MS/,

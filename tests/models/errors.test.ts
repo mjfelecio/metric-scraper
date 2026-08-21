@@ -19,8 +19,9 @@ describe('ScrapeError.from', () => {
   it('classifies an AbortSignal.timeout() rejection as a retryable timeout', () => {
     // AbortSignal.timeout() rejects with TimeoutError, not AbortError. Treating
     // only the latter as a timeout left every attempt-timeout raised outside the
-    // transport classified `unknown`, which is non-retryable: the job died
-    // terminally on attempt 1 and was reported as an unclassified failure.
+    // transport — the egress rate limiter's queue, in particular — classified
+    // `unknown`, which is non-retryable: the job died terminally on attempt 1
+    // and was reported as an unclassified failure.
     const error = ScrapeError.from(
       new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
     );
@@ -41,7 +42,18 @@ describe('ScrapeError.from', () => {
   });
 
   it('passes a ScrapeError through by identity', () => {
-    const original = new ScrapeError({ code: 'parse_error', message: 'unreadable body' });
+    const original = new ScrapeError({ code: 'throttled', message: 'queue too deep' });
     expect(ScrapeError.from(original)).toBe(original);
+  });
+});
+
+describe('throttled', () => {
+  it('is retryable and reported as a plain error, not as upstream rate limiting', () => {
+    const error = new ScrapeError({ code: 'throttled', message: 'queue too deep' });
+
+    expect(error.retryable).toBe(true);
+    // NOT `rate_limited`: that status means the platform pushed back, and it is
+    // what marks a proxy blocked. Our own ceiling must not bench a healthy proxy.
+    expect(error.status).toBe('error');
   });
 });

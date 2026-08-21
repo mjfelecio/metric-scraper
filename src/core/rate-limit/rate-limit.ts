@@ -18,9 +18,26 @@
  *    protects upstream platforms.
  */
 
+import { ScrapeError } from '../models/errors.js';
+
+export interface AcquireOptions {
+  /**
+   * Longest this call may spend queued before it gives up, measured from entry
+   * so the time spent behind earlier waiters counts too.
+   *
+   * Waiting happens inside a job, holding both a concurrency slot and a proxy
+   * lease, and — for HTTP egress — inside the attempt timeout. Without a bound,
+   * a queue deeper than the attempt budget does not throttle the job, it kills
+   * it: the attempt aborts mid-flight, after earlier hops have already spent
+   * their tokens on a result that is then discarded. Giving up early turns that
+   * into cheap, retryable backpressure. Omitted (or `0`) waits indefinitely.
+   */
+  maxWaitMs?: number | undefined;
+}
+
 export interface RateLimiter {
   /** Resolves once the caller is allowed to proceed. */
-  acquire(signal?: AbortSignal): Promise<void>;
+  acquire(signal?: AbortSignal, options?: AcquireOptions): Promise<void>;
 }
 
 export const unlimitedRateLimiter: RateLimiter = {
@@ -62,7 +79,14 @@ export class TokenBucketRateLimiter implements RateLimiter {
     return this.tokens;
   }
 
-  async acquire(signal?: AbortSignal): Promise<void> {
+  async acquire(signal?: AbortSignal, options?: AcquireOptions): Promise<void> {
+    // Measured from entry rather than from the head of the queue: time spent
+    // behind earlier waiters is the part that actually grows with concurrency,
+    // so a deadline that ignored it would never fire when it matters.
+    const startedAt = this.now();
+    const maxWaitMs = options?.maxWaitMs;
+    const bounded = maxWaitMs !== undefined && maxWaitMs > 0 && Number.isFinite(maxWaitMs);
+
     // Serialize waiters so tokens are handed out in arrival order.
     const previous = this.chain;
     let release!: () => void;
@@ -82,7 +106,17 @@ export class TokenBucketRateLimiter implements RateLimiter {
           return;
         }
         const deficit = 1 - this.tokens;
-        await this.sleep(Math.ceil((deficit / this.refillPerSecond) * 1000));
+        const sleepMs = Math.ceil((deficit / this.refillPerSecond) * 1000);
+        if (bounded && this.now() - startedAt + sleepMs > maxWaitMs) {
+          // Checked against the projected wake time, not the elapsed time, so
+          // the caller is turned away before sleeping past its budget rather
+          // than after. No token is consumed: this request never happened.
+          throw new ScrapeError({
+            code: 'throttled',
+            message: `rate limiter queue exceeded ${maxWaitMs}ms`,
+          });
+        }
+        await this.sleep(sleepMs);
       }
     } finally {
       release();

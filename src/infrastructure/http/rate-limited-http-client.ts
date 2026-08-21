@@ -3,7 +3,11 @@ import {
   unlimitedRateLimiter,
   type RateLimiter,
 } from '../../core/rate-limit/rate-limit.js';
-import { type HttpClient, type HttpRequest, type HttpResponse } from '../../core/scraper/http-port.js';
+import {
+  type HttpClient,
+  type HttpRequest,
+  type HttpResponse,
+} from '../../core/scraper/http-port.js';
 
 export interface RateLimitedHttpClientOptions {
   inner: HttpClient;
@@ -14,6 +18,13 @@ export interface RateLimitedHttpClientOptions {
    * form — disables limiting for that host.
    */
   rpmPerHost: number | ((host: string) => number);
+  /**
+   * Longest a request may spend queued on the limiter before it is turned away
+   * with a retryable `throttled` error. Takes the same two shapes as
+   * `rpmPerHost`, so a caller can vary it per host. Omitted (or `0`) waits
+   * indefinitely. See `AcquireOptions.maxWaitMs` for why a bound is needed.
+   */
+  maxWaitMs?: number | ((host: string) => number) | undefined;
   /** Units spendable at once after idle. See `RateLimiterOptions.burst`. */
   burst?: number | undefined;
   /** Called with the time spent waiting on the limiter, so it stays visible. */
@@ -35,10 +46,17 @@ export interface RateLimitedHttpClientOptions {
  * Waiting here happens inside a job, so it consumes a concurrency slot. That
  * is genuine backpressure rather than a bug, but it is indistinguishable from
  * one unless it is measured — hence `onWait`.
+ *
+ * It is also bounded, via `maxWaitMs`. The wait sits inside the caller's
+ * attempt timeout, so an unbounded queue does not slow a job down, it kills it
+ * partway through: earlier hops have already spent their tokens by then, and
+ * their results are discarded when the attempt aborts. Turning the request away
+ * early converts that into a cheap retry instead.
  */
 export class RateLimitedHttpClient implements HttpClient {
   private readonly inner: HttpClient;
   private readonly resolveRpm: (host: string) => number;
+  private readonly resolveMaxWaitMs: (host: string) => number | undefined;
   private readonly burst: number | undefined;
   private readonly onWait: ((waitMs: number, host: string) => void) | undefined;
   private readonly now: () => number;
@@ -48,7 +66,12 @@ export class RateLimitedHttpClient implements HttpClient {
   constructor(options: RateLimitedHttpClientOptions) {
     this.inner = options.inner;
     this.resolveRpm =
-      typeof options.rpmPerHost === 'function' ? options.rpmPerHost : () => options.rpmPerHost as number;
+      typeof options.rpmPerHost === 'function'
+        ? options.rpmPerHost
+        : () => options.rpmPerHost as number;
+    const maxWaitMs = options.maxWaitMs;
+    this.resolveMaxWaitMs =
+      typeof maxWaitMs === 'function' ? maxWaitMs : (): number | undefined => maxWaitMs;
     this.burst = options.burst;
     this.onWait = options.onWait;
     this.now = options.now ?? (() => Date.now());
@@ -58,12 +81,19 @@ export class RateLimitedHttpClient implements HttpClient {
   async request(request: HttpRequest): Promise<HttpResponse> {
     const host = hostOf(request.url);
     const limiter = this.limiterFor(host);
+    const maxWaitMs = this.resolveMaxWaitMs(host);
 
     const startedAt = this.now();
-    await limiter.acquire(request.signal);
-    const waited = Math.max(0, this.now() - startedAt);
-    if (waited > 0) {
-      this.onWait?.(waited, host);
+    try {
+      await limiter.acquire(request.signal, { maxWaitMs });
+    } finally {
+      // Reported from a `finally` so a wait that ended in rejection still lands
+      // in the run's wait telemetry. Charging only successful waits would hide
+      // exactly the saturation that caused the rejections.
+      const waited = Math.max(0, this.now() - startedAt);
+      if (waited > 0) {
+        this.onWait?.(waited, host);
+      }
     }
 
     return await this.inner.request(request);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { PQueueTaskQueue } from '../../src/core/concurrency/task-queue.js';
+import { ScrapeError } from '../../src/core/models/errors.js';
 import {
   createRateLimiter,
   TokenBucketRateLimiter,
@@ -221,5 +222,104 @@ describe('concurrency and rate limiting together', () => {
 
     expect(peak).toBeGreaterThan(1);
     expect(peak).toBe(10);
+  });
+});
+
+describe('TokenBucketRateLimiter maxWaitMs', () => {
+  function limiterAt(now: () => number, sleep: (ms: number) => Promise<void>) {
+    // 60 rpm = one token per second, capacity 1: the second acquire in a row
+    // must wait a full second.
+    return new TokenBucketRateLimiter({ refillPerSecond: 1, capacity: 1, now, sleep });
+  }
+
+  it('waits normally when the queue fits inside the budget', async () => {
+    let now = 0;
+    const limiter = limiterAt(
+      () => now,
+      (ms) => {
+        now += ms;
+        return Promise.resolve();
+      },
+    );
+
+    await limiter.acquire(undefined, { maxWaitMs: 5_000 });
+    await limiter.acquire(undefined, { maxWaitMs: 5_000 });
+    expect(now).toBe(1_000);
+  });
+
+  it('rejects with a retryable throttled error rather than sleeping past the budget', async () => {
+    let now = 0;
+    const limiter = limiterAt(
+      () => now,
+      (ms) => {
+        now += ms;
+        return Promise.resolve();
+      },
+    );
+
+    await limiter.acquire(undefined, { maxWaitMs: 500 });
+    const error = await limiter.acquire(undefined, { maxWaitMs: 500 }).catch((e: unknown) => e);
+
+    expect(ScrapeError.isScrapeError(error)).toBe(true);
+    expect((error as ScrapeError).code).toBe('throttled');
+    expect((error as ScrapeError).retryable).toBe(true);
+    // Turned away before sleeping, not after: the clock never advanced.
+    expect(now).toBe(0);
+  });
+
+  it('does not consume a token when it gives up', async () => {
+    let now = 0;
+    const limiter = limiterAt(
+      () => now,
+      (ms) => {
+        now += ms;
+        return Promise.resolve();
+      },
+    );
+
+    await limiter.acquire(undefined, { maxWaitMs: 500 });
+    await expect(limiter.acquire(undefined, { maxWaitMs: 500 })).rejects.toThrow();
+
+    // A full second's refill buys exactly one token, which proves the rejected
+    // call took nothing: otherwise the balance would be short.
+    now = 1_000;
+    expect(limiter.availableTokens()).toBeCloseTo(1, 5);
+  });
+
+  it('counts time spent queued behind earlier waiters, not just its own sleeping', async () => {
+    let now = 0;
+    const limiter = limiterAt(
+      () => now,
+      (ms) => {
+        now += ms;
+        return Promise.resolve();
+      },
+    );
+
+    await limiter.acquire();
+    // Two waiters enter together. The first sleeps a second and succeeds; the
+    // second has by then already burned its whole budget queueing, which is the
+    // wait that actually grows with concurrency.
+    const first = limiter.acquire(undefined, { maxWaitMs: 1_500 });
+    const second = limiter.acquire(undefined, { maxWaitMs: 1_500 });
+
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).rejects.toMatchObject({ code: 'throttled' });
+  });
+
+  it('waits indefinitely when no budget is given', async () => {
+    let now = 0;
+    const limiter = limiterAt(
+      () => now,
+      (ms) => {
+        now += ms;
+        return Promise.resolve();
+      },
+    );
+
+    await limiter.acquire();
+    await limiter.acquire(undefined, { maxWaitMs: 0 });
+    await limiter.acquire();
+    expect(now).toBe(2_000);
   });
 });

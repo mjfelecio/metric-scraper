@@ -53,6 +53,9 @@ const OUTCOME_BY_CODE: Record<ScrapeErrorCode, ProxyOutcome> = {
   // parse is usually our parser or the platform changing, and blaming the
   // proxy for it would bench the whole pool over one deploy-shaped bug.
   parse_error: 'neutral',
+  // Our own egress ceiling turned this request away before it was ever sent.
+  // The proxy never carried it, so it says nothing about the proxy's health.
+  throttled: 'neutral',
   cancelled: 'neutral',
   session_error: 'neutral',
   invalid_url: 'neutral',

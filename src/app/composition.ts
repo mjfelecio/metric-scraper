@@ -222,6 +222,7 @@ export async function buildRunner(options: {
   const burst = options.overrides?.burst ?? config.burst;
   const httpRpmPerHostOverride = options.overrides?.httpRpmPerHost;
   const httpRpmPerHostByPlatform = config.httpRpmPerHostByPlatform;
+  const httpRateLimitMaxWaitMsByPlatform = config.httpRateLimitMaxWaitMsByPlatform;
 
   const proxyProvider =
     options.proxyProvider ?? createProxyProvider(config, logger, options.onProxyEvent);
@@ -261,6 +262,10 @@ export async function buildRunner(options: {
         inner: transport,
         rpmPerHost:
           httpRpmPerHostOverride ?? ((host) => rpmForHost(host, httpRpmPerHostByPlatform)),
+        // Bounded even when the rate itself is overridden: the override
+        // changes how fast we may go, not how long a job should be willing to
+        // sit in the queue holding a proxy lease and its attempt budget.
+        maxWaitMs: (host) => maxWaitForHost(host, httpRateLimitMaxWaitMsByPlatform) ?? 0,
         ...(burst > 0 ? { burst } : {}),
         onWait: (waitMs) => metrics.recordHttpRateLimitWait(waitMs),
       })
@@ -337,6 +342,26 @@ export function rpmForHost(host: string, byPlatform: Record<Platform, number>): 
   if (platform !== null) return byPlatform[platform];
   const configured = [byPlatform.tiktok, byPlatform.instagram].filter((rpm) => rpm > 0);
   return configured.length > 0 ? Math.min(...configured) : 0;
+}
+
+/**
+ * Resolves a request host to its platform's queue bound, by the same
+ * classification `rpmForHost` uses — so a host cannot be paced by one
+ * platform's ceiling while bounded by the other's budget.
+ *
+ * An unrecognized host takes the most generous configured bound. The stricter
+ * choice is right for the *rate* (it protects upstream), but wrong here: this
+ * value only decides how long we are willing to queue, and being hasty about
+ * an unclassified hop just fails work that would have gone through.
+ */
+export function maxWaitForHost(
+  host: string,
+  byPlatform: Record<Platform, number>,
+): number | undefined {
+  const platform = platformForHost(host);
+  const configured =
+    platform !== null ? byPlatform[platform] : Math.max(byPlatform.tiktok, byPlatform.instagram);
+  return configured > 0 ? configured : undefined;
 }
 
 /**
