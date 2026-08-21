@@ -30,11 +30,34 @@ export const AppConfigSchema = z.object({
    * does not, because one job can be many requests. `0` disables, per platform.
    *
    * Split by platform because their fan-out per job differs substantially —
-   * TikTok issues about two requests per attempt, Instagram up to eight — so one
-   * shared ceiling would either starve Instagram or leave TikTok unconstrained.
-   * See README §5.1 for the measurements behind these defaults.
+   * measured across runs in `output/`, TikTok issues about two requests per
+   * job and Instagram between two and a half and four and a half — so one
+   * shared ceiling would either starve Instagram or leave TikTok
+   * unconstrained. See README §5.1 for the measurements behind these
+   * defaults, and `httpRateLimitMaxWaitMsByPlatform` for the bound that keeps
+   * a saturated ceiling from failing jobs outright.
    */
   httpRpmPerHostByPlatform: z.object({
+    tiktok: z.number().int().min(0),
+    instagram: z.number().int().min(0),
+  }),
+  /**
+   * Longest one request may spend queued on the egress limiter before it is
+   * turned away with a retryable `throttled` error, per platform. `0` waits
+   * indefinitely.
+   *
+   * This bound is what keeps the ceiling above from turning into a failure
+   * mode. The wait is spent inside the attempt timeout, so an unbounded queue
+   * does not pace a job, it kills it partway through — and the hops it already
+   * completed have spent their tokens on a result that is then discarded.
+   *
+   * Defaults are one request's fair share of the attempt budget,
+   * `attemptTimeoutMs / requestsPerAttempt`, using MEASURED fan-out (TikTok
+   * ~2, Instagram ~5 — see README §5.1). Recompute from
+   * `totals.platform_http_requests / totals.requests` in a run summary if
+   * either platform's fan-out shifts.
+   */
+  httpRateLimitMaxWaitMsByPlatform: z.object({
     tiktok: z.number().int().min(0),
     instagram: z.number().int().min(0),
   }),
@@ -216,12 +239,20 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     targetRpm: int(env, 'SCRAPER_TARGET_RPM', 500),
     burst: int(env, 'SCRAPER_BURST', 0),
     httpRpmPerHostByPlatform: {
-      // Instagram fans out further per job (up to eight requests against a
-      // platform that has been observed pushing back — timeouts, rate_limited,
-      // and proxy cooldown cascades) so it gets the stricter ceiling. See
-      // README §5.1 for the measured comparison behind both numbers.
+      // Instagram fans out further per job (measured 2.55-4.50 requests
+      // against a platform that has been observed pushing back — timeouts,
+      // rate_limited, and proxy cooldown cascades) so it gets the stricter
+      // ceiling. Note the two compound: the stricter rate AND the larger
+      // fan-out both apply, and every host Instagram touches resolves to one
+      // bucket. See README §5.1 for the measured comparison behind both.
       tiktok: int(env, 'TIKTOK_HTTP_RPM_PER_HOST', 300),
       instagram: int(env, 'INSTAGRAM_HTTP_RPM_PER_HOST', 180),
+    },
+    httpRateLimitMaxWaitMsByPlatform: {
+      // 15_000 / 2 and 60_000 / 5: one request's share of its platform's
+      // attempt budget at that platform's measured fan-out.
+      tiktok: int(env, 'TIKTOK_HTTP_RATE_LIMIT_MAX_WAIT_MS', 7_500),
+      instagram: int(env, 'INSTAGRAM_HTTP_RATE_LIMIT_MAX_WAIT_MS', 12_000),
     },
     // Bounded by default: an unbounded queue turns a large input straight into
     // unbounded pending work, and the producer has no way to feel the pressure.
@@ -229,8 +260,8 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     pollIntervalMs: int(env, 'SCRAPER_POLL_INTERVAL_MS', 900_000),
     attemptTimeoutMsByPlatform: {
       // Preserve TikTok's existing whole-attempt ceiling. Instagram receives
-      // a separate budget because one attempt may make up to eight sequential
-      // requests while TikTok normally makes two.
+      // a separate budget because one attempt makes several sequential
+      // requests (measured 2.55-4.50) while TikTok normally makes two.
       tiktok: int(env, 'TIKTOK_ATTEMPT_TIMEOUT_MS', 15_000),
       instagram: int(env, 'INSTAGRAM_ATTEMPT_TIMEOUT_MS', 60_000),
     },
@@ -407,6 +438,7 @@ export function redactConfig(config: AppConfig): Record<string, unknown> {
     targetRpm: config.targetRpm,
     burst: config.burst,
     httpRpmPerHostByPlatform: { ...config.httpRpmPerHostByPlatform },
+    httpRateLimitMaxWaitMsByPlatform: { ...config.httpRateLimitMaxWaitMsByPlatform },
     maxQueueSize: config.maxQueueSize,
     pollIntervalMs: config.pollIntervalMs,
     attemptTimeoutMsByPlatform: { ...config.attemptTimeoutMsByPlatform },

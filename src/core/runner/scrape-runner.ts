@@ -45,6 +45,12 @@ export interface ScrapeRunnerConfig {
   maxQueueSize: number;
   /** Maximum duration of one complete attempt, selected by the record's platform. */
   attemptTimeoutMsByPlatform: Readonly<Record<Platform, number>>;
+  /**
+   * Egress ceiling per platform, in requests per minute. Carried here purely so
+   * the run summary can report the concurrency this ceiling can actually keep
+   * busy; the limiting itself happens in the HTTP client. `0` = unlimited.
+   */
+  httpRpmPerHostByPlatform?: Readonly<Record<Platform, number>> | undefined;
 }
 
 export interface ScrapeRunnerDeps {
@@ -296,9 +302,10 @@ export class ScrapeRunner {
       metrics.recordBandwidth(this.deps.bandwidth.view());
     }
 
+    const runPlatform = options.platform ?? inferPlatform(records);
     const summary = buildRunSummary({
       runId,
-      platform: options.platform ?? inferPlatform(records),
+      platform: runPlatform,
       startedAt,
       finishedAt,
       counts,
@@ -312,6 +319,7 @@ export class ScrapeRunner {
       rowsWritten: sink.rowsWritten,
       minimumProxyCapacity: concurrencyMonitor.minimumObservedProxyCapacity,
       burst: config.burst,
+      httpRpmCeiling: httpRpmCeilingFor(runPlatform, config.httpRpmPerHostByPlatform),
     });
 
     runLogger.info(
@@ -612,6 +620,22 @@ function cancelledResult(reason: unknown): ScrapeResult {
     retryable: false,
     causeCode: error.causeCode,
   });
+}
+
+/**
+ * The egress ceiling that governed this run, or `null` when nothing single
+ * governed it.
+ *
+ * A mixed-platform run has two ceilings and no meaningful single one, so it
+ * reports none rather than picking one and describing the run wrongly.
+ */
+function httpRpmCeilingFor(
+  platform: Platform | null,
+  byPlatform: Readonly<Record<Platform, number>> | undefined,
+): number | null {
+  if (platform === null || byPlatform === undefined) return null;
+  const rpm = byPlatform[platform];
+  return rpm > 0 ? rpm : null;
 }
 
 function inferPlatform(records: readonly (InputRecord | PreparedInputItem)[]): Platform | null {

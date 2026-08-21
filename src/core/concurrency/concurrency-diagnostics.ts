@@ -7,6 +7,7 @@ export const CONCURRENCY_FINDING_CODES = [
   'small_input',
   'admission_limited',
   'proxy_capacity_limited',
+  'http_rate_limited',
   'serialized',
   'proxy_capacity_unknown',
 ] as const;
@@ -22,6 +23,8 @@ export const ConcurrencyCeilingsSchema = z.object({
   input: z.number().int().nonnegative(),
   admission: z.number().int().nonnegative(),
   proxy: z.number().int().nonnegative().nullable(),
+  /** `null` when no egress ceiling applies, or the run mixes platforms. */
+  http: z.number().int().nonnegative().nullable(),
 });
 export type ConcurrencyCeilings = z.infer<typeof ConcurrencyCeilingsSchema>;
 
@@ -36,6 +39,23 @@ export interface ConcurrencyDiagnosticInput {
   queueDemand: number;
   proxyMode: ProxyMode;
   proxyCapacity: number | null;
+  /**
+   * The egress ceiling in force for this run's platform, in requests per
+   * minute. `null` for a mixed-platform run or when no ceiling is configured.
+   */
+  httpRpmCeiling?: number | null | undefined;
+  /** Outbound requests this run actually made, for measured fan-out. */
+  platformHttpRequests?: number | undefined;
+  /**
+   * Jobs that actually completed — the denominator for fan-out and queue time.
+   *
+   * Deliberately not `acceptedJobs`: in a multi-cycle session that counts one
+   * cycle's input while the request totals accumulate across every cycle, which
+   * would multiply the measured fan-out by the cycle count.
+   */
+  completedJobs?: number | undefined;
+  /** Total time jobs spent queued on the egress limiter. */
+  httpRateLimitWaitMs?: number | undefined;
 }
 
 export interface ConcurrencyDiagnostic {
@@ -59,8 +79,15 @@ export function evaluateConcurrency(input: ConcurrencyDiagnosticInput): Concurre
     latencyCeiling,
   );
   const proxy = input.proxyCapacity === null ? null : Math.max(0, Math.floor(input.proxyCapacity));
-  const ceilings: ConcurrencyCeilings = { configured, input: accepted, admission, proxy };
-  const known = [configured, accepted, admission, ...(proxy === null ? [] : [proxy])];
+  const http = httpCeiling(input);
+  const ceilings: ConcurrencyCeilings = { configured, input: accepted, admission, proxy, http };
+  const known = [
+    configured,
+    accepted,
+    admission,
+    ...(proxy === null ? [] : [proxy]),
+    ...(http === null ? [] : [http]),
+  ];
   const achievable = Math.min(...known);
   const findings: ConcurrencyFinding[] = [];
   const demanded = Math.min(configured, accepted);
@@ -74,6 +101,9 @@ export function evaluateConcurrency(input: ConcurrencyDiagnosticInput): Concurre
   if (proxy !== null && proxy === achievable && proxy < demanded) {
     findings.push({ code: 'proxy_capacity_limited', severity: 'warning' });
   }
+  if (http !== null && http === achievable && http < demanded) {
+    findings.push({ code: 'http_rate_limited', severity: 'warning' });
+  }
   if (input.proxyMode === 'rotating-residential' && proxy === null) {
     findings.push({ code: 'proxy_capacity_unknown', severity: 'info' });
   }
@@ -81,12 +111,46 @@ export function evaluateConcurrency(input: ConcurrencyDiagnosticInput): Concurre
     achievable > 0 &&
     observed <= achievable * 0.8 &&
     input.queueDemand > 0 &&
-    !findings.some(({ code }) => code === 'admission_limited' || code === 'proxy_capacity_limited')
+    !findings.some(
+      ({ code }) =>
+        code === 'admission_limited' ||
+        code === 'proxy_capacity_limited' ||
+        code === 'http_rate_limited',
+    )
   ) {
     findings.push({ code: 'serialized', severity: 'warning' });
   }
 
   return { achievable, ceilings, findings };
+}
+
+/**
+ * Concurrency the egress ceiling can actually keep busy, by Little's Law.
+ *
+ * `in-flight = rate x service time`, where the rate is the ceiling divided by
+ * this run's measured fan-out, and service time is mean latency NET of time
+ * spent queued on the limiter. Subtracting our own queueing is what keeps this
+ * non-circular: including it would let a badly oversubscribed run inflate its
+ * own latency and thereby justify the concurrency causing the problem.
+ *
+ * Anything configured above this is not thoughput, it is queue — jobs holding a
+ * slot and a proxy lease while they wait for a token.
+ */
+function httpCeiling(input: ConcurrencyDiagnosticInput): number | null {
+  const rpm = input.httpRpmCeiling;
+  if (rpm === null || rpm === undefined || rpm <= 0) return null;
+  if (input.meanLatencyMs === null) return null;
+
+  const jobs = Math.max(0, Math.floor(input.completedJobs ?? 0));
+  const requests = Math.max(0, input.platformHttpRequests ?? 0);
+  if (jobs === 0 || requests === 0) return null;
+
+  const requestsPerJob = requests / jobs;
+  const queuedPerJob = Math.max(0, input.httpRateLimitWaitMs ?? 0) / jobs;
+  const serviceTimeMs = Math.max(0, input.meanLatencyMs - queuedPerJob);
+  if (serviceTimeMs === 0) return null;
+
+  return Math.max(1, Math.ceil((rpm / requestsPerJob) * (serviceTimeMs / 60_000)));
 }
 
 export interface ConcurrencyMonitorOptions {

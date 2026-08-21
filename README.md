@@ -305,26 +305,43 @@ simplification. An earlier version expressed the rate limit as task-queue pacing
 job blocked every other start: a configured concurrency of 10 executed strictly
 one job at a time, and the run summary still reported `concurrency: 10`.
 
-| Concern          | Knob                                              | Mechanism                     | What it bounds                               |
-| ---------------- | ------------------------------------------------- | ----------------------------- | -------------------------------------------- |
-| **Concurrency**  | `SCRAPER_CONCURRENCY`                             | Worker pool                   | Jobs in flight — sockets, memory, proxy load |
-| **Rate**         | `SCRAPER_TARGET_RPM`, `TIKTOK_HTTP_RPM_PER_HOST`, `INSTAGRAM_HTTP_RPM_PER_HOST` | Token bucket | How fast we start work / hit upstream |
-| **Backpressure** | `SCRAPER_MAX_QUEUE_SIZE`                          | Bounded queue, producer waits | Memory under a large input                   |
+| Concern          | Knob                                                                            | Mechanism                     | What it bounds                               |
+| ---------------- | ------------------------------------------------------------------------------- | ----------------------------- | -------------------------------------------- |
+| **Concurrency**  | `SCRAPER_CONCURRENCY`                                                           | Worker pool                   | Jobs in flight — sockets, memory, proxy load |
+| **Rate**         | `SCRAPER_TARGET_RPM`, `TIKTOK_HTTP_RPM_PER_HOST`, `INSTAGRAM_HTTP_RPM_PER_HOST` | Token bucket                  | How fast we start work / hit upstream        |
+| **Backpressure** | `SCRAPER_MAX_QUEUE_SIZE`                                                        | Bounded queue, producer waits | Memory under a large input                   |
 
 **Rate limiting is two-tier, on purpose.** `targetRpm` counts _logical jobs_ — one
 URL is one unit however many HTTP calls or retries it costs. That keeps the
 reported throughput figure meaningful (§11: throughput counts completed work
 items, never retries). But it does not protect upstream, because one job is not
-one request: TikTok issues two, Instagram up to three per bounded page/author,
-and a retried job repeats all of them. `httpRpmPerHost` therefore limits the
-actual egress, applied at the HTTP client so retries and multi-hop calls are
-counted automatically — split into `TIKTOK_HTTP_RPM_PER_HOST` and
-`INSTAGRAM_HTTP_RPM_PER_HOST` because the two platforms' fan-out per job differs
-enough that one shared ceiling would either starve one platform or leave the
-other unconstrained. A request is routed to whichever ceiling its host belongs
-to (`tiktok.com`, or `instagram.com`/`instagr.am`); a host belonging to neither
-— a redirect hop mid-resolution, say — falls back to the stricter of the two
-configured limits rather than going unpaced.
+one request: measured across the runs in `output/`, TikTok issues about two per
+job and Instagram between 2.55 and 4.50, and a retried job repeats all of them.
+`httpRpmPerHost` therefore limits the actual egress, applied at the HTTP client
+so retries and multi-hop calls are counted automatically — split into
+`TIKTOK_HTTP_RPM_PER_HOST` and `INSTAGRAM_HTTP_RPM_PER_HOST` because the two
+platforms' fan-out per job differs enough that one shared ceiling would either
+starve one platform or leave the other unconstrained. A request is routed to
+whichever ceiling its host belongs to (`tiktok.com`, or
+`instagram.com`/`instagr.am`); a host belonging to neither — a redirect hop
+mid-resolution, say — falls back to the stricter of the two configured limits
+rather than going unpaced.
+
+**The wait is bounded, and has to be.** A request that cannot get a token within
+`TIKTOK_HTTP_RATE_LIMIT_MAX_WAIT_MS` / `INSTAGRAM_HTTP_RATE_LIMIT_MAX_WAIT_MS`
+is turned away with a retryable `throttled` error instead of queueing. That
+bound is not a tuning nicety: the wait is spent inside the attempt timeout while
+the job holds a proxy lease, so an unbounded queue does not pace a job, it kills
+it partway through — the attempt aborts after earlier hops have already spent
+their tokens, and their results are discarded. Shipping the ceiling on by
+default without this bound regressed a concurrency-50 TikTok run from 95% to 68%
+success, every new failure being an attempt that died waiting rather than
+anything upstream did. The defaults are one request's share of the platform's
+attempt budget at its measured fan-out (`15000/2`, `60000/5`).
+
+`throttled` is deliberately not `rate_limited`: that status means the _platform_
+pushed back, and it is what marks a proxy blocked. Reporting our own ceiling
+there would bench healthy proxies for a limit we imposed on ourselves.
 
 ```
 1 job -> attempt 1 (2 hops) -> fail -> attempt 2 (2 hops) -> fail -> attempt 3 (2 hops)
@@ -339,12 +356,12 @@ with `pnpm stress-test --profile acceptance` (mocked upstream, real proxy pool,
 retry policy, and rate limiter — see §6.2) against the same synthetic input,
 seed, and 10-proxy pool, comparing off vs. the shipped default:
 
-| Platform  | `httpRpmPerHost` | Success rate | Retries        | Proxy pool                |
-| --------- | ----------------- | ------------ | -------------- | -------------------------- |
-| TikTok    | `0` (off)          | 61.2%        | 313/381 (82%)  | 10/10 cooling — exhausted  |
-| TikTok    | `300` (default)    | 100%         | 9/107 (8.4%)   | never exhausted            |
-| Instagram | `0` (off)          | 82.7%        | 120/381 (31.5%)| 10/10 cooling — exhausted  |
-| Instagram | `180` (default)    | 96.2%        | 5/52 (9.6%)    | never exhausted            |
+| Platform  | `httpRpmPerHost` | Success rate | Retries         | Proxy pool                |
+| --------- | ---------------- | ------------ | --------------- | ------------------------- |
+| TikTok    | `0` (off)        | 61.2%        | 313/381 (82%)   | 10/10 cooling — exhausted |
+| TikTok    | `300` (default)  | 100%         | 9/107 (8.4%)    | never exhausted           |
+| Instagram | `0` (off)        | 82.7%        | 120/381 (31.5%) | 10/10 cooling — exhausted |
+| Instagram | `180` (default)  | 96.2%        | 5/52 (9.6%)     | never exhausted           |
 
 Unthrottled, retries cascade fast enough that every proxy in the pool crosses
 `PROXY_MAX_FAILURES` and cools down at once — after which _every_ request fails
@@ -358,7 +375,10 @@ survive one measured run.
 
 The cost is throughput: at `300`/`180` neither run sustains the 500 rpm
 `stress-test acceptance` target, because the HTTP ceiling — not admission — is
-now the bottleneck. That is the tradeoff these knobs exist to make explicit
+now the bottleneck. A run pays that cost visibly: when the ceiling is what
+bounds achievable concurrency, the summary reports an `http` entry in
+`throughput.concurrency.ceilings` and an `http_rate_limited` finding, so a run
+that is queueing rather than working says so instead of just looking slow. That is the tradeoff these knobs exist to make explicit
 rather than hide: raising them trades pool survival for throughput, and the
 right value depends on proxy pool size and upstream tolerance on the day,
 which is exactly why they stay independently configurable per platform rather

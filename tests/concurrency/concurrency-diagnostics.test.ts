@@ -20,6 +20,85 @@ const base = {
   proxyCapacity: 20,
 };
 
+describe('evaluateConcurrency HTTP ceiling', () => {
+  // The run that exposed the regression: tiktok-2026-08-21T14-07-12-149Z,
+  // concurrency 50 against a 300 rpm ceiling. 100 jobs, 253 outbound requests,
+  // 16,881ms mean latency of which 10,992ms per job was spent queued on the
+  // limiter — so ~5,889ms of it was real work.
+  const collapsed = {
+    ...base,
+    configuredConcurrency: 50,
+    acceptedJobs: 100,
+    observedConcurrency: 50,
+    proxyCapacity: null,
+    meanLatencyMs: 16_881,
+    httpRpmCeiling: 300,
+    platformHttpRequests: 253,
+    completedJobs: 100,
+    httpRateLimitWaitMs: 1_099_179,
+  };
+
+  it('reports the concurrency the egress ceiling can actually keep busy', () => {
+    const result = evaluateConcurrency(collapsed);
+
+    // 300 rpm / 2.53 requests per job = 118.6 jobs/min; x 5.889s = ~12.
+    expect(result.ceilings.http).toBe(12);
+    expect(result.achievable).toBe(12);
+    expect(result.findings.map(({ code }) => code)).toContain('http_rate_limited');
+  });
+
+  it('subtracts our own queueing, so an oversubscribed run cannot justify itself', () => {
+    // Counting limiter wait as service time would inflate the ceiling roughly
+    // threefold and report the configuration causing the problem as fine.
+    const circular = evaluateConcurrency({ ...collapsed, httpRateLimitWaitMs: 0 });
+    expect(circular.ceilings.http).toBeGreaterThan(30);
+    expect(evaluateConcurrency(collapsed).ceilings.http).toBe(12);
+  });
+
+  it('still names the ceiling on a run that succeeds but is bounded by it', () => {
+    // The concurrency-10 run from the same day: 95% success, but throughput
+    // fell from 495 to 150 rpm and latency tripled. The ceiling really is the
+    // binding constraint there — that is the documented throughput tradeoff,
+    // and a run that quietly pays it should still say so.
+    const bounded = evaluateConcurrency({
+      ...collapsed,
+      configuredConcurrency: 10,
+      observedConcurrency: 10,
+      meanLatencyMs: 3_985,
+      platformHttpRequests: 209,
+      httpRateLimitWaitMs: 230_043,
+    });
+
+    expect(bounded.ceilings.http).toBe(5);
+    expect(bounded.findings.map(({ code }) => code)).toContain('http_rate_limited');
+  });
+
+  it('stays silent when the ceiling has room to spare', () => {
+    const roomy = evaluateConcurrency({
+      ...collapsed,
+      configuredConcurrency: 10,
+      observedConcurrency: 10,
+      httpRpmCeiling: 3_000,
+      meanLatencyMs: 1_500,
+      platformHttpRequests: 200,
+      httpRateLimitWaitMs: 0,
+    });
+
+    expect(roomy.ceilings.http).toBeGreaterThan(10);
+    expect(roomy.findings.map(({ code }) => code)).not.toContain('http_rate_limited');
+  });
+
+  it('reports no ceiling when none is configured or the run mixed platforms', () => {
+    expect(evaluateConcurrency({ ...collapsed, httpRpmCeiling: null }).ceilings.http).toBeNull();
+    expect(evaluateConcurrency({ ...collapsed, httpRpmCeiling: 0 }).ceilings.http).toBeNull();
+    expect(evaluateConcurrency(base).ceilings.http).toBeNull();
+  });
+
+  it('reports no ceiling before any job has completed', () => {
+    expect(evaluateConcurrency({ ...collapsed, completedJobs: 0 }).ceilings.http).toBeNull();
+  });
+});
+
 describe('evaluateConcurrency', () => {
   it.each([
     ['small input', { acceptedJobs: 3 }, 3, ['small_input']],
@@ -92,7 +171,7 @@ describe('formatConcurrencyFinding', () => {
     utilization: 0.4,
     saturated: false,
     achievable: 5,
-    ceilings: { configured: 10, input: 8, admission: 6, proxy: 5 },
+    ceilings: { configured: 10, input: 8, admission: 6, proxy: 5, http: 4 },
     minimum_proxy_capacity: 5,
     findings: [],
   };
@@ -101,6 +180,7 @@ describe('formatConcurrencyFinding', () => {
     ['small_input', /Input bounds concurrency/],
     ['admission_limited', /admission ceiling 6/],
     ['proxy_capacity_limited', /known capacity 5/],
+    ['http_rate_limited', /egress ceiling 4/],
     ['serialized', /Concurrency underused/],
     ['proxy_capacity_unknown', /capacity: unknown/],
   ] as const)('formats %s consistently', (code, expected) => {
