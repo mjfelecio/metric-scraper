@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Offline workload, traffic, worker, proxy, and cost planning for the metric scraper."
+    />
+    <title>Scraper Capacity Calculator</title>
+  </head>
+  <body class="min-h-full bg-slate-950 text-slate-200 antialiased">
+    <header class="border-b border-slate-800 bg-slate-950/90">
+      <div
+        class="mx-auto flex max-w-[1600px] flex-wrap items-start justify-between gap-4 px-6 py-6"
+      >
+        <div>
+          <p class="eyebrow">Metric Scraper</p>
+          <h1 class="text-3xl font-semibold tracking-tight text-white">Capacity calculator</h1>
+          <p class="mt-2 max-w-3xl text-sm text-slate-400">
+            Model lifecycle cohorts, retry-adjusted traffic, worker ceilings, static proxies, and
+            monthly costs. Calculations stay entirely in this browser tab.
+          </p>
+        </div>
+        <a class="dashboard-link" href="/">Development dashboard →</a>
+      </div>
+    </header>
+
+    <main class="mx-auto grid max-w-[1600px] gap-6 px-6 py-6 xl:grid-cols-[420px_minmax(0,1fr)]">
+      <aside>
+        <form id="capacity-form" class="space-y-4" novalidate>
+          <section class="panel">
+            <h2>Presets and workload</h2>
+            <div class="field-grid">
+              <label
+                >Platform preset<select id="platform-preset">
+                  <option value="tiktok">TikTok</option>
+                  <option value="instagram">Instagram</option>
+                  <option value="flat">TikTok · flat stress model</option>
+                  <option value="custom">Custom / unknown</option>
+                </select></label
+              >
+              <label
+                >Lifecycle preset<select id="lifecycle-preset">
+                  <option value="tapered">Tapered 30-day</option>
+                  <option value="flat">Flat 15-minute</option>
+                  <option value="custom">Custom</option>
+                </select></label
+              >
+              <label
+                >New submissions/day<input id="new-submissions" type="number" min="0" step="any"
+              /></label>
+              <label
+                >Simulation horizon (days)<input id="horizon-days" type="number" min="1" step="1"
+              /></label>
+              <label
+                >HTTP requests/job<input
+                  id="requests-per-job"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label
+                >Bytes/HTTP request<input
+                  id="bytes-per-request"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="section-heading">
+              <h2>Polling lifecycle</h2>
+              <button id="add-stage" type="button" class="secondary-button">Add stage</button>
+            </div>
+            <p class="help">
+              Intervals are start-to-start. Leave an interval blank to retain submissions without
+              polling.
+            </p>
+            <div id="lifecycle-stages" class="mt-3 space-y-3"></div>
+          </section>
+
+          <details class="panel" open>
+            <summary>Latency and reliability</summary>
+            <div class="field-grid details-body">
+              <label
+                >Mean job latency (ms)<input
+                  id="mean-job-latency"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label
+                >P95 job latency (ms)<input
+                  id="p95-job-latency"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label
+                >Mean HTTP latency (ms)<input
+                  id="mean-http-latency"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="not measured"
+              /></label>
+              <label
+                >P95 HTTP latency (ms)<input
+                  id="p95-http-latency"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="not measured"
+              /></label>
+              <label
+                >Retryable attempt success<input
+                  id="attempt-success-rate"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="any"
+              /></label>
+              <label
+                >Permanent failure share<input
+                  id="permanent-failure-share"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="any"
+              /></label>
+              <label
+                >Maximum attempts<input id="max-attempts" type="number" min="1" step="1"
+              /></label>
+              <label
+                >Initial backoff (ms)<input
+                  id="retry-initial-delay"
+                  type="number"
+                  min="0"
+                  step="any"
+              /></label>
+              <label
+                >Maximum backoff (ms)<input id="retry-max-delay" type="number" min="0" step="any"
+              /></label>
+              <label
+                >Backoff factor<input id="retry-factor" type="number" min="1" step="any"
+              /></label>
+              <label class="check-field"
+                ><input id="retry-jitter" type="checkbox" /> Full jitter</label
+              >
+            </div>
+          </details>
+
+          <details class="panel">
+            <summary>Workers and peak sizing</summary>
+            <div class="field-grid details-body">
+              <label
+                >Job target/min/worker<input id="job-target-rpm" type="number" min="0" step="any"
+              /></label>
+              <label
+                >Peak multiplier<input id="peak-multiplier" type="number" min="1" step="any"
+              /></label>
+              <label
+                >Peak jobs/min override<input
+                  id="peak-override"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="use multiplier"
+              /></label>
+              <label>Worker processes<input id="workers" type="number" min="1" step="1" /></label>
+              <label
+                >Job concurrency/worker<input
+                  id="worker-concurrency"
+                  type="number"
+                  min="1"
+                  step="1"
+              /></label>
+              <label
+                >HTTP RPM/host/worker<input
+                  id="http-rpm-limit"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unlimited / unknown"
+              /></label>
+            </div>
+          </details>
+
+          <details class="panel">
+            <summary>Static proxy pool</summary>
+            <div class="field-grid details-body">
+              <label
+                >Configured pool size<input id="proxy-pool-size" type="number" min="0" step="1"
+              /></label>
+              <label
+                >Concurrency/proxy<input
+                  id="proxy-concurrency-limit"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label
+                >Requests/min/proxy<input
+                  id="proxy-rpm-limit"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label
+                >Bytes/month/proxy<input
+                  id="proxy-bandwidth-limit"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label
+                >Probation concurrency<input id="proxy-probation" type="number" min="1" step="any"
+              /></label>
+              <label
+                >Earned concurrency/proxy<input
+                  id="proxy-earned"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label
+                >Safety margin (fraction)<input id="safety-margin" type="number" min="0" step="any"
+              /></label>
+            </div>
+          </details>
+
+          <details class="panel">
+            <summary>Cost and growth</summary>
+            <div class="field-grid details-body">
+              <label
+                >Price/bandwidth unit<input
+                  id="price-per-gb"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label
+                >Billing unit<select id="billing-unit">
+                  <option value="GB">GB (decimal)</option>
+                  <option value="GiB">GiB (binary)</option>
+                </select></label
+              >
+              <label class="check-field"
+                ><input id="bill-failed-attempts" type="checkbox" /> Failed attempts are
+                billed</label
+              >
+              <label
+                >Monthly price/proxy<input
+                  id="price-per-proxy"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label
+                >Fixed monthly pool price<input
+                  id="fixed-pool-price"
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="unknown"
+              /></label>
+              <label class="check-field"
+                ><input id="growth-enabled" type="checkbox" /> Compound growth</label
+              >
+              <label
+                >Monthly growth (fraction)<input id="growth-rate" type="number" min="0" step="any"
+              /></label>
+              <label
+                >Growth months<input id="growth-months" type="number" min="1" step="1"
+              /></label>
+            </div>
+          </details>
+        </form>
+      </aside>
+
+      <div class="min-w-0 space-y-6">
+        <section id="validation-results" class="validation-panel hidden"></section>
+
+        <section class="panel result-section">
+          <h2>Workload</h2>
+          <div id="overview-results" class="result-grid"></div>
+          <div id="workload-chart" class="chart"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Reliability</h2>
+          <div id="reliability-results" class="result-grid"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Logical jobs and HTTP traffic</h2>
+          <div id="traffic-results" class="result-grid"></div>
+          <div id="traffic-chart" class="chart"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Bandwidth</h2>
+          <p class="help">
+            GB is decimal (1,000,000,000 bytes). Monthly figures are 30-day steady-state run rates;
+            horizon totals follow the selected simulation.
+          </p>
+          <div id="bandwidth-results" class="result-grid"></div>
+          <div id="bandwidth-chart" class="chart"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Concurrency and peak</h2>
+          <div id="concurrency-results" class="result-grid"></div>
+          <div id="concurrency-chart" class="chart"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Workers</h2>
+          <div id="worker-results" class="result-grid"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Static proxies</h2>
+          <div id="proxy-results" class="result-grid"></div>
+          <div id="proxy-chart" class="chart"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Monthly cost</h2>
+          <div id="cost-results" class="result-grid"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Growth</h2>
+          <p class="help">Month 1 is the current baseline; growth compounds from month 2 onward.</p>
+          <div id="growth-results"></div>
+          <div id="growth-chart" class="chart"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Daily timeline</h2>
+          <div id="timeline-results"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Findings</h2>
+          <div id="findings-results" class="space-y-2"></div>
+        </section>
+        <section class="panel result-section">
+          <h2>Input provenance</h2>
+          <div id="provenance-results" class="provenance-grid"></div>
+        </section>
+      </div>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
