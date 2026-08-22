@@ -1,0 +1,386 @@
+@import 'tailwindcss';
+
+@layer components {
+  .panel {
+    @apply rounded-xl border border-slate-800 bg-slate-900/55 p-5 shadow-lg shadow-black/5;
+  }
+
+  .panel h2,
+  .panel summary {
+    @apply text-sm font-semibold uppercase tracking-wider text-slate-300;
+  }
+
+  .panel summary {
+    @apply cursor-pointer select-none;
+  }
+
+  .field-grid {
+    @apply mt-4 grid grid-cols-2 gap-3;
+  }
+
+  .field-grid > label,
+  .stage-fields > label {
+    @apply text-xs font-medium text-slate-400;
+  }
+
+  .field-grid input:not([type='checkbox']),
+  .field-grid select,
+  .stage-fields input {
+    @apply mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-sky-500;
+  }
+
+  .check-field {
+    @apply col-span-2 flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2.5;
+  }
+
+  .check-field input {
+    @apply h-4 w-4 accent-sky-500;
+  }
+
+  .help {
+    @apply mt-2 text-xs leading-relaxed text-slate-500;
+  }
+
+  .section-purpose {
+    @apply mt-2 max-w-3xl text-sm leading-relaxed text-slate-400;
+  }
+
+  .section-heading {
+    @apply flex items-center justify-between gap-3;
+  }
+
+  .secondary-button,
+  .stage-actions button {
+    @apply rounded-md border border-slate-700 px-2.5 py-1.5 text-xs text-slate-300 transition hover:border-sky-500 hover:text-sky-300;
+  }
+
+  .stage-row {
+    @apply rounded-lg border border-slate-800 bg-slate-950/45 p-3;
+  }
+
+  .stage-heading,
+  .stage-actions {
+    @apply flex items-center justify-between gap-2 text-xs text-slate-400;
+  }
+
+  .stage-heading input {
+    @apply mr-1 accent-sky-500;
+  }
+
+  .stage-fields {
+    @apply mt-3 grid grid-cols-[1.2fr_0.6fr_1fr] gap-2;
+  }
+
+  .result-grid {
+    @apply mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4;
+  }
+
+  .result-card {
+    @apply rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-3 transition;
+  }
+
+  .result-card.primary {
+    @apply border-sky-500/30 bg-sky-500/[0.07];
+  }
+
+  .result-card > .result-label {
+    @apply flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-slate-500;
+  }
+
+  .result-card > strong {
+    @apply mt-1 block font-mono text-lg font-medium text-slate-100;
+  }
+
+  .unavailable {
+    @apply relative inline-block cursor-help font-sans text-sm italic text-amber-300 outline-none;
+  }
+
+  .finding {
+    @apply flex gap-3 rounded-lg border px-3 py-3 text-sm;
+  }
+
+  .finding > span {
+    @apply h-fit rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide;
+  }
+
+  .finding p {
+    @apply mt-0.5 text-xs opacity-80;
+  }
+
+  .finding b {
+    @apply font-semibold;
+  }
+
+  .finding .finding-action {
+    @apply mt-1.5 opacity-100;
+  }
+
+  .finding.warning {
+    @apply border-amber-500/25 bg-amber-500/10 text-amber-200;
+  }
+
+  .finding.info {
+    @apply border-sky-500/20 bg-sky-500/10 text-sky-200;
+  }
+
+  .provenance-grid {
+    @apply mt-4 grid gap-2 md:grid-cols-2;
+  }
+
+  .provenance-row {
+    @apply flex items-center justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs;
+  }
+
+  .provenance-row strong,
+  .provenance-row code {
+    @apply block;
+  }
+
+  .provenance-row strong {
+    @apply font-medium text-slate-300;
+  }
+
+  .provenance-row code {
+    @apply mt-0.5 text-[10px] text-slate-600;
+  }
+
+  .provenance-badge {
+    @apply rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide;
+  }
+
+  .provenance-badge.measured {
+    @apply border-emerald-500/30 bg-emerald-500/10 text-emerald-300;
+  }
+
+  .provenance-badge.config {
+    @apply border-sky-500/30 bg-sky-500/10 text-sky-300;
+  }
+
+  .provenance-badge.assumption {
+    @apply border-violet-500/30 bg-violet-500/10 text-violet-300;
+  }
+
+  .provenance-badge.unset {
+    @apply border-amber-500/30 bg-amber-500/10 text-amber-300;
+  }
+
+  .table-wrap {
+    @apply mt-4 overflow-x-auto;
+  }
+
+  table {
+    @apply w-full min-w-[680px] border-collapse text-left text-xs;
+  }
+
+  th {
+    @apply border-b border-slate-700 px-3 py-2 font-semibold uppercase tracking-wider text-slate-500;
+  }
+
+  td {
+    @apply border-b border-slate-800 px-3 py-2 font-mono text-slate-300;
+  }
+
+  .explanation {
+    @apply mt-4 rounded-lg border border-slate-800 bg-slate-950/35 px-3 py-2.5;
+  }
+
+  .explanation > summary {
+    @apply cursor-pointer text-xs font-semibold normal-case tracking-normal text-sky-300;
+  }
+
+  .explanation[open] > summary {
+    @apply mb-2;
+  }
+
+  .explanation p {
+    @apply mt-2 max-w-4xl text-xs leading-relaxed text-slate-400;
+  }
+
+  .explanation.nested {
+    @apply col-span-2;
+  }
+
+  .formula-chain {
+    @apply mt-3 flex flex-wrap items-center gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2 font-mono text-xs text-slate-300;
+  }
+
+  .formula-chain span {
+    @apply text-sky-400;
+  }
+
+  .formula-chain.compact {
+    @apply max-w-xl;
+  }
+}
+
+.eyebrow {
+  @apply mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-sky-400;
+}
+
+.dashboard-link {
+  @apply rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 transition hover:border-sky-500 hover:text-sky-300;
+}
+
+.planning-summary {
+  @apply border-sky-500/25 bg-gradient-to-br from-sky-500/[0.08] to-slate-900/55;
+}
+
+.planning-summary .eyebrow {
+  margin-bottom: 0.25rem;
+}
+
+.planning-grid {
+  @apply lg:grid-cols-4;
+}
+
+.capacity-status {
+  @apply mt-4 rounded-lg border px-4 py-3 text-sm;
+}
+
+.capacity-status strong {
+  @apply font-semibold;
+}
+
+.capacity-status p {
+  @apply mt-1 text-xs leading-relaxed opacity-80;
+}
+
+.capacity-status.within-capacity {
+  @apply border-emerald-500/25 bg-emerald-500/10 text-emerald-200;
+}
+
+.capacity-status.at-capacity,
+.capacity-status.unavailable-capacity {
+  @apply border-amber-500/25 bg-amber-500/10 text-amber-200;
+}
+
+.capacity-status.over-capacity {
+  @apply border-rose-500/30 bg-rose-500/10 text-rose-200;
+}
+
+.relationship-map {
+  @apply mt-4 space-y-2 rounded-lg border border-slate-800 bg-slate-950/45 p-3;
+}
+
+.relationship-map > div {
+  @apply flex flex-wrap items-center gap-2 text-xs text-slate-400;
+}
+
+.relationship-map span {
+  @apply rounded bg-slate-800/70 px-2 py-1;
+}
+
+.relationship-map b {
+  @apply font-normal text-sky-400;
+}
+
+.concept-callout {
+  @apply mt-3 rounded-lg border border-sky-500/20 bg-sky-500/[0.06] px-3 py-2.5 text-xs leading-relaxed text-slate-300;
+}
+
+.info-tip {
+  @apply relative inline-flex h-4 w-4 shrink-0 cursor-help items-center justify-center rounded-full border border-slate-600 font-sans text-[10px] font-bold normal-case tracking-normal text-slate-400 outline-none transition hover:border-sky-400 hover:text-sky-300 focus:border-sky-400 focus:text-sky-300;
+}
+
+.input-info-tip {
+  @apply ml-1 align-middle;
+}
+
+.info-popover {
+  @apply invisible absolute left-1/2 top-[calc(100%+0.45rem)] z-30 w-72 -translate-x-1/2 rounded-lg border border-slate-700 bg-slate-900 p-3 text-left font-sans text-xs font-normal normal-case leading-relaxed tracking-normal text-slate-200 opacity-0 shadow-xl shadow-black/40 transition;
+  pointer-events: none;
+}
+
+.info-tip:hover .info-popover,
+.info-tip:focus .info-popover,
+.info-tip:focus-within .info-popover,
+.unavailable:hover .info-popover,
+.unavailable:focus .info-popover {
+  @apply visible opacity-100;
+}
+
+.unavailable-popover {
+  @apply not-italic;
+}
+
+.input-provenance {
+  @apply mt-2 flex flex-wrap items-center gap-2 border-t border-slate-700 pt-2 text-[10px] uppercase tracking-wide text-slate-500;
+}
+
+.provenance-legend {
+  @apply mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4;
+}
+
+.provenance-legend > div {
+  @apply rounded-lg border border-slate-800 bg-slate-950/45 p-3;
+}
+
+.provenance-legend p {
+  @apply mt-2 text-xs leading-relaxed text-slate-500;
+}
+
+.details-body {
+  padding-top: 0.25rem;
+}
+
+.validation-panel {
+  @apply rounded-xl border border-rose-500/30 bg-rose-500/10 p-5 text-sm text-rose-200;
+}
+
+.validation-panel h2 {
+  @apply font-semibold;
+}
+
+.validation-panel ul {
+  @apply mt-2 list-inside list-disc space-y-1;
+}
+
+.chart {
+  @apply mt-4 overflow-hidden rounded-lg border border-slate-800 bg-slate-950/45 p-2;
+}
+
+.chart svg {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+}
+
+.chart-axis {
+  stroke: var(--color-slate-700);
+  stroke-width: 1;
+}
+
+.chart-line {
+  fill: none;
+  stroke: var(--color-sky-400);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chart-bar {
+  fill: var(--color-sky-500);
+  opacity: 0.78;
+}
+
+.chart-label {
+  fill: var(--color-slate-500);
+  font-size: 10px;
+}
+
+.chart-value {
+  fill: var(--color-slate-300);
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+}
+
+.empty-state {
+  @apply text-sm text-slate-500;
+}
+
+@media (max-width: 520px) {
+  .field-grid,
+  .stage-fields {
+    grid-template-columns: 1fr;
+  }
+}

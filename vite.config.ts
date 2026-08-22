@@ -23,5 +23,11 @@ export default defineConfig({
     outDir: path.resolve(projectRoot, 'dist/web'),
     emptyOutDir: true,
     sourcemap: true,
+    rollupOptions: {
+      input: {
+        dashboard: path.resolve(projectRoot, 'src/web/index.html'),
+        capacity: path.resolve(projectRoot, 'src/web/capacity/index.html'),
+      },
+    },
   },
 });
