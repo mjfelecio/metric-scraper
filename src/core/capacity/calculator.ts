@@ -4,9 +4,16 @@ import {
   capacityProvenanceFor,
   DAYS_PER_MONTH,
   MINUTES_PER_DAY,
+  MS_PER_DAY,
   type CapacityInputs,
 } from './inputs.js';
-import { simulateCohorts, type CohortDay, type CohortSimulation } from './lifecycle.js';
+import {
+  simulateCohorts,
+  steadyStateJobsPerDay,
+  submissionRateForSteadyStateJobs,
+  type CohortDay,
+  type CohortSimulation,
+} from './lifecycle.js';
 import type { Provenance } from './provenance.js';
 import { evaluateReliability, type ReliabilityModel } from './reliability.js';
 import { validateCapacityInputs, type CapacityValidationIssue } from './validation.js';
@@ -123,6 +130,37 @@ export interface WorkloadSection {
   readonly activeLifecyclePlateauDay: number | null;
 }
 
+export type SystemCapacityConstraintKind =
+  | 'worker-concurrency'
+  | 'worker-job-target'
+  | 'worker-http-egress'
+  | 'proxy-concurrency'
+  | 'proxy-http-rpm'
+  | 'proxy-monthly-bandwidth';
+
+export interface SystemCapacityConstraint {
+  readonly kind: SystemCapacityConstraintKind;
+  readonly jobsPerDay: Maybe<number>;
+}
+
+export type CapacityWorkloadStatus =
+  'within-capacity' | 'at-capacity' | 'over-capacity' | 'unavailable';
+
+/** High-level operational answer, derived from the same lifecycle and limits as the detail views. */
+export interface CapacityWorkloadSection {
+  readonly currentSubmissionsPerDay: number;
+  readonly currentJobsPerDay: number;
+  readonly lifetimeScrapeJobsPerSubmission: number;
+  readonly sustainableJobsPerDay: Maybe<number>;
+  readonly utilization: Maybe<number>;
+  readonly headroomJobsPerDay: Maybe<number>;
+  readonly overCapacityJobsPerDay: Maybe<number>;
+  readonly maximumSustainableSubmissionsPerDay: Maybe<number>;
+  readonly bindingConstraint: SystemCapacityConstraintKind | null;
+  readonly constraints: readonly SystemCapacityConstraint[];
+  readonly status: CapacityWorkloadStatus;
+}
+
 export interface CapacitySimulationResult {
   readonly inputs: CapacityInputs;
   readonly valid: boolean;
@@ -131,6 +169,7 @@ export interface CapacitySimulationResult {
     readonly issues: readonly CapacityValidationIssue[];
   };
   readonly workload: WorkloadSection;
+  readonly capacityWorkload: CapacityWorkloadSection;
   readonly reliability: ReliabilityModel;
   readonly traffic: TrafficSection;
   readonly bandwidth: BandwidthSection;
@@ -159,7 +198,7 @@ export function simulateCapacity(input: CapacityInputs): CapacitySimulationResul
     horizonDays: input.horizonDays,
   });
   const reliability = evaluateReliability(input.reliability);
-  const runRateJobs = input.newSubmissionsPerDay * cohorts.profile.pollsPerSubmissionTotal;
+  const runRateJobs = steadyStateJobsPerDay(cohorts.profile, input.newSubmissionsPerDay);
   const runRateJobsPerMinute = runRateJobs / MINUTES_PER_DAY;
   const activeAtRunRate = input.newSubmissionsPerDay * cohorts.profile.lifecycleDays;
   const polledAtRunRate = input.newSubmissionsPerDay * cohorts.profile.polledLifecycleDays;
@@ -173,8 +212,10 @@ export function simulateCapacity(input: CapacityInputs): CapacitySimulationResul
   const bandwidth = calculateBandwidth(traffic, input.bytesPerHttpRequest);
   const peak = calculatePeak(input, runRateJobsPerMinute, reliability);
   const concurrency = calculateConcurrency(input, runRateJobsPerMinute, peak);
-  const workers = calculateWorkers(input, runRateJobsPerMinute, traffic, concurrency);
-  const proxy = calculateProxy(input, traffic, bandwidth, concurrency);
+  const unitCapacity = calculateUnitCapacityConstraints(input, reliability);
+  const workers = calculateWorkers(input, runRateJobs, unitCapacity);
+  const proxy = calculateProxy(input, runRateJobs, traffic, concurrency, unitCapacity);
+  const capacityWorkload = calculateCapacityWorkload(input, cohorts, runRateJobs, unitCapacity);
   const cost = calculateCost(input, traffic, bandwidth, reliability, proxy);
   const findings = buildFindings(
     input,
@@ -206,6 +247,7 @@ export function simulateCapacity(input: CapacityInputs): CapacitySimulationResul
     valid: issues.length === 0,
     validation: { valid: issues.length === 0, issues },
     workload,
+    capacityWorkload,
     reliability,
     traffic,
     bandwidth,
@@ -219,6 +261,61 @@ export function simulateCapacity(input: CapacityInputs): CapacitySimulationResul
     timeline,
     provenance: capacityProvenanceFor(input.platform),
     findings,
+  };
+}
+
+interface UnitCapacityConstraints {
+  readonly workerConcurrency: Maybe<number>;
+  readonly workerJobTarget: Maybe<number>;
+  readonly workerHttpEgress: Maybe<number> | null;
+  readonly proxyConcurrency: Maybe<number> | null;
+  readonly proxyHttpRpm: Maybe<number> | null;
+  readonly proxyMonthlyBandwidth: Maybe<number> | null;
+}
+
+function calculateUnitCapacityConstraints(
+  input: CapacityInputs,
+  reliability: ReliabilityModel,
+): UnitCapacityConstraints {
+  const adjustedRequestsPerJob = multiplyMaybe(
+    input.requestsPerJob,
+    reliability.attemptAmplification,
+    'requestsPerJob',
+  );
+  return {
+    workerConcurrency: jobsPerDayFromConcurrency(
+      input.capacity.concurrencyPerWorker,
+      input.meanJobLatencyMs,
+      'meanJobLatencyMs',
+    ),
+    workerJobTarget: computed(input.capacity.targetJobsPerMinute * MINUTES_PER_DAY),
+    workerHttpEgress:
+      input.capacity.httpRpmPerHost === null
+        ? null
+        : jobsPerDayFromHttpRpm(input.capacity.httpRpmPerHost, adjustedRequestsPerJob),
+    proxyConcurrency:
+      input.capacity.proxyLimits.maxConcurrentPerProxy === null
+        ? null
+        : jobsPerDayFromConcurrency(
+            input.capacity.proxyLimits.maxConcurrentPerProxy,
+            input.meanJobLatencyMs,
+            'meanJobLatencyMs',
+          ),
+    proxyHttpRpm:
+      input.capacity.proxyLimits.maxRequestsPerMinutePerProxy === null
+        ? null
+        : jobsPerDayFromHttpRpm(
+            input.capacity.proxyLimits.maxRequestsPerMinutePerProxy,
+            adjustedRequestsPerJob,
+          ),
+    proxyMonthlyBandwidth:
+      input.capacity.proxyLimits.maxBytesPerMonthPerProxy === null
+        ? null
+        : jobsPerDayFromMonthlyBytes(
+            input.capacity.proxyLimits.maxBytesPerMonthPerProxy,
+            adjustedRequestsPerJob,
+            input.bytesPerHttpRequest,
+          ),
   };
 }
 
@@ -353,28 +450,18 @@ function calculateConcurrency(
 
 function calculateWorkers(
   input: CapacityInputs,
-  jobsPerMinute: number,
-  traffic: TrafficSection,
-  concurrency: ConcurrencySection,
+  jobsPerDay: number,
+  unitCapacity: UnitCapacityConstraints,
 ): WorkerSection {
   const workers = input.capacity.workers;
-  const requiredByConcurrency = mapNumber(concurrency.averageJobs, (value) =>
-    Math.ceil(value / input.capacity.concurrencyPerWorker),
-  );
-  const requiredByJobTarget =
-    input.capacity.targetJobsPerMinute === 0
-      ? jobsPerMinute === 0
-        ? computed(0)
-        : notComputable('job target is zero', ['capacity.targetJobsPerMinute'])
-      : computed(Math.ceil(jobsPerMinute / input.capacity.targetJobsPerMinute));
-  const adjustedRpm = mapNumber(
-    traffic.adjustedHttpRequestsPerDay,
-    (value) => value / MINUTES_PER_DAY,
-  );
+  const requiredByConcurrency = requiredUnits(jobsPerDay, unitCapacity.workerConcurrency);
+  const requiredByJobTarget = requiredUnits(jobsPerDay, unitCapacity.workerJobTarget, [
+    'capacity.targetJobsPerMinute',
+  ]);
   const requiredByHttpEgress =
-    input.capacity.httpRpmPerHost === null
+    unitCapacity.workerHttpEgress === null
       ? notComputable('HTTP egress limit is not set', ['capacity.httpRpmPerHost'])
-      : mapNumber(adjustedRpm, (value) => Math.ceil(value / input.capacity.httpRpmPerHost!));
+      : requiredUnits(jobsPerDay, unitCapacity.workerHttpEgress);
   const known = [requiredByConcurrency, requiredByJobTarget, requiredByHttpEgress]
     .filter((value): value is { computable: true; value: number } => value.computable)
     .map((value) => value.value);
@@ -398,35 +485,37 @@ function calculateWorkers(
 
 function calculateProxy(
   input: CapacityInputs,
+  jobsPerDay: number,
   traffic: TrafficSection,
-  bandwidth: BandwidthSection,
   concurrency: ConcurrencySection,
+  unitCapacity: UnitCapacityConstraints,
 ): ProxySection {
-  const limits = input.capacity.proxyLimits;
   const concurrencyConstraint: ProxyConstraint = {
     kind: 'job-concurrency',
-    rawProxies: divideMaybe(
-      concurrency.averageJobs,
-      limits.maxConcurrentPerProxy,
-      'capacity.proxyLimits.maxConcurrentPerProxy',
-    ),
+    rawProxies:
+      unitCapacity.proxyConcurrency === null
+        ? notComputable('capacity.proxyLimits.maxConcurrentPerProxy is not set', [
+            'capacity.proxyLimits.maxConcurrentPerProxy',
+          ])
+        : requiredRawUnits(jobsPerDay, unitCapacity.proxyConcurrency),
   };
-  const rpm = mapNumber(traffic.adjustedHttpRequestsPerDay, (value) => value / MINUTES_PER_DAY);
   const rpmConstraint: ProxyConstraint = {
     kind: 'http-rpm',
-    rawProxies: divideMaybe(
-      rpm,
-      limits.maxRequestsPerMinutePerProxy,
-      'capacity.proxyLimits.maxRequestsPerMinutePerProxy',
-    ),
+    rawProxies:
+      unitCapacity.proxyHttpRpm === null
+        ? notComputable('capacity.proxyLimits.maxRequestsPerMinutePerProxy is not set', [
+            'capacity.proxyLimits.maxRequestsPerMinutePerProxy',
+          ])
+        : requiredRawUnits(jobsPerDay, unitCapacity.proxyHttpRpm),
   };
   const bandwidthConstraint: ProxyConstraint = {
     kind: 'monthly-bandwidth',
-    rawProxies: divideMaybe(
-      bandwidth.adjustedBytesPerMonth,
-      limits.maxBytesPerMonthPerProxy,
-      'capacity.proxyLimits.maxBytesPerMonthPerProxy',
-    ),
+    rawProxies:
+      unitCapacity.proxyMonthlyBandwidth === null
+        ? notComputable('capacity.proxyLimits.maxBytesPerMonthPerProxy is not set', [
+            'capacity.proxyLimits.maxBytesPerMonthPerProxy',
+          ])
+        : requiredRawUnits(jobsPerDay, unitCapacity.proxyMonthlyBandwidth),
   };
   const constraints = [concurrencyConstraint, rpmConstraint, bandwidthConstraint];
   const available = constraints.filter(
@@ -477,6 +566,104 @@ function calculateProxy(
       configured === 0
         ? notComputable('configured proxy pool is empty', ['capacity.proxyPoolSize'])
         : mapNumber(concurrency.averageJobs, (value) => value / configured),
+  };
+}
+
+function calculateCapacityWorkload(
+  input: CapacityInputs,
+  cohorts: CohortSimulation,
+  currentJobsPerDay: number,
+  unitCapacity: UnitCapacityConstraints,
+): CapacityWorkloadSection {
+  const constraints: SystemCapacityConstraint[] = [
+    {
+      kind: 'worker-concurrency',
+      jobsPerDay: scaleCapacity(unitCapacity.workerConcurrency, input.capacity.workers),
+    },
+    {
+      kind: 'worker-job-target',
+      jobsPerDay: scaleCapacity(unitCapacity.workerJobTarget, input.capacity.workers),
+    },
+  ];
+  if (unitCapacity.workerHttpEgress !== null) {
+    constraints.push({
+      kind: 'worker-http-egress',
+      jobsPerDay: scaleCapacity(unitCapacity.workerHttpEgress, input.capacity.workers),
+    });
+  }
+  if (unitCapacity.proxyConcurrency !== null) {
+    constraints.push({
+      kind: 'proxy-concurrency',
+      jobsPerDay: scaleCapacity(unitCapacity.proxyConcurrency, input.capacity.proxyPoolSize),
+    });
+  }
+  if (unitCapacity.proxyHttpRpm !== null) {
+    constraints.push({
+      kind: 'proxy-http-rpm',
+      jobsPerDay: scaleCapacity(unitCapacity.proxyHttpRpm, input.capacity.proxyPoolSize),
+    });
+  }
+  if (unitCapacity.proxyMonthlyBandwidth !== null) {
+    constraints.push({
+      kind: 'proxy-monthly-bandwidth',
+      jobsPerDay: scaleCapacity(unitCapacity.proxyMonthlyBandwidth, input.capacity.proxyPoolSize),
+    });
+  }
+
+  const unavailableConstraints = constraints.filter(({ jobsPerDay }) => !jobsPerDay.computable);
+  const missing = [
+    ...new Set(
+      unavailableConstraints.flatMap(({ jobsPerDay }) =>
+        jobsPerDay.computable ? [] : jobsPerDay.missing,
+      ),
+    ),
+  ];
+  const sustainableJobsPerDay: Maybe<number> =
+    unavailableConstraints.length > 0
+      ? notComputable(
+          `sustainable capacity needs ${missing.length > 0 ? missing.join(', ') : 'additional infrastructure measurements'}`,
+          missing,
+        )
+      : computed(
+          Math.min(
+            ...constraints.map(({ jobsPerDay }) =>
+              jobsPerDay.computable ? jobsPerDay.value : Number.POSITIVE_INFINITY,
+            ),
+          ),
+        );
+  const bindingConstraint = sustainableJobsPerDay.computable
+    ? (constraints.find(
+        ({ jobsPerDay }) =>
+          jobsPerDay.computable && jobsPerDay.value === sustainableJobsPerDay.value,
+      )?.kind ?? null)
+    : null;
+  const utilization = mapCapacity(sustainableJobsPerDay, (capacity) => {
+    if (capacity === 0) return currentJobsPerDay === 0 ? 0 : null;
+    return currentJobsPerDay / capacity;
+  });
+  const headroomJobsPerDay = mapNumber(sustainableJobsPerDay, (capacity) =>
+    Math.max(0, capacity - currentJobsPerDay),
+  );
+  const overCapacityJobsPerDay = mapNumber(sustainableJobsPerDay, (capacity) =>
+    Math.max(0, currentJobsPerDay - capacity),
+  );
+  const maximumSustainableSubmissionsPerDay = sustainableJobsPerDay.computable
+    ? maximumSubmissionRate(cohorts, sustainableJobsPerDay.value)
+    : sustainableJobsPerDay;
+  const status = capacityStatus(currentJobsPerDay, sustainableJobsPerDay);
+
+  return {
+    currentSubmissionsPerDay: input.newSubmissionsPerDay,
+    currentJobsPerDay,
+    lifetimeScrapeJobsPerSubmission: cohorts.profile.pollsPerSubmissionTotal,
+    sustainableJobsPerDay,
+    utilization,
+    headroomJobsPerDay,
+    overCapacityJobsPerDay,
+    maximumSustainableSubmissionsPerDay,
+    bindingConstraint,
+    constraints,
+    status,
   };
 }
 
@@ -693,18 +880,115 @@ function multiplyMaybeValue(
     : computed(value.value * factor * extraFactor);
 }
 
+function jobsPerDayFromConcurrency(
+  concurrency: number,
+  latencyMs: number | null,
+  latencyPath: string,
+): Maybe<number> {
+  if (latencyMs === null) return notComputable(`${latencyPath} is not set`, [latencyPath]);
+  if (latencyMs <= 0)
+    return notComputable(`${latencyPath} must be greater than zero`, [latencyPath]);
+  return computed((concurrency * MS_PER_DAY) / latencyMs);
+}
+
+function jobsPerDayFromHttpRpm(
+  requestsPerMinute: number,
+  adjustedRequestsPerJob: Maybe<number>,
+): Maybe<number> {
+  if (!adjustedRequestsPerJob.computable) return adjustedRequestsPerJob;
+  if (adjustedRequestsPerJob.value <= 0) {
+    return notComputable('requestsPerJob must be greater than zero', ['requestsPerJob']);
+  }
+  return computed((requestsPerMinute * MINUTES_PER_DAY) / adjustedRequestsPerJob.value);
+}
+
+function jobsPerDayFromMonthlyBytes(
+  bytesPerMonth: number,
+  adjustedRequestsPerJob: Maybe<number>,
+  bytesPerRequest: number | null,
+): Maybe<number> {
+  if (!adjustedRequestsPerJob.computable) return adjustedRequestsPerJob;
+  if (bytesPerRequest === null) {
+    return notComputable('bytesPerHttpRequest is not set', ['bytesPerHttpRequest']);
+  }
+  const bytesPerJob = adjustedRequestsPerJob.value * bytesPerRequest;
+  if (bytesPerJob <= 0) {
+    return notComputable('bytes per logical job must be greater than zero', [
+      'requestsPerJob',
+      'bytesPerHttpRequest',
+    ]);
+  }
+  return computed(bytesPerMonth / DAYS_PER_MONTH / bytesPerJob);
+}
+
+function requiredRawUnits(jobsPerDay: number, unitCapacity: Maybe<number>): Maybe<number> {
+  if (!unitCapacity.computable) return unitCapacity;
+  if (unitCapacity.value <= 0) {
+    return jobsPerDay === 0 ? computed(0) : notComputable('configured unit capacity is zero');
+  }
+  return computed(jobsPerDay / unitCapacity.value);
+}
+
+function requiredUnits(
+  jobsPerDay: number,
+  unitCapacity: Maybe<number>,
+  zeroCapacityPaths: readonly string[] = [],
+): Maybe<number> {
+  const raw = requiredRawUnits(jobsPerDay, unitCapacity);
+  if (!raw.computable) {
+    return raw.missing.length === 0 && zeroCapacityPaths.length > 0
+      ? notComputable('configured unit capacity is zero', zeroCapacityPaths)
+      : raw;
+  }
+  return computed(Math.ceil(raw.value));
+}
+
+function scaleCapacity(unitCapacity: Maybe<number>, units: number): Maybe<number> {
+  if (units === 0) return computed(0);
+  return mapNumber(unitCapacity, (value) => value * units);
+}
+
+function mapCapacity(
+  capacity: Maybe<number>,
+  project: (capacity: number) => number | null,
+): Maybe<number> {
+  if (!capacity.computable) return capacity;
+  const value = project(capacity.value);
+  return value === null
+    ? notComputable('sustainable capacity is zero, so utilization is undefined')
+    : computed(value);
+}
+
+function maximumSubmissionRate(
+  cohorts: CohortSimulation,
+  sustainableJobsPerDay: number,
+): Maybe<number> {
+  const rate = submissionRateForSteadyStateJobs(cohorts.profile, sustainableJobsPerDay);
+  return rate === null
+    ? notComputable(
+        'the polling lifecycle creates no jobs, so scraper capacity does not bound submissions',
+        ['stages'],
+      )
+    : computed(rate);
+}
+
+function capacityStatus(
+  currentJobsPerDay: number,
+  sustainableJobsPerDay: Maybe<number>,
+): CapacityWorkloadStatus {
+  if (!sustainableJobsPerDay.computable) return 'unavailable';
+  const tolerance = Math.max(1e-9, sustainableJobsPerDay.value * 1e-9);
+  if (Math.abs(currentJobsPerDay - sustainableJobsPerDay.value) <= tolerance) {
+    return 'at-capacity';
+  }
+  return currentJobsPerDay > sustainableJobsPerDay.value ? 'over-capacity' : 'within-capacity';
+}
+
 function multiplyPrice(value: Maybe<number>, price: number | null, path: string): Maybe<number> {
   if (!value.computable) return value;
   return price === null
     ? notComputable(`${path} is not set`, [path])
     : computed(value.value * price);
-}
-
-function divideMaybe(value: Maybe<number>, divisor: number | null, path: string): Maybe<number> {
-  if (!value.computable) return value;
-  return divisor === null
-    ? notComputable(`${path} is not set`, [path])
-    : computed(value.value / divisor);
 }
 
 function mapNumber(value: Maybe<number>, project: (value: number) => number): Maybe<number> {

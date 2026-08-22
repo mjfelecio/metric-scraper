@@ -40,6 +40,30 @@ export interface LifecycleProfile {
 }
 
 /**
+ * Closed-form steady workload for an arrival rate, using the exact poll
+ * instants counted by {@link buildLifecycleProfile}.
+ *
+ * The multiplier here is a derived property of the current lifecycle, never a
+ * user-configured "scrapes per submission" assumption. Changing a stage
+ * immediately changes the profile and therefore this result.
+ */
+export function steadyStateJobsPerDay(
+  profile: LifecycleProfile,
+  newSubmissionsPerDay: number,
+): number {
+  return Math.max(0, newSubmissionsPerDay) * profile.pollsPerSubmissionTotal;
+}
+
+/** Analytical inverse of {@link steadyStateJobsPerDay} for the same profile. */
+export function submissionRateForSteadyStateJobs(
+  profile: LifecycleProfile,
+  jobsPerDay: number,
+): number | null {
+  if (profile.pollsPerSubmissionTotal <= 0) return null;
+  return Math.max(0, jobsPerDay) / profile.pollsPerSubmissionTotal;
+}
+
+/**
  * Poll instants in a standalone day, including the instant at the day start.
  *
  * This compatibility helper answers only for the first day. Lifecycle

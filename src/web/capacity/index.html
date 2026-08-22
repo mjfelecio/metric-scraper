@@ -376,23 +376,38 @@
 
         <section class="panel planning-summary">
           <p class="eyebrow">Start here</p>
-          <h2>Planning snapshot</h2>
+          <h2>Capacity &amp; Workload</h2>
           <p class="section-purpose">
-            The six decision metrics most operators need first. Use the sections below to inspect
-            how the model reached them and which inputs still need validation.
+            See whether the actual polling lifecycle fits the configured infrastructure, and how
+            many new submissions/day it can sustainably support.
           </p>
           <div id="planning-summary-results" class="result-grid planning-grid"></div>
+          <div id="capacity-workload-status"></div>
           <div class="relationship-map" aria-label="Calculation relationships">
             <div>
-              <span>Submissions/day</span><b>→</b><span>polling lifecycle</span><b>→</b
-              ><span>logical jobs</span><b>→</b><span>HTTP attempts</span><b>→</b
-              ><span>bandwidth</span><b>→</b><span>cost</span>
+              <span>New submissions/day</span><b>→</b><span>polling lifecycle</span><b>→</b
+              ><span>active cohorts</span><b>→</b><span>steady-state jobs/day</span><b>→</b
+              ><span>compare with infrastructure</span>
             </div>
             <div>
-              <span>Throughput + latency</span><b>→</b><span>in-flight concurrency</span><b>→</b
-              ><span>workers</span><b>→</b><span>static proxy capacity</span>
+              <span>Worker limits</span><b>+</b><span>static proxy limits</span><b>→</b
+              ><span>binding constraint</span><b>→</b><span>maximum submissions/day</span>
             </div>
           </div>
+          <details class="explanation">
+            <summary>How is this calculated?</summary>
+            <p>
+              Workload comes from the configured polling lifecycle, not a fixed
+              scrapes-per-submission input. New submissions form age-based cohorts, and every
+              scheduled poll creates one logical scrape job.
+            </p>
+            <p>
+              Sustainable capacity is the lowest steady-state ceiling across configured worker and
+              static-proxy constraints. The calculator then inverts the same lifecycle model to find
+              the arrival rate that reaches that ceiling. Peak metrics remain separate because they
+              describe bursts rather than sustainable run rate.
+            </p>
+          </details>
         </section>
 
         <section class="panel result-section">

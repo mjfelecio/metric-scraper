@@ -128,4 +128,136 @@ describe('capacity calculator', () => {
     expect(result.workers.requiredByConcurrency).toEqual({ computable: true, value: 3 });
     expect(result.workers.requiredByHttpEgress).toEqual({ computable: true, value: 2 });
   });
+
+  describe('capacity and workload derivation', () => {
+    it('uses the lifecycle workload and reports current over-capacity demand', () => {
+      const result = simulateCapacity(DEFAULT_CAPACITY_INPUTS);
+      expect(result.capacityWorkload.currentJobsPerDay).toBe(result.traffic.logicalJobsPerDay);
+      expect(result.capacityWorkload.lifetimeScrapeJobsPerSubmission).toBe(700);
+      expect(result.capacityWorkload.bindingConstraint).toBe('worker-concurrency');
+      expect(result.capacityWorkload.status).toBe('over-capacity');
+      expect(result.capacityWorkload.overCapacityJobsPerDay.computable).toBe(true);
+    });
+
+    it('raises modeled workload when submissions increase', () => {
+      const baseline = simulateCapacity(DEFAULT_CAPACITY_INPUTS);
+      const increased = simulateCapacity(withInput({ newSubmissionsPerDay: 750 }));
+      expect(increased.capacityWorkload.currentJobsPerDay).toBeGreaterThan(
+        baseline.capacityWorkload.currentJobsPerDay,
+      );
+      expect(increased.capacityWorkload.sustainableJobsPerDay).toEqual(
+        baseline.capacityWorkload.sustainableJobsPerDay,
+      );
+    });
+
+    it('raises maximum sustainable submissions when infrastructure capacity increases', () => {
+      const baseline = simulateCapacity(DEFAULT_CAPACITY_INPUTS);
+      const expanded = simulateCapacity(
+        withInput({
+          capacity: { ...DEFAULT_CAPACITY_INPUTS.capacity, workers: 2 },
+        }),
+      );
+      expect(baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.computable).toBe(true);
+      expect(expanded.capacityWorkload.maximumSustainableSubmissionsPerDay.computable).toBe(true);
+      if (
+        baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.computable &&
+        expanded.capacityWorkload.maximumSustainableSubmissionsPerDay.computable
+      ) {
+        expect(expanded.capacityWorkload.maximumSustainableSubmissionsPerDay.value).toBeGreaterThan(
+          baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.value,
+        );
+      }
+    });
+
+    it('lowers maximum arrivals when polling becomes more frequent', () => {
+      const baseline = simulateCapacity(DEFAULT_CAPACITY_INPUTS);
+      const frequent = simulateCapacity(
+        withInput({
+          stages: DEFAULT_CAPACITY_INPUTS.stages.map((stage, index) =>
+            index === 0 && stage.intervalMs !== null
+              ? { ...stage, intervalMs: stage.intervalMs / 2 }
+              : stage,
+          ),
+        }),
+      );
+      expect(frequent.capacityWorkload.currentJobsPerDay).toBeGreaterThan(
+        baseline.capacityWorkload.currentJobsPerDay,
+      );
+      if (
+        baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.computable &&
+        frequent.capacityWorkload.maximumSustainableSubmissionsPerDay.computable
+      ) {
+        expect(frequent.capacityWorkload.maximumSustainableSubmissionsPerDay.value).toBeLessThan(
+          baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.value,
+        );
+      }
+    });
+
+    it('raises maximum arrivals when polling becomes less frequent', () => {
+      const baseline = simulateCapacity(DEFAULT_CAPACITY_INPUTS);
+      const lessFrequent = simulateCapacity(
+        withInput({
+          stages: DEFAULT_CAPACITY_INPUTS.stages.map((stage) => ({
+            ...stage,
+            intervalMs: stage.intervalMs === null ? null : stage.intervalMs * 2,
+          })),
+        }),
+      );
+      expect(lessFrequent.capacityWorkload.currentJobsPerDay).toBeLessThan(
+        baseline.capacityWorkload.currentJobsPerDay,
+      );
+      if (
+        baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.computable &&
+        lessFrequent.capacityWorkload.maximumSustainableSubmissionsPerDay.computable
+      ) {
+        expect(
+          lessFrequent.capacityWorkload.maximumSustainableSubmissionsPerDay.value,
+        ).toBeGreaterThan(baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.value);
+      }
+    });
+
+    it('uses the configured infrastructure binding constraint', () => {
+      const proxyBound = simulateCapacity(
+        withInput({
+          capacity: {
+            ...DEFAULT_CAPACITY_INPUTS.capacity,
+            workers: 100,
+            proxyPoolSize: 1,
+          },
+        }),
+      );
+      expect(proxyBound.capacityWorkload.bindingConstraint).toBe('proxy-concurrency');
+    });
+
+    it('makes capacity and maximum arrivals unavailable when an applicable input is missing', () => {
+      const result = simulateCapacity(withInput({ meanJobLatencyMs: null }));
+      expect(result.capacityWorkload.sustainableJobsPerDay).toMatchObject({
+        computable: false,
+        missing: ['meanJobLatencyMs'],
+      });
+      expect(result.capacityWorkload.maximumSustainableSubmissionsPerDay.computable).toBe(false);
+      expect(result.capacityWorkload.status).toBe('unavailable');
+    });
+
+    it('shows zero headroom when workload exactly matches sustainable capacity', () => {
+      const baseline = simulateCapacity(DEFAULT_CAPACITY_INPUTS);
+      expect(baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.computable).toBe(true);
+      if (!baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.computable) return;
+      const matched = simulateCapacity(
+        withInput({
+          newSubmissionsPerDay: baseline.capacityWorkload.maximumSustainableSubmissionsPerDay.value,
+        }),
+      );
+      expect(matched.capacityWorkload.status).toBe('at-capacity');
+      expect(matched.capacityWorkload.headroomJobsPerDay).toEqual({ computable: true, value: 0 });
+    });
+
+    it('does not require or expose a fixed scrapes-per-submission input', () => {
+      expect(DEFAULT_CAPACITY_INPUTS).not.toHaveProperty('scrapesPerSubmission');
+      expect(DEFAULT_CAPACITY_INPUTS).not.toHaveProperty('lifetimeScrapeJobsPerSubmission');
+      expect(simulateCapacity(DEFAULT_CAPACITY_INPUTS).capacityWorkload).toHaveProperty(
+        'lifetimeScrapeJobsPerSubmission',
+      );
+    });
+  });
 });

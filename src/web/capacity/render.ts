@@ -1,4 +1,9 @@
-import { formatProvenance, type Maybe, type Provenance } from '../../core/capacity/index.js';
+import {
+  formatProvenance,
+  type Maybe,
+  type Provenance,
+  type SystemCapacityConstraintKind,
+} from '../../core/capacity/index.js';
 
 import { renderCapacityCharts } from './charts.js';
 import {
@@ -147,47 +152,67 @@ function renderValidation(state: CapacityState): void {
 
 function renderResults(state: CapacityState): void {
   const { result } = state;
+  const capacityWorkload = result.capacityWorkload;
+  const isOverCapacity = capacityWorkload.status === 'over-capacity';
   setHtml(
     'planning-summary-results',
     cards([
       metric(
-        'logicalJobsDay',
-        'Logical jobs/day',
-        formatNumber(result.traffic.logicalJobsPerDay),
+        'currentSubmissionsDay',
+        'Current workload',
+        `${formatNumber(capacityWorkload.currentSubmissionsPerDay)} submissions/day`,
         true,
       ),
       metric(
-        'adjustedHttpDay',
-        'HTTP requests/day',
-        formatMaybe(result.traffic.adjustedHttpRequestsPerDay),
+        'steadyStateJobsDay',
+        'Steady-state workload',
+        `${formatNumber(capacityWorkload.currentJobsPerDay)} jobs/day`,
         true,
       ),
       metric(
-        'adjustedBandwidthMonth',
-        'Bandwidth/month',
-        formatMaybe(result.bandwidth.adjustedGbPerMonth, ' GB'),
+        'sustainableJobsDay',
+        'Sustainable system capacity',
+        formatMaybe(capacityWorkload.sustainableJobsPerDay, ' jobs/day'),
         true,
       ),
       metric(
-        'recommendedWorkers',
-        'Recommended workers',
-        formatMaybe(result.workers.recommendedWorkers, '', 0),
+        'capacityUtilization',
+        'Capacity utilization',
+        formatMaybePercent(capacityWorkload.utilization),
         true,
       ),
       metric(
-        'recommendedProxies',
-        'Recommended proxies',
-        formatMaybe(result.proxy.recommendedProxies, '', 0),
+        isOverCapacity ? 'overCapacityJobsDay' : 'capacityHeadroom',
+        isOverCapacity ? 'Over capacity' : 'Headroom',
+        formatMaybe(
+          isOverCapacity
+            ? capacityWorkload.overCapacityJobsPerDay
+            : capacityWorkload.headroomJobsPerDay,
+          ' jobs/day',
+        ),
         true,
       ),
       metric(
-        'totalCost',
-        'Estimated monthly cost',
-        formatMoneyMaybe(result.cost.totalMonthly),
+        'maximumSubmissionsDay',
+        'Maximum sustainable submissions/day',
+        formatMaybe(capacityWorkload.maximumSustainableSubmissionsPerDay, '/day', 0),
         true,
+      ),
+      metric(
+        'systemBindingConstraint',
+        'Binding constraint',
+        capacityWorkload.bindingConstraint === null
+          ? unavailable('sustainable infrastructure capacity is unavailable')
+          : systemConstraintLabel(capacityWorkload.bindingConstraint),
+      ),
+      metric(
+        'lifetimeScrapesPerSubmission',
+        'Lifetime scrapes/submission',
+        formatNumber(capacityWorkload.lifetimeScrapeJobsPerSubmission, 0),
       ),
     ]),
   );
+  setHtml('capacity-workload-status', capacityWorkloadStatus(state));
   setHtml(
     'overview-results',
     cards([
@@ -500,6 +525,43 @@ function renderResults(state: CapacityState): void {
       )
       .join('')}</tbody></table></div>`,
   );
+}
+
+function capacityWorkloadStatus(state: CapacityState): string {
+  const summary = state.result.capacityWorkload;
+  if (!summary.sustainableJobsPerDay.computable) {
+    return `<div class="capacity-status unavailable-capacity"><strong>Capacity unavailable</strong><p>${escapeHtml(summary.sustainableJobsPerDay.reason)}. Supply the missing measurement before relying on a maximum submission rate.</p></div>`;
+  }
+
+  const current = formatNumber(summary.currentJobsPerDay);
+  const capacity = formatNumber(summary.sustainableJobsPerDay.value);
+  if (summary.status === 'over-capacity') {
+    const over = summary.overCapacityJobsPerDay.computable
+      ? formatNumber(summary.overCapacityJobsPerDay.value)
+      : 'unknown';
+    return `<div class="capacity-status over-capacity"><strong>Current workload exceeds sustainable capacity</strong><p>The configured lifecycle produces ${current} jobs/day, while current infrastructure sustains approximately ${capacity}. Reduce workload or add capacity for the ${over} jobs/day shortfall.</p></div>`;
+  }
+  if (summary.status === 'at-capacity') {
+    return `<div class="capacity-status at-capacity"><strong>Current workload exactly matches modeled capacity</strong><p>The lifecycle produces ${current} jobs/day and leaves zero modeled headroom.</p></div>`;
+  }
+
+  const headroom = summary.headroomJobsPerDay.computable
+    ? formatNumber(summary.headroomJobsPerDay.value)
+    : 'unknown';
+  const lowUtilization = summary.utilization.computable && summary.utilization.value < 0.25;
+  return `<div class="capacity-status within-capacity"><strong>Current workload is within modeled capacity</strong><p>The lifecycle produces ${current} jobs/day against approximately ${capacity} jobs/day of sustainable infrastructure capacity, leaving ${headroom} jobs/day of headroom.${lowUtilization ? ' Low utilization indicates available headroom; it is not a recommendation to scale down.' : ''}</p></div>`;
+}
+
+function systemConstraintLabel(constraint: SystemCapacityConstraintKind): string {
+  const labels = {
+    'worker-concurrency': 'Worker concurrency',
+    'worker-job-target': 'Worker job admission',
+    'worker-http-egress': 'Worker HTTP egress',
+    'proxy-concurrency': 'Proxy concurrency',
+    'proxy-http-rpm': 'Proxy HTTP RPM',
+    'proxy-monthly-bandwidth': 'Proxy monthly bandwidth',
+  } as const;
+  return labels[constraint];
 }
 
 function renderFindings(state: CapacityState): void {

@@ -27,7 +27,8 @@ describe('capacity page structure', () => {
 
   it('uses progressive contextual help instead of a detached documentation wall', async () => {
     const page = await readFile('src/web/capacity/index.html', 'utf8');
-    expect(page).toContain('Planning snapshot');
+    expect(page).toContain('Capacity &amp; Workload');
+    expect(page).toContain('How is this calculated?');
     expect(page).toContain('Keep these units separate');
     expect(page).toContain('Throughput is not concurrency');
     expect(page).toContain('Why theoretical and recommended counts differ');

@@ -230,7 +230,32 @@
 }
 
 .planning-grid {
-  @apply lg:grid-cols-3;
+  @apply lg:grid-cols-4;
+}
+
+.capacity-status {
+  @apply mt-4 rounded-lg border px-4 py-3 text-sm;
+}
+
+.capacity-status strong {
+  @apply font-semibold;
+}
+
+.capacity-status p {
+  @apply mt-1 text-xs leading-relaxed opacity-80;
+}
+
+.capacity-status.within-capacity {
+  @apply border-emerald-500/25 bg-emerald-500/10 text-emerald-200;
+}
+
+.capacity-status.at-capacity,
+.capacity-status.unavailable-capacity {
+  @apply border-amber-500/25 bg-amber-500/10 text-amber-200;
+}
+
+.capacity-status.over-capacity {
+  @apply border-rose-500/30 bg-rose-500/10 text-rose-200;
 }
 
 .relationship-map {

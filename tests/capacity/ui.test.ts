@@ -28,12 +28,17 @@ describe('capacity UI state', () => {
 
   it('adds, removes, reorders, and disables lifecycle stages', () => {
     const store = new CapacityStore();
+    const initialMaximum =
+      store.getState().result.capacityWorkload.maximumSustainableSubmissionsPerDay;
     store.addStage();
     expect(store.getState().inputs.stages).toHaveLength(4);
     store.moveStage(3, -1);
     expect(store.getState().inputs.stages[2]?.label).toBe('Stage 4');
     store.updateStage(0, { enabled: false });
     expect(store.getState().result.workload.cohorts.profile.lifecycleDays).toBe(24);
+    expect(
+      store.getState().result.capacityWorkload.maximumSustainableSubmissionsPerDay,
+    ).not.toEqual(initialMaximum);
     store.removeStage(2);
     expect(store.getState().inputs.stages).toHaveLength(3);
   });
@@ -88,7 +93,13 @@ describe('capacity result rendering', () => {
 
     const summary = elements.get('planning-summary-results')?.innerHTML ?? '';
     expect(summary.match(/result-card primary/g)).toHaveLength(6);
-    expect(summary).toContain('Recommended proxies');
+    expect(summary).toContain('Maximum sustainable submissions/day');
+    expect(summary).toContain('Worker concurrency');
+    expect(summary).toContain('Lifetime scrapes/submission');
+
+    const status = elements.get('capacity-workload-status')?.innerHTML ?? '';
+    expect(status).toContain('Current workload exceeds sustainable capacity');
+    expect(status).toContain('350,000 jobs/day');
 
     const reliability = elements.get('reliability-results')?.innerHTML ?? '';
     expect(reliability).toContain('Eventual job success');
@@ -126,6 +137,19 @@ describe('capacity result rendering', () => {
     );
     expect(Object.values(charts)).toHaveLength(6);
     expect(Object.values(charts).join('')).not.toContain('NaN');
+  });
+
+  it('renders an honest unavailable high-level capacity state', () => {
+    const store = new CapacityStore({ ...DEFAULT_CAPACITY_INPUTS, meanJobLatencyMs: null });
+    renderCapacity(store.getState());
+
+    const summary = elements.get('planning-summary-results')?.innerHTML ?? '';
+    const status = elements.get('capacity-workload-status')?.innerHTML ?? '';
+    expect(summary).toContain('Maximum sustainable submissions/day');
+    expect(summary).toContain('Unavailable');
+    expect(status).toContain('Capacity unavailable');
+    expect(status).toContain('meanJobLatencyMs');
+    expect(`${summary}${status}`).not.toContain('NaN');
   });
 });
 
@@ -181,5 +205,7 @@ describe('capacity documentation coverage', () => {
     expect(METRIC_DOCUMENTATION.attemptAmplification).toContain('multiply HTTP requests');
     expect(METRIC_DOCUMENTATION.totalCost).toContain('unavailable');
     expect(METRIC_DOCUMENTATION.bindingConstraint).toContain('largest pool');
+    expect(METRIC_DOCUMENTATION.maximumSubmissionsDay).toContain('polling profile');
+    expect(METRIC_DOCUMENTATION.systemBindingConstraint).toContain('lowest');
   });
 });

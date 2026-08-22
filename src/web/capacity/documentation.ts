@@ -229,6 +229,24 @@ export const INPUT_DOCUMENTATION: readonly InputDocumentation[] = [
 ];
 
 export const METRIC_DOCUMENTATION: Readonly<Record<string, string>> = {
+  currentSubmissionsDay:
+    'New submissions entering each day. The polling lifecycle—not a fixed scrape count—turns these arrivals into recurring work.',
+  steadyStateJobsDay:
+    'Logical scrape jobs/day after every polling age cohort is populated under the current lifecycle.',
+  sustainableJobsDay:
+    'The lowest configured steady-state ceiling across worker concurrency, job admission, HTTP egress, and applicable static-proxy limits.',
+  capacityUtilization:
+    'Steady-state logical jobs/day divided by sustainable logical-job capacity/day. Over 100% means configured infrastructure cannot sustain the workload.',
+  capacityHeadroom:
+    'Sustainable logical-job capacity minus current steady-state workload. This is recurring capacity, not burst headroom.',
+  overCapacityJobsDay:
+    'Current steady-state logical jobs/day beyond the sustainable infrastructure ceiling.',
+  maximumSubmissionsDay:
+    'The daily arrival rate whose lifecycle-generated steady-state workload reaches system capacity. It is derived by inverting the current polling profile.',
+  systemBindingConstraint:
+    'The worker or static-proxy constraint with the lowest sustainable logical-job throughput. Improving another constraint will not raise capacity until this one moves.',
+  lifetimeScrapesPerSubmission:
+    'Total scheduled scrape jobs one submission receives while moving through the current lifecycle. This is derived and cannot be edited independently.',
   activeSubmissions:
     'Submissions still inside any enabled lifecycle stage, including dormant stages that retain but no longer poll them.',
   polledSubmissions:
