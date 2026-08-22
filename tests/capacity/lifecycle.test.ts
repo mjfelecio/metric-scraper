@@ -27,15 +27,15 @@ describe('capacity lifecycle', () => {
   });
 
   it('reports the polling and active plateaus independently', () => {
-    const day21 = simulateCohorts({
+    const day29 = simulateCohorts({
       newSubmissionsPerDay: 500,
-      horizonDays: 21,
+      horizonDays: 29,
       stages: DEFAULT_CAPACITY_INPUTS.stages,
     });
-    expect(day21.jobsPlateauDayIndex).toBe(20);
-    expect(day21.pollingSteadyState?.scrapeJobs).toBe(350_000);
-    expect(day21.activePlateauDayIndex).toBeNull();
-    expect(day21.steadyState).toBeNull();
+    expect(day29.jobsPlateauDayIndex).toBe(28);
+    expect(day29.pollingSteadyState?.scrapeJobs).toBe(358_000);
+    expect(day29.activePlateauDayIndex).toBeNull();
+    expect(day29.steadyState).toBeNull();
 
     const day30 = simulateCohorts({
       newSubmissionsPerDay: 500,

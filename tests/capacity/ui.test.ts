@@ -20,7 +20,7 @@ describe('capacity UI state', () => {
     const listener = vi.fn();
     store.subscribe(listener);
     store.update((inputs) => ({ ...inputs, newSubmissionsPerDay: 1_000 }));
-    expect(store.getState().result.traffic.logicalJobsPerDay).toBe(700_000);
+    expect(store.getState().result.traffic.logicalJobsPerDay).toBe(716_000);
     store.applyPlatformPreset('instagram');
     expect(store.getState().inputs.platform).toBe('instagram');
     expect(listener).toHaveBeenCalledTimes(3);
@@ -99,7 +99,7 @@ describe('capacity result rendering', () => {
 
     const status = elements.get('capacity-workload-status')?.innerHTML ?? '';
     expect(status).toContain('Current workload exceeds sustainable capacity');
-    expect(status).toContain('350,000 jobs/day');
+    expect(status).toContain('358,000 jobs/day');
 
     const reliability = elements.get('reliability-results')?.innerHTML ?? '';
     expect(reliability).toContain('Eventual job success');

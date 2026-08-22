@@ -11,31 +11,32 @@ function withInput(patch: Partial<CapacityInputs>): CapacityInputs {
 }
 
 describe('capacity calculator', () => {
-  it('reproduces the approved deterministic baseline', () => {
+  it('reproduces the tapered lifecycle baseline', () => {
     const result = simulateCapacity(DEFAULT_CAPACITY_INPUTS);
     expect(result.valid).toBe(true);
     expect(result.workload.activeSubmissionsAtRunRate).toBe(15_000);
-    expect(result.workload.polledSubmissionsAtRunRate).toBe(10_500);
-    expect(result.traffic.logicalJobsPerDay).toBe(350_000);
+    expect(result.workload.polledSubmissionsAtRunRate).toBe(14_500);
+    expect(result.traffic.logicalJobsPerDay).toBe(358_000);
     expect(result.timeline[0]?.scrapeJobs).toBe(48_000);
     expect(result.timeline[6]?.scrapeJobs).toBe(336_000);
     expect(result.timeline[20]?.scrapeJobs).toBe(350_000);
+    expect(result.timeline[28]?.scrapeJobs).toBe(358_000);
     expect(result.concurrency.averageJobs.computable).toBe(true);
     if (result.concurrency.averageJobs.computable) {
-      expect(result.concurrency.averageJobs.value).toBeCloseTo(29.7, 1);
+      expect(result.concurrency.averageJobs.value).toBeCloseTo(30.4, 1);
     }
     expect(result.proxy.theoreticalProxies).toEqual({ computable: true, value: 4 });
     expect(result.proxy.recommendedProxies).toEqual({ computable: true, value: 5 });
-    expect(result.bandwidth.baselineGbPerDay).toEqual({ computable: true, value: 17.85 });
-    expect(result.bandwidth.baselineGbPerMonth).toEqual({ computable: true, value: 535.5 });
+    expect(result.bandwidth.baselineGbPerDay).toEqual({ computable: true, value: 18.258 });
+    expect(result.bandwidth.baselineGbPerMonth).toEqual({ computable: true, value: 547.74 });
     if (result.bandwidth.adjustedGbPerDay.computable) {
-      expect(result.bandwidth.adjustedGbPerDay.value).toBeCloseTo(18.02, 2);
+      expect(result.bandwidth.adjustedGbPerDay.value).toBeCloseTo(18.43, 2);
     }
   });
 
   it('keeps steady-state month rates separate from horizon totals', () => {
     const result = simulateCapacity(withInput({ horizonDays: 1 }));
-    expect(result.traffic.logicalJobsPerMonth).toBe(10_500_000);
+    expect(result.traffic.logicalJobsPerMonth).toBe(10_740_000);
     expect(result.traffic.logicalJobsInHorizon).toBe(48_000);
   });
 
@@ -60,7 +61,7 @@ describe('capacity calculator', () => {
     expect(result.concurrency.averageJobs.computable).toBe(true);
     expect(result.concurrency.averageHttpRequests.computable).toBe(true);
     if (result.concurrency.averageHttpRequests.computable) {
-      expect(result.concurrency.averageHttpRequests.value).toBeCloseTo(8.18, 1);
+      expect(result.concurrency.averageHttpRequests.value).toBeCloseTo(8.37, 1);
     }
   });
 
@@ -93,8 +94,8 @@ describe('capacity calculator', () => {
       }),
     );
     expect(result.proxy.bindingConstraint).toBe('http-rpm');
-    expect(result.proxy.theoreticalProxies).toEqual({ computable: true, value: 5 });
-    expect(result.proxy.recommendedProxies).toEqual({ computable: true, value: 6 });
+    expect(result.proxy.theoreticalProxies).toEqual({ computable: true, value: 6 });
+    expect(result.proxy.recommendedProxies).toEqual({ computable: true, value: 7 });
   });
 
   it('distinguishes free prices from missing prices', () => {
@@ -125,7 +126,7 @@ describe('capacity calculator', () => {
   it('reports worker ceilings against process-local aggregate capacity', () => {
     const result = simulateCapacity(DEFAULT_CAPACITY_INPUTS);
     expect(result.workers.aggregateJobConcurrency).toBe(10);
-    expect(result.workers.requiredByConcurrency).toEqual({ computable: true, value: 3 });
+    expect(result.workers.requiredByConcurrency).toEqual({ computable: true, value: 4 });
     expect(result.workers.requiredByHttpEgress).toEqual({ computable: true, value: 2 });
   });
 
@@ -133,7 +134,7 @@ describe('capacity calculator', () => {
     it('uses the lifecycle workload and reports current over-capacity demand', () => {
       const result = simulateCapacity(DEFAULT_CAPACITY_INPUTS);
       expect(result.capacityWorkload.currentJobsPerDay).toBe(result.traffic.logicalJobsPerDay);
-      expect(result.capacityWorkload.lifetimeScrapeJobsPerSubmission).toBe(700);
+      expect(result.capacityWorkload.lifetimeScrapeJobsPerSubmission).toBe(716);
       expect(result.capacityWorkload.bindingConstraint).toBe('worker-concurrency');
       expect(result.capacityWorkload.status).toBe('over-capacity');
       expect(result.capacityWorkload.overCapacityJobsPerDay.computable).toBe(true);
