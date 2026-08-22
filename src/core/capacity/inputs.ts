@@ -183,13 +183,15 @@ export const DAYS_PER_MONTH = 30;
 const REFERENCE_RUN = 'output/tiktok-2026-08-21T15-27-22-305Z.session.json';
 
 /**
- * The lifecycle in the operating policy: fifteen minutes for a week, twelve
- * hours for a fortnight, then held without polling to the thirty-day mark.
+ * The lifecycle in the operating policy:
+ * - Days 1–7: poll every fifteen minutes.
+ * - Days 8–29: poll every twelve hours.
+ * - Day 30: polling stops entirely.
  */
 export const TAPERED_STAGES: readonly PollingStage[] = [
   { id: 'stage-1', label: 'Fresh', durationDays: 7, intervalMs: 900_000, enabled: true },
-  { id: 'stage-2', label: 'Settling', durationDays: 14, intervalMs: 43_200_000, enabled: true },
-  { id: 'stage-3', label: 'Dormant', durationDays: 9, intervalMs: null, enabled: true },
+  { id: 'stage-2', label: 'Settling', durationDays: 22, intervalMs: 43_200_000, enabled: true },
+  { id: 'stage-3', label: 'Dormant', durationDays: 1, intervalMs: null, enabled: true },
 ];
 
 /**
