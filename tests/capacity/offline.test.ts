@@ -24,6 +24,18 @@ describe('capacity page structure', () => {
       expect(source).not.toMatch(forbidden);
     }
   });
+
+  it('uses progressive contextual help instead of a detached documentation wall', async () => {
+    const page = await readFile('src/web/capacity/index.html', 'utf8');
+    expect(page).toContain('Planning snapshot');
+    expect(page).toContain('Keep these units separate');
+    expect(page).toContain('Throughput is not concurrency');
+    expect(page).toContain('Why theoretical and recommended counts differ');
+    expect(page).toContain('Provenance badge meanings');
+    expect(page.match(/class="section-purpose"/g)?.length).toBeGreaterThanOrEqual(14);
+    expect(page.match(/class="explanation/g)?.length).toBeGreaterThanOrEqual(12);
+    expect(page).not.toContain('<h2>Documentation</h2>');
+  });
 });
 
 async function readTree(directory: string): Promise<string[]> {

@@ -1,6 +1,12 @@
 import { formatProvenance, type Maybe, type Provenance } from '../../core/capacity/index.js';
 
 import { renderCapacityCharts } from './charts.js';
+import {
+  FINDING_DOCUMENTATION,
+  INPUT_DOCUMENTATION,
+  METRIC_DOCUMENTATION,
+  PROVENANCE_INPUT_LABELS,
+} from './documentation.js';
 import type { CapacityState } from './state.js';
 
 function el(id: string): HTMLElement | null {
@@ -9,6 +15,7 @@ function el(id: string): HTMLElement | null {
 
 export function renderCapacity(state: CapacityState): void {
   renderForm(state);
+  renderInputDocumentation(state);
   renderStages(state);
   renderValidation(state);
   renderResults(state);
@@ -58,6 +65,48 @@ function renderForm(state: CapacityState): void {
   setValue('growth-months', state.inputs.growth.months);
 }
 
+/** Adds one reusable, focusable help affordance beside each non-obvious input label. */
+function renderInputDocumentation(state: CapacityState): void {
+  // The render unit tests use a deliberately tiny DOM stand-in. Input help is
+  // progressive enhancement around real form controls, so the stand-in can
+  // skip this branch while still exercising every calculated result.
+  if (typeof document.createElement !== 'function') return;
+
+  for (const documentation of INPUT_DOCUMENTATION) {
+    const control = document.getElementById(documentation.id);
+    const label = control?.closest<HTMLLabelElement>('label');
+    if (control === null || control === undefined || label === null || label === undefined)
+      continue;
+
+    let tip = label.querySelector<HTMLElement>(`[data-input-help-for="${documentation.id}"]`);
+    if (tip === null) {
+      tip = document.createElement('span');
+      tip.className = 'info-tip input-info-tip';
+      tip.tabIndex = 0;
+      tip.setAttribute('role', 'button');
+      tip.dataset['inputHelpFor'] = documentation.id;
+      tip.setAttribute('aria-label', `About ${labelText(label)}`);
+      if (control instanceof HTMLInputElement && control.type === 'checkbox') {
+        label.append(tip);
+      } else {
+        label.insertBefore(tip, control);
+      }
+    }
+
+    const provenance =
+      documentation.path === undefined ? undefined : state.result.provenance[documentation.path];
+    tip.innerHTML = `i<span id="help-${documentation.id}" class="info-popover" role="tooltip">
+      <span>${escapeHtml(documentation.explanation)}</span>
+      ${provenance === undefined ? '' : `<span class="input-provenance">Source confidence: ${provenanceBadge(provenance)}</span>`}
+    </span>`;
+    control.setAttribute('aria-describedby', `help-${documentation.id}`);
+  }
+}
+
+function labelText(label: HTMLLabelElement): string {
+  return (label.childNodes[0]?.textContent ?? 'this input').trim();
+}
+
 function renderStages(state: CapacityState): void {
   const target = el('lifecycle-stages');
   if (target === null) return;
@@ -73,9 +122,9 @@ function renderStages(state: CapacityState): void {
           </div>
         </div>
         <div class="stage-fields">
-          <label>Label<input data-stage-field="label" value="${escapeHtml(stage.label)}" /></label>
-          <label>Days<input type="number" min="1" step="1" data-stage-field="durationDays" value="${String(stage.durationDays)}" /></label>
-          <label>Interval (minutes)<input type="number" min="0" step="any" data-stage-field="intervalMinutes" value="${stage.intervalMs === null ? '' : String(stage.intervalMs / 60_000)}" placeholder="no polling" /></label>
+          <label>Label${infoTip('Operator-facing name for this age-based lifecycle stage.', 'stage label')}<input data-stage-field="label" value="${escapeHtml(stage.label)}" /></label>
+          <label>Days${infoTip('Whole days a submission remains in this enabled stage before moving to the next enabled stage.', 'stage days')}<input type="number" min="1" step="1" data-stage-field="durationDays" value="${String(stage.durationDays)}" /></label>
+          <label>Interval (minutes)${infoTip('Start-to-start time between scheduled scrapes. Blank retains submissions in a dormant stage without creating jobs.', 'polling interval')}<input type="number" min="0" step="any" data-stage-field="intervalMinutes" value="${stage.intervalMs === null ? '' : String(stage.intervalMs / 60_000)}" placeholder="no polling" /></label>
         </div>
       </article>`,
     )
@@ -99,101 +148,321 @@ function renderValidation(state: CapacityState): void {
 function renderResults(state: CapacityState): void {
   const { result } = state;
   setHtml(
+    'planning-summary-results',
+    cards([
+      metric(
+        'logicalJobsDay',
+        'Logical jobs/day',
+        formatNumber(result.traffic.logicalJobsPerDay),
+        true,
+      ),
+      metric(
+        'adjustedHttpDay',
+        'HTTP requests/day',
+        formatMaybe(result.traffic.adjustedHttpRequestsPerDay),
+        true,
+      ),
+      metric(
+        'adjustedBandwidthMonth',
+        'Bandwidth/month',
+        formatMaybe(result.bandwidth.adjustedGbPerMonth, ' GB'),
+        true,
+      ),
+      metric(
+        'recommendedWorkers',
+        'Recommended workers',
+        formatMaybe(result.workers.recommendedWorkers, '', 0),
+        true,
+      ),
+      metric(
+        'recommendedProxies',
+        'Recommended proxies',
+        formatMaybe(result.proxy.recommendedProxies, '', 0),
+        true,
+      ),
+      metric(
+        'totalCost',
+        'Estimated monthly cost',
+        formatMoneyMaybe(result.cost.totalMonthly),
+        true,
+      ),
+    ]),
+  );
+  setHtml(
     'overview-results',
     cards([
-      ['Active submissions', formatNumber(result.workload.activeSubmissionsAtRunRate)],
-      ['Polled submissions', formatNumber(result.workload.polledSubmissionsAtRunRate)],
-      ['Logical jobs/day', formatNumber(result.traffic.logicalJobsPerDay)],
-      ['Logical jobs/month', formatNumber(result.traffic.logicalJobsPerMonth)],
-      ['Horizon jobs', formatNumber(result.traffic.logicalJobsInHorizon)],
-      ['Polling plateau', dayValue(result.workload.pollingPlateauDay)],
-      ['Active plateau', dayValue(result.workload.activeLifecyclePlateauDay)],
+      metric(
+        'activeSubmissions',
+        'Active submissions',
+        formatNumber(result.workload.activeSubmissionsAtRunRate),
+      ),
+      metric(
+        'polledSubmissions',
+        'Polled submissions',
+        formatNumber(result.workload.polledSubmissionsAtRunRate),
+      ),
+      metric(
+        'logicalJobsDay',
+        'Logical jobs/day',
+        formatNumber(result.traffic.logicalJobsPerDay),
+        true,
+      ),
+      metric(
+        'logicalJobsMonth',
+        'Logical jobs/month',
+        formatNumber(result.traffic.logicalJobsPerMonth),
+      ),
+      metric('horizonJobs', 'Horizon jobs', formatNumber(result.traffic.logicalJobsInHorizon)),
+      metric('pollingPlateau', 'Polling plateau', dayValue(result.workload.pollingPlateauDay)),
+      metric(
+        'activePlateau',
+        'Active plateau',
+        dayValue(result.workload.activeLifecyclePlateauDay),
+      ),
     ]),
   );
   setHtml(
     'reliability-results',
     cards([
-      ['Job success', formatPercent(result.reliability.jobSuccessRate)],
-      ['Permanent failures', formatPercent(result.reliability.permanentFailureRate)],
-      ['Retry rate', formatPercent(result.reliability.retryRate)],
-      ['Attempt amplification', `${result.reliability.attemptAmplification.toFixed(4)}×`],
-      ['Retries/day', formatNumber(result.traffic.retriesPerDay)],
-      ['Expected backoff/job', `${result.reliability.expectedBackoffMsPerJob.toFixed(1)} ms`],
+      metric(
+        'jobSuccess',
+        'Eventual job success',
+        formatPercent(result.reliability.jobSuccessRate),
+      ),
+      metric(
+        'permanentFailures',
+        'Permanent failures',
+        formatPercent(result.reliability.permanentFailureRate),
+      ),
+      metric('retryRate', 'Jobs that retry', formatPercent(result.reliability.retryRate)),
+      metric(
+        'attemptAmplification',
+        'Attempt amplification',
+        `${result.reliability.attemptAmplification.toFixed(4)}×`,
+      ),
+      metric('retriesDay', 'Retries/day', formatNumber(result.traffic.retriesPerDay)),
+      metric(
+        'expectedBackoff',
+        'Expected backoff/job',
+        `${result.reliability.expectedBackoffMsPerJob.toFixed(1)} ms`,
+      ),
     ]),
   );
   setHtml(
     'traffic-results',
     cards([
-      ['Logical jobs/day', formatNumber(result.traffic.logicalJobsPerDay)],
-      ['Baseline HTTP/day', formatMaybe(result.traffic.baselineHttpRequestsPerDay)],
-      ['Adjusted HTTP/day', formatMaybe(result.traffic.adjustedHttpRequestsPerDay)],
-      ['Baseline HTTP/month', formatMaybe(result.traffic.baselineHttpRequestsPerMonth)],
-      ['Adjusted HTTP/month', formatMaybe(result.traffic.adjustedHttpRequestsPerMonth)],
-      ['Adjusted HTTP in horizon', formatMaybe(result.traffic.adjustedHttpRequestsInHorizon)],
+      metric('logicalJobsDay', 'Logical jobs/day', formatNumber(result.traffic.logicalJobsPerDay)),
+      metric(
+        'baselineHttpDay',
+        'HTTP/day · before retries',
+        formatMaybe(result.traffic.baselineHttpRequestsPerDay),
+      ),
+      metric(
+        'adjustedHttpDay',
+        'HTTP/day · with retries',
+        formatMaybe(result.traffic.adjustedHttpRequestsPerDay),
+        true,
+      ),
+      metric(
+        'baselineHttpMonth',
+        'HTTP/month · before retries',
+        formatMaybe(result.traffic.baselineHttpRequestsPerMonth),
+      ),
+      metric(
+        'adjustedHttpMonth',
+        'HTTP/month · with retries',
+        formatMaybe(result.traffic.adjustedHttpRequestsPerMonth),
+      ),
+      metric(
+        'adjustedHttpHorizon',
+        'HTTP in horizon · with retries',
+        formatMaybe(result.traffic.adjustedHttpRequestsInHorizon),
+      ),
     ]),
   );
   setHtml(
     'bandwidth-results',
     cards([
-      ['Baseline/day', formatMaybe(result.bandwidth.baselineGbPerDay, ' GB')],
-      ['Baseline/month', formatMaybe(result.bandwidth.baselineGbPerMonth, ' GB')],
-      ['Adjusted/day', formatMaybe(result.bandwidth.adjustedGbPerDay, ' GB')],
-      ['Adjusted/month', formatMaybe(result.bandwidth.adjustedGbPerMonth, ' GB')],
-      ['Baseline horizon', formatMaybeBytes(result.bandwidth.baselineBytesInHorizon)],
-      ['Adjusted horizon', formatMaybeBytes(result.bandwidth.adjustedBytesInHorizon)],
+      metric(
+        'baselineBandwidthDay',
+        'Daily · before retries',
+        formatMaybe(result.bandwidth.baselineGbPerDay, ' GB'),
+      ),
+      metric(
+        'baselineBandwidthMonth',
+        'Monthly · before retries',
+        formatMaybe(result.bandwidth.baselineGbPerMonth, ' GB'),
+      ),
+      metric(
+        'adjustedBandwidthDay',
+        'Daily · with retries',
+        formatMaybe(result.bandwidth.adjustedGbPerDay, ' GB'),
+      ),
+      metric(
+        'adjustedBandwidthMonth',
+        'Monthly · with retries',
+        formatMaybe(result.bandwidth.adjustedGbPerMonth, ' GB'),
+        true,
+      ),
+      metric(
+        'baselineBandwidthHorizon',
+        'Horizon · before retries',
+        formatMaybeBytes(result.bandwidth.baselineBytesInHorizon),
+      ),
+      metric(
+        'adjustedBandwidthHorizon',
+        'Horizon · with retries',
+        formatMaybeBytes(result.bandwidth.adjustedBytesInHorizon),
+      ),
     ]),
   );
   setHtml(
     'concurrency-results',
     cards([
-      ['Average jobs', formatMaybe(result.concurrency.averageJobs)],
-      ['Peak jobs', formatMaybe(result.concurrency.peakJobs)],
-      ['Average HTTP', formatMaybe(result.concurrency.averageHttpRequests)],
-      ['Peak HTTP', formatMaybe(result.concurrency.peakHttpRequests)],
-      ['Peak jobs/min', formatNumber(result.peak.jobsPerMinute)],
-      ['Peak source', result.peak.source],
+      metric(
+        'averageJobsConcurrency',
+        'Average jobs in flight',
+        formatMaybe(result.concurrency.averageJobs),
+      ),
+      metric(
+        'peakJobsConcurrency',
+        'Peak jobs in flight',
+        formatMaybe(result.concurrency.peakJobs),
+      ),
+      metric(
+        'averageHttpConcurrency',
+        'Average HTTP in flight',
+        formatMaybe(result.concurrency.averageHttpRequests),
+      ),
+      metric(
+        'peakHttpConcurrency',
+        'Peak HTTP in flight',
+        formatMaybe(result.concurrency.peakHttpRequests),
+      ),
+      metric('peakJobsMinute', 'Peak jobs/min', formatNumber(result.peak.jobsPerMinute)),
+      metric('peakSource', 'Peak source', result.peak.source),
     ]),
   );
   setHtml(
     'worker-results',
     cards([
-      ['Configured slots', formatNumber(result.workers.aggregateJobConcurrency)],
-      ['Job target/min', formatNumber(result.workers.aggregateJobTargetPerMinute)],
-      ['HTTP limit/min', formatMaybe(result.workers.aggregateHttpLimitPerMinute)],
-      ['Workers by concurrency', formatMaybe(result.workers.requiredByConcurrency, '', 0)],
-      ['Workers by target', formatMaybe(result.workers.requiredByJobTarget, '', 0)],
-      ['Recommended workers', formatMaybe(result.workers.recommendedWorkers, '', 0)],
+      metric(
+        'configuredSlots',
+        'Configured job slots',
+        formatNumber(result.workers.aggregateJobConcurrency),
+      ),
+      metric(
+        'jobTargetMinute',
+        'Aggregate job target/min',
+        formatNumber(result.workers.aggregateJobTargetPerMinute),
+      ),
+      metric(
+        'httpLimitMinute',
+        'Aggregate HTTP limit/min',
+        formatMaybe(result.workers.aggregateHttpLimitPerMinute),
+      ),
+      metric(
+        'workersByConcurrency',
+        'Workers needed · concurrency',
+        formatMaybe(result.workers.requiredByConcurrency, '', 0),
+      ),
+      metric(
+        'workersByTarget',
+        'Workers needed · job target',
+        formatMaybe(result.workers.requiredByJobTarget, '', 0),
+      ),
+      metric(
+        'recommendedWorkers',
+        'Recommended workers',
+        formatMaybe(result.workers.recommendedWorkers, '', 0),
+        true,
+      ),
     ]),
   );
   setHtml(
     'proxy-results',
     cards([
-      ['Binding constraint', result.proxy.bindingConstraint ?? 'unavailable'],
-      ['Raw requirement', formatMaybe(result.proxy.rawRequired)],
-      ['Theoretical proxies', formatMaybe(result.proxy.theoreticalProxies, '', 0)],
-      ['Recommended proxies', formatMaybe(result.proxy.recommendedProxies, '', 0)],
-      ['Configured utilization', formatMaybePercent(result.proxy.configuredPoolUtilization)],
-      ['Configured headroom', formatMaybe(result.proxy.configuredPoolHeadroom, '', 0)],
-      ['Requests/proxy/day', formatMaybe(result.proxy.requestsPerProxyPerDay)],
-      ['Concurrency/proxy', formatMaybe(result.proxy.concurrencyPerProxy)],
+      metric(
+        'bindingConstraint',
+        'Binding constraint',
+        result.proxy.bindingConstraint ?? unavailable('no applicable per-proxy limit is available'),
+      ),
+      metric('rawProxyRequirement', 'Raw proxy requirement', formatMaybe(result.proxy.rawRequired)),
+      metric(
+        'theoreticalProxies',
+        'Theoretical proxies',
+        formatMaybe(result.proxy.theoreticalProxies, '', 0),
+      ),
+      metric(
+        'recommendedProxies',
+        'Recommended proxies',
+        formatMaybe(result.proxy.recommendedProxies, '', 0),
+        true,
+      ),
+      metric(
+        'configuredProxyUtilization',
+        'Configured pool utilization',
+        formatMaybePercent(result.proxy.configuredPoolUtilization),
+      ),
+      metric(
+        'configuredProxyHeadroom',
+        'Configured pool headroom',
+        formatMaybe(result.proxy.configuredPoolHeadroom, '', 0),
+      ),
+      metric(
+        'requestsPerProxyDay',
+        'Requests/proxy/day',
+        formatMaybe(result.proxy.requestsPerProxyPerDay),
+      ),
+      metric(
+        'concurrencyPerProxy',
+        'Job concurrency/proxy',
+        formatMaybe(result.proxy.concurrencyPerProxy),
+      ),
     ]),
   );
   setHtml(
     'cost-results',
     cards([
-      [
+      metric(
+        'billableBandwidth',
         `Billable ${state.inputs.pricing.billingUnit}/month`,
         formatMaybe(result.cost.billingBandwidthUnitsPerMonth),
-      ],
-      ['Bandwidth/month', formatMoneyMaybe(result.cost.bandwidthMonthly)],
-      ['Static proxies/month', formatMoneyMaybe(result.cost.proxiesMonthly)],
-      ['Fixed pool/month', formatMoneyMaybe(result.cost.fixedPoolMonthly)],
-      ['Total/month', formatMoneyMaybe(result.cost.totalMonthly)],
+      ),
+      metric('bandwidthCost', 'Bandwidth/month', formatMoneyMaybe(result.cost.bandwidthMonthly)),
+      metric('proxyCost', 'Static proxies/month', formatMoneyMaybe(result.cost.proxiesMonthly)),
+      metric('fixedPoolCost', 'Fixed pool/month', formatMoneyMaybe(result.cost.fixedPoolMonthly)),
+      metric(
+        'totalCost',
+        'Estimated total/month',
+        formatMoneyMaybe(result.cost.totalMonthly),
+        true,
+      ),
     ]),
   );
   setHtml(
     'growth-results',
-    `<div class="table-wrap"><table><thead><tr><th>Month</th><th>Factor</th><th>Submissions/day</th><th>Jobs/day</th><th>GB/month</th><th>Proxies</th><th>Cost</th></tr></thead><tbody>${result.growth
+    `<div class="table-wrap"><table><thead><tr>${[
+      documentedHeader('Month', 'Month 1 is the current baseline; compounding starts in month 2.'),
+      documentedHeader('Growth factor', 'Cumulative compound multiplier relative to month 1.'),
+      documentedHeader('Submissions/day', 'Projected new daily submissions after compound growth.'),
+      documentedHeader(
+        'Logical jobs/day',
+        'Projected recurring scrape jobs after the larger submission cohorts age through the same lifecycle.',
+      ),
+      documentedHeader(
+        'GB/month',
+        'Projected retry-adjusted 30-day bandwidth at this growth level.',
+      ),
+      documentedHeader(
+        'Static proxies',
+        'Projected recommendation using the same proxy constraints and safety margin.',
+      ),
+      documentedHeader(
+        'Monthly cost',
+        'Projected bandwidth, recommended proxy, and fixed pool charges when all prices are supplied.',
+      ),
+    ].join('')}</tr></thead><tbody>${result.growth
       .map(
         (month) =>
           `<tr><td>${String(month.month)}</td><td>${month.factor.toFixed(3)}×</td><td>${formatNumber(month.newSubmissionsPerDay)}</td><td>${formatNumber(month.logicalJobsPerDay)}</td><td>${formatMaybe(month.adjustedGbPerMonth)}</td><td>${formatMaybe(month.recommendedProxies, '', 0)}</td><td>${formatMoneyMaybe(month.estimatedMonthlyCost)}</td></tr>`,
@@ -202,7 +471,29 @@ function renderResults(state: CapacityState): void {
   );
   setHtml(
     'timeline-results',
-    `<div class="table-wrap"><table><thead><tr><th>Day</th><th>Phase</th><th>Active</th><th>Polled</th><th>Jobs</th><th>Adjusted HTTP</th></tr></thead><tbody>${result.timeline
+    `<div class="table-wrap"><table><thead><tr>${[
+      documentedHeader(
+        'Day',
+        'Launch day in the selected forward simulation, not a historical production date.',
+      ),
+      documentedHeader(
+        'Phase',
+        'Ramp means age cohorts are still filling; steady means recurring polling work has reached its plateau.',
+      ),
+      documentedHeader(
+        'Active',
+        'Submissions inside any enabled lifecycle stage, including dormant ones.',
+      ),
+      documentedHeader('Polled', 'Submissions currently in stages that schedule scrape jobs.'),
+      documentedHeader(
+        'Logical jobs',
+        'Scheduled URL scrapes produced by all populated age cohorts that day.',
+      ),
+      documentedHeader(
+        'HTTP · with retries',
+        'Expected outbound requests after fan-out and retry amplification.',
+      ),
+    ].join('')}</tr></thead><tbody>${result.timeline
       .map(
         (point) =>
           `<tr><td>${String(point.day)}</td><td>${point.phase}</td><td>${formatNumber(point.activeSubmissions)}</td><td>${formatNumber(point.polledSubmissions)}</td><td>${formatNumber(point.scrapeJobs)}</td><td>${formatMaybe(point.adjustedHttpRequests)}</td></tr>`,
@@ -217,10 +508,18 @@ function renderFindings(state: CapacityState): void {
     state.result.findings.length === 0
       ? '<p class="empty-state">No model findings.</p>'
       : state.result.findings
-          .map(
-            (finding) =>
-              `<article class="finding ${finding.severity}"><span>${finding.severity}</span><div><strong>${escapeHtml(finding.code.replaceAll('_', ' '))}</strong><p>${escapeHtml(finding.detail)}</p></div></article>`,
-          )
+          .map((finding) => {
+            const documentation = FINDING_DOCUMENTATION[finding.code];
+            return `<article class="finding ${finding.severity}">
+                <span>${finding.severity}</span>
+                <div>
+                  <strong>${escapeHtml(documentation.title)}</strong>
+                  <p><b>Observed:</b> ${escapeHtml(finding.detail)}</p>
+                  <p><b>Why it matters:</b> ${escapeHtml(documentation.why)}</p>
+                  <p class="finding-action"><b>Consider:</b> ${escapeHtml(documentation.action)}</p>
+                </div>
+              </article>`;
+          })
           .join(''),
   );
 }
@@ -231,7 +530,7 @@ function renderProvenance(state: CapacityState): void {
     Object.entries(state.result.provenance)
       .map(
         ([path, provenance]) =>
-          `<div class="provenance-row"><code>${escapeHtml(path)}</code>${provenanceBadge(provenance)}</div>`,
+          `<div class="provenance-row"><div><strong>${escapeHtml(PROVENANCE_INPUT_LABELS[path] ?? path)}</strong><code>${escapeHtml(path)}</code></div>${provenanceBadge(provenance)}</div>`,
       )
       .join(''),
   );
@@ -247,13 +546,32 @@ function renderCharts(state: CapacityState): void {
   setHtml('growth-chart', charts.growth);
 }
 
-function cards(items: readonly (readonly [string, string])[]): string {
+interface ResultCard {
+  readonly key: string;
+  readonly label: string;
+  readonly value: string;
+  readonly primary: boolean;
+}
+
+function metric(key: string, label: string, value: string, primary = false): ResultCard {
+  return { key, label, value, primary };
+}
+
+function cards(items: readonly ResultCard[]): string {
   return items
     .map(
-      ([label, value]) =>
-        `<div class="result-card"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`,
+      ({ key, label, value, primary }) =>
+        `<div class="result-card${primary ? ' primary' : ''}"><span class="result-label">${escapeHtml(label)}${infoTip(METRIC_DOCUMENTATION[key] ?? 'Supporting planning metric.', label)}</span><strong>${value}</strong></div>`,
     )
     .join('');
+}
+
+function documentedHeader(label: string, explanation: string): string {
+  return `<th>${escapeHtml(label)}${infoTip(explanation, label)}</th>`;
+}
+
+function infoTip(explanation: string, label: string): string {
+  return `<button type="button" class="info-tip" aria-label="About ${escapeHtml(label)}">i<span class="info-popover" role="tooltip">${escapeHtml(explanation)}</span></button>`;
 }
 
 function formatMaybe(value: Maybe<number>, suffix = '', digits = 2): string {
@@ -279,7 +597,7 @@ function formatMoneyMaybe(value: Maybe<number>): string {
 }
 
 function unavailable(reason: string): string {
-  return `<span class="unavailable" title="${escapeHtml(reason)}">Unavailable</span>`;
+  return `<span class="unavailable" tabindex="0" aria-label="Unavailable: ${escapeHtml(reason)}">Unavailable<span class="info-popover unavailable-popover" role="tooltip">This result is unavailable because ${escapeHtml(reason)}. Supply the missing input rather than treating this as zero.</span></span>`;
 }
 
 function formatNumber(value: number, digits = 2): string {

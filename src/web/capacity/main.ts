@@ -28,6 +28,12 @@ document.addEventListener('change', (event) => {
 document.addEventListener('click', (event) => {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
+  const inputHelp = target.closest<HTMLElement>('.input-info-tip');
+  if (inputHelp !== null) {
+    event.preventDefault();
+    inputHelp.focus();
+    return;
+  }
   if (target.closest('#add-stage') !== null) {
     store.addStage();
     return;

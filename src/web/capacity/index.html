@@ -31,6 +31,10 @@
         <form id="capacity-form" class="space-y-4" novalidate>
           <section class="panel">
             <h2>Presets and workload</h2>
+            <p class="section-purpose">
+              Describe how many new URLs enter the system and which measured platform behavior to
+              use as the starting point.
+            </p>
             <div class="field-grid">
               <label
                 >Platform preset<select id="platform-preset">
@@ -78,14 +82,33 @@
               <button id="add-stage" type="button" class="secondary-button">Add stage</button>
             </div>
             <p class="help">
-              Intervals are start-to-start. Leave an interval blank to retain submissions without
-              polling.
+              Turn submission age into a recurring scrape schedule. Enabled stages run in the order
+              shown.
             </p>
             <div id="lifecycle-stages" class="mt-3 space-y-3"></div>
+            <details class="explanation">
+              <summary>How lifecycle stages create jobs</summary>
+              <p>
+                Every new URL is one submission. While it is in a polling stage, each scheduled poll
+                becomes one logical scrape job. Frequent fresh-stage polling creates many more jobs
+                than the daily arrival count alone suggests.
+              </p>
+              <div class="formula-chain">
+                Stage days × polls per day × submissions/day <span>→</span> recurring jobs/day
+              </div>
+              <p>
+                A blank interval means the stage is dormant: the submission remains active for
+                retention, but it creates no polling jobs. Disabling a stage removes its days from
+                the lifecycle entirely.
+              </p>
+            </details>
           </section>
 
           <details class="panel" open>
             <summary>Latency and reliability</summary>
+            <p class="section-purpose">
+              Describe how long work stays in flight and how failed attempts turn into retries.
+            </p>
             <div class="field-grid details-body">
               <label
                 >Mean job latency (ms)<input
@@ -155,10 +178,26 @@
                 ><input id="retry-jitter" type="checkbox" /> Full jitter</label
               >
             </div>
+            <details class="explanation nested">
+              <summary>Latency, P95, and eventual success</summary>
+              <p>
+                Mean latency represents normal operation. P95 means 95% of operations complete
+                within that time; the slowest 5% take longer, so P95 is used for peak sizing.
+              </p>
+              <p>
+                A job may fail its first attempt and still eventually succeed. Retryable failures
+                can make additional attempts; permanent outcomes such as private or not found do not
+                retry.
+              </p>
+            </details>
           </details>
 
           <details class="panel">
             <summary>Workers and peak sizing</summary>
+            <p class="section-purpose">
+              Set process-local throughput and in-flight capacity, then describe the peak to plan
+              for.
+            </p>
             <div class="field-grid details-body">
               <label
                 >Job target/min/worker<input id="job-target-rpm" type="number" min="0" step="any"
@@ -191,10 +230,25 @@
                   placeholder="unlimited / unknown"
               /></label>
             </div>
+            <details class="explanation nested">
+              <summary>Throughput is not concurrency</summary>
+              <p>
+                Throughput is work completed over time, such as jobs/minute. Concurrency is work
+                currently in flight. At the same throughput, slower jobs remain in flight longer and
+                therefore need more concurrent slots.
+              </p>
+              <div class="formula-chain">
+                Throughput + latency <span>→</span> jobs in flight <span>→</span> worker slots
+              </div>
+            </details>
           </details>
 
           <details class="panel">
             <summary>Static proxy pool</summary>
+            <p class="section-purpose">
+              Describe the capacity of each static proxy so the model can size the pool against its
+              tightest limit.
+            </p>
             <div class="field-grid details-body">
               <label
                 >Configured pool size<input id="proxy-pool-size" type="number" min="0" step="1"
@@ -238,10 +292,28 @@
                 >Safety margin (fraction)<input id="safety-margin" type="number" min="0" step="any"
               /></label>
             </div>
+            <details class="explanation nested">
+              <summary>How static proxy sizing works</summary>
+              <p>
+                The model independently checks job concurrency, HTTP requests/minute, and monthly
+                bandwidth. Whichever needs the most proxies is the binding constraint.
+              </p>
+              <div class="formula-chain">
+                Raw requirement × (1 + safety margin) <span>→</span> round up to recommended proxies
+              </div>
+              <p>
+                Probation is a cautious starting capacity. Earned concurrency is what warm proxies
+                have actually sustained; neither is a rotating-residential proxy assumption.
+              </p>
+            </details>
           </details>
 
           <details class="panel">
             <summary>Cost and growth</summary>
+            <p class="section-purpose">
+              Add explicit vendor prices and project how compound submission growth changes the
+              operating plan.
+            </p>
             <div class="field-grid details-body">
               <label
                 >Price/bandwidth unit<input
@@ -287,6 +359,14 @@
                 >Growth months<input id="growth-months" type="number" min="1" step="1"
               /></label>
             </div>
+            <details class="explanation nested">
+              <summary>Unknown prices stay unknown</summary>
+              <p>
+                Blank pricing inputs mean the cost cannot be established; numeric zero means that
+                charge is explicitly free. Growth begins from today in month 1, then compounds
+                submissions and every downstream demand from month 2.
+              </p>
+            </details>
           </details>
         </form>
       </aside>
@@ -294,64 +374,283 @@
       <div class="min-w-0 space-y-6">
         <section id="validation-results" class="validation-panel hidden"></section>
 
+        <section class="panel planning-summary">
+          <p class="eyebrow">Start here</p>
+          <h2>Planning snapshot</h2>
+          <p class="section-purpose">
+            The six decision metrics most operators need first. Use the sections below to inspect
+            how the model reached them and which inputs still need validation.
+          </p>
+          <div id="planning-summary-results" class="result-grid planning-grid"></div>
+          <div class="relationship-map" aria-label="Calculation relationships">
+            <div>
+              <span>Submissions/day</span><b>→</b><span>polling lifecycle</span><b>→</b
+              ><span>logical jobs</span><b>→</b><span>HTTP attempts</span><b>→</b
+              ><span>bandwidth</span><b>→</b><span>cost</span>
+            </div>
+            <div>
+              <span>Throughput + latency</span><b>→</b><span>in-flight concurrency</span><b>→</b
+              ><span>workers</span><b>→</b><span>static proxy capacity</span>
+            </div>
+          </div>
+        </section>
+
         <section class="panel result-section">
           <h2>Workload</h2>
+          <p class="section-purpose">
+            Estimate how many active URLs and logical scrape jobs the submission volume and polling
+            policy create.
+          </p>
           <div id="overview-results" class="result-grid"></div>
           <div id="workload-chart" class="chart"></div>
+          <details class="explanation">
+            <summary>Submission → polling schedule → logical jobs</summary>
+            <p>
+              A submission is one URL entering the model. It is active while it remains in any
+              lifecycle stage, but it is polled only in stages with an interval. Every scheduled
+              poll of one URL creates one logical job.
+            </p>
+            <p>
+              Jobs/day exceeds submissions/day because the same submission is scraped repeatedly as
+              it ages. The launch workload ramps until every polling age cohort is populated.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Reliability</h2>
+          <p class="section-purpose">
+            See how first-attempt failures, permanent outcomes, and retries change eventual success
+            and operational load.
+          </p>
           <div id="reliability-results" class="result-grid"></div>
+          <details class="explanation">
+            <summary>Why eventual success can hide retry traffic</summary>
+            <p>
+              “Eventual job success” counts a job as successful if any allowed attempt succeeds.
+              Attempt amplification counts all expected attempts, including failures before that
+              success. Those extra attempts increase HTTP traffic, bandwidth, and possibly cost.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Logical jobs and HTTP traffic</h2>
+          <p class="section-purpose">
+            Translate scheduled URL scrapes into the outbound requests that platform and proxy
+            limits actually see.
+          </p>
+          <div class="concept-callout">
+            <strong>Keep these units separate:</strong> 1 logical job is one scheduled scrape of one
+            URL. That job can issue multiple HTTP requests, and a retry repeats the job’s HTTP
+            fan-out.
+          </div>
           <div id="traffic-results" class="result-grid"></div>
           <div id="traffic-chart" class="chart"></div>
+          <details class="explanation">
+            <summary>Example: one job is not one request</summary>
+            <div class="formula-chain">
+              1 TikTok logical job × 2 HTTP requests/job <span>→</span> 2 baseline HTTP requests
+            </div>
+            <p>
+              Retry-adjusted traffic then multiplies baseline requests by attempt amplification.
+              Logical jobs remain separate so retry traffic never looks like additional scheduled
+              work.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Bandwidth</h2>
-          <p class="help">
-            GB is decimal (1,000,000,000 bytes). Monthly figures are 30-day steady-state run rates;
-            horizon totals follow the selected simulation.
+          <p class="section-purpose">
+            Estimate transferred bytes for proxy-plan selection and the variable portion of monthly
+            operating cost.
           </p>
+          <div class="formula-chain compact">
+            HTTP requests × bytes/request <span>→</span> bandwidth
+          </div>
           <div id="bandwidth-results" class="result-grid"></div>
           <div id="bandwidth-chart" class="chart"></div>
+          <details class="explanation">
+            <summary>Baseline, retries, month, and horizon</summary>
+            <p>
+              Before-retry bandwidth shows the approved workload baseline. Retry-adjusted bandwidth
+              reflects expected actual traffic and drives capacity and cost. GB here is decimal:
+              1,000,000,000 bytes.
+            </p>
+            <p>
+              Monthly values are 30 days at steady-state run rate. Horizon values total the selected
+              launch simulation, including its ramp, so the two answer different planning questions.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Concurrency and peak</h2>
+          <p class="section-purpose">
+            Estimate how many jobs and HTTP requests remain in flight at normal and peak throughput.
+          </p>
           <div id="concurrency-results" class="result-grid"></div>
           <div id="concurrency-chart" class="chart"></div>
+          <details class="explanation">
+            <summary>The Little’s Law intuition</summary>
+            <p>
+              At a fixed jobs/minute rate, higher latency means each job occupies a slot longer, so
+              more jobs overlap. Average sizing uses mean latency; peak sizing uses P95 latency and
+              the explicit peak override when present, otherwise the multiplier.
+            </p>
+            <p>
+              Job and HTTP concurrency are calculated independently because a whole job can contain
+              multiple requests and the two latency measurements are not interchangeable.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Workers</h2>
+          <p class="section-purpose">
+            Compare modeled demand with aggregate process-local job slots, admission throughput, and
+            HTTP egress capacity.
+          </p>
           <div id="worker-results" class="result-grid"></div>
+          <details class="explanation">
+            <summary>Why worker recommendations can disagree</summary>
+            <p>
+              Each constraint asks a different question: can workers hold enough simultaneous jobs,
+              admit enough logical jobs/minute, and emit enough retry-adjusted HTTP requests/minute?
+              The recommendation uses the largest computable worker requirement.
+            </p>
+            <p>
+              A sufficient throughput target does not guarantee sufficient concurrency. Slow jobs
+              can require more worker slots even when the jobs/minute ceiling looks adequate.
+            </p>
+            <p>
+              Model boundary: the worker recommendation uses steady-state average concurrency and
+              steady request rates. Peak jobs in flight are reported in the preceding section for a
+              separate burst-capacity decision; they are not folded into this recommendation.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Static proxies</h2>
+          <p class="section-purpose">
+            Size the configured static pool against its most demanding per-proxy constraint and an
+            operational safety margin.
+          </p>
           <div id="proxy-results" class="result-grid"></div>
           <div id="proxy-chart" class="chart"></div>
+          <details class="explanation">
+            <summary>Why theoretical and recommended counts differ</summary>
+            <p>
+              The binding constraint is whichever of job concurrency, HTTP RPM, or monthly bandwidth
+              needs the most proxies. The theoretical count rounds that raw demand up to a whole
+              proxy. The recommended count first adds safety margin, then rounds up.
+            </p>
+            <div class="formula-chain">
+              3.72 raw proxies <span>→</span> 4 theoretical <span>→</span> 5 recommended with 20%
+              margin
+            </div>
+            <p>
+              The recommendation depends on modeled workload and supplied or measured proxy limits;
+              it is not an unconditional guarantee of provider behavior.
+            </p>
+            <p>
+              Model boundary: proxy sizing uses steady-state average job concurrency. The configured
+              maximum concurrency/proxy sizes the pool; measured earned concurrency is diagnostic
+              and can raise a finding, but does not replace that limit. A blank RPM or bandwidth
+              limit may mean either “not applicable” or “not measured,” so check its provenance.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Monthly cost</h2>
+          <p class="section-purpose">
+            Combine billable bandwidth, recommended static proxies, and any fixed pool commitment
+            into a 30-day steady-state estimate.
+          </p>
           <div id="cost-results" class="result-grid"></div>
+          <details class="explanation">
+            <summary>Why cost may be unavailable</summary>
+            <p>
+              The calculator never invents vendor prices. A blank price is unknown and leaves its
+              dependent cost unavailable; numeric zero explicitly means that component is free.
+              Whether failed attempts are billed changes billable bandwidth, not the actual traffic
+              shown elsewhere.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Growth</h2>
-          <p class="help">Month 1 is the current baseline; growth compounds from month 2 onward.</p>
+          <p class="section-purpose">
+            Project how compound submission growth propagates into jobs, bandwidth, static proxies,
+            and monthly cost.
+          </p>
           <div id="growth-results"></div>
           <div id="growth-chart" class="chart"></div>
+          <details class="explanation">
+            <summary>What the growth projection holds constant</summary>
+            <p>
+              Month 1 is the current baseline. From month 2, submissions compound at the selected
+              rate while lifecycle, reliability, fan-out, latency, proxy limits, safety margin, and
+              prices remain unchanged. This is a planning scenario, not a forecast trained on
+              historical growth.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Daily timeline</h2>
+          <p class="section-purpose">
+            See how scraper demand evolves after launch as daily submission cohorts fill the polling
+            lifecycle.
+          </p>
           <div id="timeline-results"></div>
+          <details class="explanation">
+            <summary>Ramp, steady polling, and dormant submissions</summary>
+            <p>
+              This table is a forward simulation, not production history. During ramp, newer and
+              older age cohorts are still accumulating. Polling reaches steady state once every
+              polling age is populated. Active submissions may keep growing afterward when dormant
+              retention stages remain.
+            </p>
+          </details>
         </section>
         <section class="panel result-section">
           <h2>Findings</h2>
+          <p class="section-purpose">
+            Review notable model conditions, why they affect the plan, and the next input or
+            capacity decision to consider.
+          </p>
           <div id="findings-results" class="space-y-2"></div>
         </section>
         <section class="panel result-section">
           <h2>Input provenance</h2>
+          <p class="section-purpose">
+            Check the confidence and source behind defaults before treating the plan as production
+            evidence. These badges describe origin, not severity.
+          </p>
+          <div class="provenance-legend" aria-label="Provenance badge meanings">
+            <div>
+              <span class="provenance-badge measured">measured</span>
+              <p>Observed from actual scraper runs.</p>
+            </div>
+            <div>
+              <span class="provenance-badge config">config</span>
+              <p>Explicitly chosen system setting.</p>
+            </div>
+            <div>
+              <span class="provenance-badge assumption">assumption</span>
+              <p>Planning value not yet validated.</p>
+            </div>
+            <div>
+              <span class="provenance-badge unset">unset</span>
+              <p>No value; dependent results may be unavailable.</p>
+            </div>
+          </div>
           <div id="provenance-results" class="provenance-grid"></div>
+          <details class="explanation">
+            <summary>How to use provenance during planning</summary>
+            <p>
+              Validate high-impact assumptions first: request fan-out and payload drive traffic and
+              bandwidth; latency drives concurrency; per-proxy limits drive pool size; prices drive
+              cost. Unset values are deliberately visible rather than replaced with synthetic
+              zeroes.
+            </p>
+          </details>
         </section>
       </div>
     </main>

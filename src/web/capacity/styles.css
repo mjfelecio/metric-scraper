@@ -41,6 +41,10 @@
     @apply mt-2 text-xs leading-relaxed text-slate-500;
   }
 
+  .section-purpose {
+    @apply mt-2 max-w-3xl text-sm leading-relaxed text-slate-400;
+  }
+
   .section-heading {
     @apply flex items-center justify-between gap-3;
   }
@@ -72,11 +76,15 @@
   }
 
   .result-card {
-    @apply rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-3;
+    @apply rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-3 transition;
   }
 
-  .result-card > span {
-    @apply block text-[11px] font-medium uppercase tracking-wider text-slate-500;
+  .result-card.primary {
+    @apply border-sky-500/30 bg-sky-500/[0.07];
+  }
+
+  .result-card > .result-label {
+    @apply flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-slate-500;
   }
 
   .result-card > strong {
@@ -84,7 +92,7 @@
   }
 
   .unavailable {
-    @apply font-sans text-sm italic text-amber-300;
+    @apply relative inline-block cursor-help font-sans text-sm italic text-amber-300 outline-none;
   }
 
   .finding {
@@ -97,6 +105,14 @@
 
   .finding p {
     @apply mt-0.5 text-xs opacity-80;
+  }
+
+  .finding b {
+    @apply font-semibold;
+  }
+
+  .finding .finding-action {
+    @apply mt-1.5 opacity-100;
   }
 
   .finding.warning {
@@ -113,6 +129,19 @@
 
   .provenance-row {
     @apply flex items-center justify-between gap-3 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs;
+  }
+
+  .provenance-row strong,
+  .provenance-row code {
+    @apply block;
+  }
+
+  .provenance-row strong {
+    @apply font-medium text-slate-300;
+  }
+
+  .provenance-row code {
+    @apply mt-0.5 text-[10px] text-slate-600;
   }
 
   .provenance-badge {
@@ -150,6 +179,38 @@
   td {
     @apply border-b border-slate-800 px-3 py-2 font-mono text-slate-300;
   }
+
+  .explanation {
+    @apply mt-4 rounded-lg border border-slate-800 bg-slate-950/35 px-3 py-2.5;
+  }
+
+  .explanation > summary {
+    @apply cursor-pointer text-xs font-semibold normal-case tracking-normal text-sky-300;
+  }
+
+  .explanation[open] > summary {
+    @apply mb-2;
+  }
+
+  .explanation p {
+    @apply mt-2 max-w-4xl text-xs leading-relaxed text-slate-400;
+  }
+
+  .explanation.nested {
+    @apply col-span-2;
+  }
+
+  .formula-chain {
+    @apply mt-3 flex flex-wrap items-center gap-2 rounded-md border border-slate-800 bg-slate-950/70 px-3 py-2 font-mono text-xs text-slate-300;
+  }
+
+  .formula-chain span {
+    @apply text-sky-400;
+  }
+
+  .formula-chain.compact {
+    @apply max-w-xl;
+  }
 }
 
 .eyebrow {
@@ -158,6 +219,79 @@
 
 .dashboard-link {
   @apply rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 transition hover:border-sky-500 hover:text-sky-300;
+}
+
+.planning-summary {
+  @apply border-sky-500/25 bg-gradient-to-br from-sky-500/[0.08] to-slate-900/55;
+}
+
+.planning-summary .eyebrow {
+  margin-bottom: 0.25rem;
+}
+
+.planning-grid {
+  @apply lg:grid-cols-3;
+}
+
+.relationship-map {
+  @apply mt-4 space-y-2 rounded-lg border border-slate-800 bg-slate-950/45 p-3;
+}
+
+.relationship-map > div {
+  @apply flex flex-wrap items-center gap-2 text-xs text-slate-400;
+}
+
+.relationship-map span {
+  @apply rounded bg-slate-800/70 px-2 py-1;
+}
+
+.relationship-map b {
+  @apply font-normal text-sky-400;
+}
+
+.concept-callout {
+  @apply mt-3 rounded-lg border border-sky-500/20 bg-sky-500/[0.06] px-3 py-2.5 text-xs leading-relaxed text-slate-300;
+}
+
+.info-tip {
+  @apply relative inline-flex h-4 w-4 shrink-0 cursor-help items-center justify-center rounded-full border border-slate-600 font-sans text-[10px] font-bold normal-case tracking-normal text-slate-400 outline-none transition hover:border-sky-400 hover:text-sky-300 focus:border-sky-400 focus:text-sky-300;
+}
+
+.input-info-tip {
+  @apply ml-1 align-middle;
+}
+
+.info-popover {
+  @apply invisible absolute left-1/2 top-[calc(100%+0.45rem)] z-30 w-72 -translate-x-1/2 rounded-lg border border-slate-700 bg-slate-900 p-3 text-left font-sans text-xs font-normal normal-case leading-relaxed tracking-normal text-slate-200 opacity-0 shadow-xl shadow-black/40 transition;
+  pointer-events: none;
+}
+
+.info-tip:hover .info-popover,
+.info-tip:focus .info-popover,
+.info-tip:focus-within .info-popover,
+.unavailable:hover .info-popover,
+.unavailable:focus .info-popover {
+  @apply visible opacity-100;
+}
+
+.unavailable-popover {
+  @apply not-italic;
+}
+
+.input-provenance {
+  @apply mt-2 flex flex-wrap items-center gap-2 border-t border-slate-700 pt-2 text-[10px] uppercase tracking-wide text-slate-500;
+}
+
+.provenance-legend {
+  @apply mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4;
+}
+
+.provenance-legend > div {
+  @apply rounded-lg border border-slate-800 bg-slate-950/45 p-3;
+}
+
+.provenance-legend p {
+  @apply mt-2 text-xs leading-relaxed text-slate-500;
 }
 
 .details-body {
